@@ -1,7 +1,7 @@
 # Phase 0 feasibility and dependency proposal
 
-- Status: Partially approved; GPL-3.0 feasibility use accepted, remaining
-  implementation approvals required
+- Status: Partially approved; foundation/dependencies and GPL-3.0 feasibility
+  use accepted, remaining implementation approvals required
 - Evidence checked: 2026-08-22
 - Scope: Phase 1 foundation spikes only
 
@@ -404,7 +404,8 @@ or application features.
 Phase 1 begins only after all four items have been explicitly accepted. Current
 approval state:
 
-1. **Pending:** the pinned foundation and direct dependencies above;
+1. **Approved 2026-08-22:** the pinned foundation and direct dependencies
+   above;
 2. **Approved 2026-08-22:** the local, non-distributed GPL-3.0 Slint
    feasibility use and the later distribution-license stop;
 3. **Pending:** the bounded `zephyr-lang-rust` patch policy;
