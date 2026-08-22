@@ -172,7 +172,7 @@ def record_schema_safe(value: dict[str, object]) -> bool:
         return value.get("status") in {"complete", "partial", "dropped"} and value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("reason_code"), str) and (value.get("reason") is None or isinstance(value.get("reason"), str))
     if record_type == "result_published":
         return value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("run_id"), str)
-    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b"} and value.get("mode") == "default"):
+    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b", "1c"} and value.get("mode") == "default"):
         return False
     target = value.get("target")
     if target is not None and not (isinstance(target, str) or isinstance(target, list) and all(isinstance(item, str) for item in target)):
@@ -190,7 +190,7 @@ def record_schema_safe(value: dict[str, object]) -> bool:
 
 def diagnostic_records_safe(records: list[dict[str, object]], run_id: str) -> bool:
     resources = [record for record in records if record.get("type") == "resource"]
-    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b"} or resources[0].get("mode") != "default":
+    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b", "1c"} or resources[0].get("mode") != "default":
         return False
     if records[0].get("type") != "resource" or not all(record_schema_safe(record) and ("run_id" not in record or record.get("run_id") == run_id) for record in records):
         return False

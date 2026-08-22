@@ -1,0 +1,4 @@
+# Gate 1C extends the approved Gate 1A host requirements with the pinned
+# hal_espressif module's build and flash requirement.
+-r gate1a.in
+esptool>=5.2.0

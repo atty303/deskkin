@@ -1,0 +1,36 @@
+From: Deskkin Gate 1C <noreply@example.invalid>
+Subject: [PATCH] cmake: build Rust core and alloc for Xtensa
+
+The pinned ESP Rust Tier 3 toolchain does not ship precompiled target
+libraries. Limit source-built libraries to core and alloc and only enable the
+argument for the Gate 1C target.
+---
+ CMakeLists.txt | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 49615d5..9b3071d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -82,6 +82,11 @@ function(rust_cargo_application)
+   _rust_map_target()
+   message(STATUS "Building Rust llvm target ${RUST_TARGET}")
+ 
++  set(rust_build_std_arg "")
++  if(RUST_TARGET STREQUAL "xtensa-esp32s3-none-elf")
++    set(rust_build_std_arg "-Zbuild-std=core,alloc")
++  endif()
++
+   # TODO: Make sure RUSTFLAGS is not set.
+ 
+   if(CONFIG_DEBUG)
+@@ -175,6 +180,7 @@ ${config_paths}
+       BINARY_DIR_INCLUDE_GENERATED="${BINARY_DIR_INCLUDE_GENERATED}"
+       cargo build
+       ${rust_build_type_arg}
++      ${rust_build_std_arg}
+ 
+       # Override the features according to the shield given. For a general case,
+       # this will need to come from a variable or argument.
+-- 
+2.50.1

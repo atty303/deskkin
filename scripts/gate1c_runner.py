@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""Bounded Gate 1C ESP32-S3/Xtensa Zephyr Rust feasibility runner."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+import gate_runner as common
+
+TARGET = "m5stack_cores3/esp32s3/procpu"
+PATCH_DIFF_SHA256 = "3a16ecd15058a4ceb80245fcc0ba5ef89087183b428f718c8ce8890e5559f186"
+RUSTC_COMMIT = "95e5bda868c960c607597bc03ed9e8f0ad26226d"
+TOOL_DIGESTS = {
+    "rustc": "fb6469add601520c44d68115ad4ff137985b1ff320e001a471ef35d786df51fd",
+    "cargo": "f9f150db83d4b06a9da0a0dd1c1736048efba7edc5ada70c1b7972efe2539983",
+    "libclang": "12e2f4e8e3fb62ce00e0cba30ddd9cef84935a899f040beb0c0a226940d73d8b",
+    "xtensa_gcc": "6c37a821e8f20d8d53c536460e5c2f292f22d923ae29655bc9c054278e352a84",
+}
+WEST_REVISIONS = {
+    **common.WEST_REVISIONS,
+    "hal_espressif": "19f979cfe66bcab09abe3b0b3aa419a664c1606c",
+    "hal_xtensa": "0495a1afd300b644d3ec8dd2c3bd11007e69a892",
+}
+PATCHES = tuple(f"patches/gate1c-zephyr-lang-rust/{name}" for name in (
+    "0001-map-esp32s3-xtensa-target.patch",
+    "0002-enable-esp32s3-xtensa-kconfig.patch",
+    "0003-build-xtensa-core-from-source.patch",
+    "0004-recognize-esp32-flash-controller.patch",
+    "0005-use-fixed-width-kconfig-integers.patch",
+))
+INPUTS = (
+    "west.yml", "mise.toml", "mise.lock", "requirements/gate1c.in",
+    "requirements/gate1c.lock", "scripts/bootstrap_gate1c.sh",
+    "scripts/gate1c_runner.py", "gates/gate1c/CMakeLists.txt",
+    "gates/gate1c/Cargo.toml", "gates/gate1c/Cargo.lock",
+    "gates/gate1c/Kconfig", "gates/gate1c/prj.conf",
+    "gates/gate1c/panic.conf", "gates/gate1c/src/abi.c",
+    "gates/gate1c/src/lib.rs", *PATCHES,
+)
+
+
+def acquire_lock(state: Path, run_id: str):
+    locks = state / "locks"
+    common.private_directory(locks)
+    directory_fd = os.open(locks, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        file_fd = os.open("1c.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    stream = os.fdopen(file_fd, "r+", encoding="utf-8")
+    try:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise OSError("lock is not a regular file")
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        stream.seek(0)
+        try:
+            owner = str(json.load(stream).get("run_id", "unknown"))
+        except (json.JSONDecodeError, AttributeError, UnicodeError):
+            owner = "unknown"
+        stream.close()
+        raise common.GateInconclusive(f"gate_locked owner={owner}") from None
+    except OSError as error:
+        stream.close()
+        raise common.GateInconclusive("lock_unavailable") from error
+    stream.seek(0)
+    stream.truncate()
+    json.dump({"gate": "1c", "run_id": run_id, "pid": os.getpid(), "started_at": common.utc_now()}, stream, sort_keys=True)
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+    return stream
+
+
+class Runner(common.Runner):
+    def __init__(self, root: Path, recording: bool, run_id: str):
+        super().__init__(root, recording, run_id, deadline_seconds=1200)
+        self.verified_resources.update({"gate": "1c", "target": [TARGET]})
+        self.builds = 0
+        self.rebuilds = 0
+        self.panic_builds = 0
+        self.linker_checks = 0
+        self.abi_symbols = 0
+        self.builtins_checks = 0
+
+    def _environment(self) -> dict[str, str]:
+        toolchain = self.state / "rustup/toolchains/deskkin-esp"
+        clang = toolchain / "xtensa-esp32-elf-clang/esp-20.1.1_20250829/esp-clang"
+        cmake = Path(subprocess.run(["mise", "where", "cmake"], check=True, capture_output=True, text=True).stdout.strip()) / "bin"
+        ninja = Path(subprocess.run(["mise", "where", "ninja"], check=True, capture_output=True, text=True).stdout.strip())
+        env = os.environ.copy()
+        env.update({
+            "PATH": os.pathsep.join((str(toolchain / "bin"), str(cmake), str(ninja), str(self.state / "venv/bin"), env["PATH"])),
+            "LIBCLANG_PATH": str(clang / "lib"),
+            "ZEPHYR_SDK_INSTALL_DIR": str(self.state / "sdk"),
+            "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+            "ZEPHYR_BASE": str(self.state / "west/zephyr"),
+            "SOURCE_DATE_EPOCH": "0",
+        })
+        return env
+
+    def prepare(self) -> None:
+        start = time.monotonic()
+        try:
+            self.env = self._environment()
+            west = self.state / "venv/bin/west"
+            actual: dict[str, str] = {}
+            for name, expected in WEST_REVISIONS.items():
+                path = Path(self.command("prepare", [str(west), "list", name, "-f", "{abspath}"], "host").strip())
+                self.west_paths[name] = path
+                revision = self.command("prepare", ["git", "-C", str(path), "rev-parse", "HEAD"], "host").strip()
+                if revision != expected:
+                    raise common.GateInconclusive(f"west_project_mismatch_{name.replace('-', '_')}")
+                actual[name] = revision
+            module = self.west_paths["zephyr-lang-rust"]
+            for patch in PATCHES:
+                check = subprocess.run(["git", "-C", str(module), "apply", "--reverse", "--check", str(self.root / patch)], capture_output=True)
+                if check.returncode != 0:
+                    raise common.GateInconclusive("patch_series_mismatch")
+            status = self.command("prepare", ["git", "-C", str(module), "status", "--porcelain"], "host").splitlines()
+            if status != [" M CMakeLists.txt", " M Kconfig", " M dt-rust.yaml", " M zephyr-build/src/lib.rs"]:
+                raise common.GateInconclusive("patched_tree_mismatch")
+            patch_diff = subprocess.run(["git", "-C", str(module), "diff", "--binary", "HEAD"], check=True, capture_output=True).stdout
+            if hashlib.sha256(patch_diff).hexdigest() != PATCH_DIFF_SHA256:
+                raise common.GateInconclusive("patched_tree_mismatch")
+            probes = {
+                "rust": self.command("prepare", ["rustc", "-vV"], "host").splitlines()[0],
+                "gcc": self.command("prepare", [str(self.state / "sdk/gnu/xtensa-espressif_esp32s3_zephyr-elf/bin/xtensa-espressif_esp32s3_zephyr-elf-gcc"), "--version"], "host").splitlines()[0],
+                "cmake": self.command("prepare", ["cmake", "--version"], "host").splitlines()[0],
+                "ninja": self.command("prepare", ["ninja", "--version"], "host").strip(),
+                "python": self.command("prepare", [str(self.state / "venv/bin/python"), "--version"], "host").strip(),
+            }
+            expected = {"rust": "1.95.0", "gcc": "14.3.0", "cmake": "3.28.6", "ninja": "1.13.2", "python": "3.12"}
+            if any(fragment not in probes[name] for name, fragment in expected.items()):
+                raise common.GateInconclusive("host_tool_mismatch")
+            verbose_rust = self.command("prepare", ["rustc", "-vV"], "host")
+            if f"commit-hash: {RUSTC_COMMIT}" not in verbose_rust:
+                raise common.GateInconclusive("rust_toolchain_mismatch")
+            tool_paths = self._tool_paths()
+            if any(common.sha256(tool_paths[name]) != digest for name, digest in TOOL_DIGESTS.items()):
+                raise common.GateInconclusive("tool_digest_mismatch")
+            revision = self.command("prepare", ["git", "-C", str(self.root), "rev-parse", "HEAD"], "host").strip()
+            self.verified_resources.update({
+                "application_version": "gate1c-0.1.0", "build_type": "dev",
+                "deskkin_revision": revision,
+                "deskkin_dirty": bool(self.command("prepare", ["git", "-C", str(self.root), "status", "--porcelain"], "host").strip()),
+                "west_revisions": actual, "sdk_file_digests": dict(TOOL_DIGESTS), "sdk_version": "1.0.1",
+                "tool_identities": probes,
+                "input_digests": {name: common.sha256(self.root / name) for name in INPUTS},
+            })
+            self.recorder._append({"schema_version": 1, "type": "resource_verified", **self.verified_resources})
+            self.recorder.event("prepare", "success", round((time.monotonic() - start) * 1000))
+        except common.GateFailure:
+            self.recorder.event("prepare", "error", round((time.monotonic() - start) * 1000), "provenance_mismatch")
+            raise
+        except (OSError, subprocess.SubprocessError, KeyError) as error:
+            self.recorder.event("prepare", "error", round((time.monotonic() - start) * 1000), "setup_probe_failed")
+            raise common.GateInconclusive("setup_probe_failed") from error
+
+    def verify_inputs(self) -> None:
+        if any(common.sha256(self.root / name) != digest for name, digest in self.verified_resources["input_digests"].items()):
+            raise common.GateInconclusive("input_changed")
+        module = self.west_paths["zephyr-lang-rust"]
+        patch_diff = subprocess.run(["git", "-C", str(module), "diff", "--binary", "HEAD"], check=True, capture_output=True).stdout
+        if hashlib.sha256(patch_diff).hexdigest() != PATCH_DIFF_SHA256:
+            raise common.GateInconclusive("input_changed")
+        for name, expected in WEST_REVISIONS.items():
+            path = self.west_paths[name]
+            if self.command("prepare", ["git", "-C", str(path), "rev-parse", "HEAD"], "host").strip() != expected:
+                raise common.GateInconclusive("input_changed")
+            if name != "zephyr-lang-rust" and self.command("prepare", ["git", "-C", str(path), "status", "--porcelain"], "host").strip():
+                raise common.GateInconclusive("input_changed")
+        if any(common.sha256(self._tool_paths()[name]) != digest for name, digest in TOOL_DIGESTS.items()):
+            raise common.GateInconclusive("input_changed")
+
+    def _tool_paths(self) -> dict[str, Path]:
+        toolchain = self.state / "rustup/toolchains/deskkin-esp"
+        return {
+            "rustc": toolchain / "bin/rustc",
+            "cargo": toolchain / "bin/cargo",
+            "libclang": toolchain / "xtensa-esp32-elf-clang/esp-20.1.1_20250829/esp-clang/lib/libclang.so.20.1.1",
+            "xtensa_gcc": self.state / "sdk/gnu/xtensa-espressif_esp32s3_zephyr-elf/bin/xtensa-espressif_esp32s3_zephyr-elf-gcc",
+        }
+
+    def configure(self, build: Path, panic: bool = False) -> None:
+        command = [str(self.state / "venv/bin/west"), "build", "--cmake-only", "--board", TARGET, "--build-dir", str(build), str(self.root / "gates/gate1c")]
+        if panic:
+            command += ["--", "-DEXTRA_CONF_FILE=panic.conf"]
+        self.command("configure", command, TARGET)
+
+    def build_image(self, build: Path) -> str:
+        self.command("rust-compile", ["cmake", "--build", str(build), "--target", "librustapp"], TARGET)
+        self.command("c-compile", ["cmake", "--build", str(build), "--target", "zephyr_pre0"], TARGET)
+        self.command("link", ["cmake", "--build", str(build), "--target", "zephyr_final"], TARGET)
+        elf = build / "zephyr/zephyr.elf"
+        digest = common.sha256(elf)
+        self.links.append({"target": TARGET, "mode": build.name, "sha256": digest, "bytes": elf.stat().st_size})
+        self.verify_linker(elf, build / "zephyr/zephyr.map")
+        return digest
+
+    def verify_linker(self, elf: Path, linker_map: Path) -> None:
+        prefix = self.state / "sdk/gnu/xtensa-espressif_esp32s3_zephyr-elf/bin/xtensa-espressif_esp32s3_zephyr-elf-"
+        header = self.command("probe", [f"{prefix}readelf", "-h", str(elf)], TARGET)
+        sections = self.command("probe", [f"{prefix}readelf", "-S", str(elf)], TARGET)
+        symbols = self.command("probe", [f"{prefix}nm", "-g", "--defined-only", str(elf)], TARGET)
+        required = ("deskkin_c_multiply", "deskkin_c_to_rust_check", "deskkin_rust_add", "rust_main")
+        if "Class:                             ELF32" not in header or "Machine:                           Tensilica Xtensa Processor" not in header:
+            raise common.GateFailure("target_attributes_failed")
+        if not all(re.search(rf"\b{re.escape(name)}$", symbols, re.MULTILINE) for name in required):
+            raise common.GateFailure("abi_symbols_missing")
+        if len(re.findall(r"\b__muldi3$", symbols, re.MULTILINE)) != 1:
+            raise common.GateFailure("compiler_builtins_ownership_failed")
+        if not linker_map.is_file() or not all(re.search(rf"\]\s+{re.escape(name)}\s+", sections) for name in (".text", ".dram0.data", ".dram0.bss")):
+            raise common.GateFailure("memory_placement_failed")
+        self.linker_checks = self.abi_symbols = self.builtins_checks = 1
+
+    def execute(self) -> None:
+        root = self.state / "build/gate1c" / self.run_id
+        normal = root / "normal"
+        self.configure(normal)
+        first = self.build_image(normal)
+        self.builds = 1
+        self.verify_inputs()
+        shutil.rmtree(normal)
+        self.configure(normal)
+        second = self.build_image(normal)
+        if first != second:
+            raise common.GateFailure("clean_rebuild_digest_mismatch")
+        self.rebuilds = 1
+        panic = root / "panic"
+        self.configure(panic, panic=True)
+        self.build_image(panic)
+        self.panic_builds = 1
+        self.verify_inputs()
+        raise common.GateInconclusive("physical_device_required")
+
+    def run(self) -> tuple[int, dict[str, object]]:
+        result, reason, code = "pass", "all_criteria_passed", 0
+        try:
+            self.prepare()
+            self.execute()
+        except common.GateCancelled:
+            result, reason, code = "inconclusive", "cancelled", 130
+        except common.GateTimeout:
+            result, reason, code = "inconclusive", "deadline_exceeded", 124
+        except common.GateInconclusive as error:
+            result, reason, code = "inconclusive", error.reason, 2
+        except common.GateFailure as error:
+            result, reason, code = "fail", error.reason, 1
+        except (OSError, subprocess.SubprocessError) as error:
+            result, reason, code = "inconclusive", f"setup_{type(error).__name__.lower()}", 2
+        if self.cleanup_status != "success" and code not in (124, 130):
+            result, reason, code = "inconclusive", "cleanup_failed", 2
+        values = (("xtensa_builds", self.builds), ("clean_rebuilds", self.rebuilds), ("panic_builds", self.panic_builds), ("linker_checks", self.linker_checks), ("abi_symbols", self.abi_symbols), ("compiler_builtins_checks", self.builtins_checks), ("physical_boots", 0), ("c_abi_runtime_checks", 0), ("atomic_runtime_checks", 0), ("allocator_runtime_checks", 0), ("idle_checks", 0), ("deliberate_panics", 0))
+        return code, {"schema_version": 1, "gate": "1c", "mode": "default", "run_id": self.run_id, "result": result, "reason_code": reason, "cleanup_status": self.cleanup_status, "device_state": "unchanged", "criteria": [{"name": name, "value": value, "unit": "count", "threshold": 1, "passed": value == 1} for name, value in values], "started_at": self.started, "ended_at": common.utc_now()}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--recording", choices=("on", "off"), default="on")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    run_id = str(uuid.uuid4())
+    print(run_id, flush=True)
+    try:
+        common.prepare_control_state(root, "1c")
+        runner = Runner(root, args.recording == "on", run_id)
+        lock = acquire_lock(runner.state, run_id)
+    except (OSError, common.GateInconclusive) as error:
+        print(f"Gate 1C could not start: {error}", file=sys.stderr)
+        return 2
+    result_path = runner.state / "results/1c/default/result.json"
+    pending_path = result_path.with_name(".result.pending")
+    signal.signal(signal.SIGINT, lambda _signal, _frame: setattr(runner, "cancelled", True))
+    with lock:
+        if not common.clear_result(pending_path):
+            return 2
+        common.initialize_recording(root, runner.recorder, "1c", [TARGET])
+        code, result = runner.run()
+        if not common.publish_result(pending_path, result):
+            return 2
+        runner.recorder.finalize(runner.resources(), runner.links, result["result"], result["reason_code"])
+        try:
+            pending_path.replace(result_path)
+        except OSError:
+            pending_path.unlink(missing_ok=True)
+            return 2
+    if code == 2:
+        print(f"Gate 1C inconclusive: {result['reason_code']}; run_id={run_id}", file=sys.stderr)
+    print(f"Gate 1C {result['result']} ({result['reason_code']})")
+    print(result_path.relative_to(root))
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

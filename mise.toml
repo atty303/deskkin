@@ -10,6 +10,7 @@ ninja = "1.13.2"
 python = "3.12.14"
 rust = { version = "1.95.0", targets = "thumbv7m-none-eabi,riscv32i-unknown-none-elf" }
 taplo = "0.10.0"
+"cargo:espup" = "0.17.1"
 
 [env]
 HK_MISE = 1
@@ -58,6 +59,14 @@ run = "python scripts/gate_runner.py run"
 [tasks."gate:1b"]
 description = "Run the Slint software-renderer feasibility gate on QEMU and the host"
 run = "python scripts/gate1b_runner.py"
+
+[tasks."gate:1c:bootstrap"]
+description = "Prepare the repository-local Gate 1C Xtensa toolchains and modules"
+run = "./scripts/bootstrap_gate1c.sh"
+
+[tasks."gate:1c"]
+description = "Build and verify the host side of the ESP32-S3/Xtensa Rust feasibility gate"
+run = ".deskkin/venv/bin/python scripts/gate1c_runner.py"
 
 [tasks."diagnostics:list"]
 description = "List bounded local gate diagnostic runs"

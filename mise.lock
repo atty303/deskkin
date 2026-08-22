@@ -558,6 +558,10 @@ url = "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_
 url_api = "https://api.github.com/repos/rhysd/actionlint/releases/assets/384924919"
 provenance = "github-attestations"
 
+[[tools."cargo:espup"]]
+version = "0.17.1"
+backend = "cargo:espup"
+
 [[tools.clang]]
 version = "15.0.7"
 backend = "conda:clang"

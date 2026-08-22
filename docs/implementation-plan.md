@@ -243,6 +243,33 @@ Do not combine CoreS3 display or Slint work into this gate. If an upstream
 change or maintained module patch is required, document its scope and upstream
 strategy before expanding it.
 
+Gate 1C is in progress. Local diagnostic run
+`8bdcbf2d-1041-4dcf-8520-4b321ade1261` established the host-side boundary:
+
+- the pinned ESP Rust 1.95.0.0 compiler built `core` and `alloc` from source for
+  `xtensa-esp32s3-none-elf`;
+- the Rust static library, C ABI shim, Zephyr C objects, Xtensa linker, and
+  ESP32-S3 image generation completed for the existing
+  `m5stack_cores3/esp32s3/procpu` board;
+- a removed normal build directory reproduced ELF digest
+  `520e7b40501a7868745d028f61d029fcb9624f11083bbe3ed460ebe71ea97958`,
+  and a separate deliberate-panic image compiled and linked with digest
+  `c51d4f9b11c4d57ddd34299214627414c316167a27c7d9360dc800a8b6b3b93c`;
+- the pinned Xtensa `readelf` and `nm` confirmed ELF32 Xtensa attributes,
+  required bidirectional ABI symbols, one compiler-builtins owner for
+  `__muldi3`, the linker map, and the expected text/data/BSS placements;
+- the result is intentionally `inconclusive` with reason
+  `physical_device_required`: no serial CoreS3 device was present, so boot,
+  bidirectional C ABI values, atomic/critical-section behavior, idle behavior,
+  and deliberate panic have not yet been observed on hardware.
+
+The retained local patch scope, upstream strategy, and removal conditions are
+recorded in [`gate-1c-patch-series.md`](gate-1c-patch-series.md). Gate 1C must
+not be marked passed, and Gate 1D must not begin, until one physical run records
+all required markers. The current runner intentionally has no flash option;
+the approved preflight, run-bound serial protocol, recovery surface, and
+fail/timeout/cancel cleanup contract must be implemented before enabling it.
+
 ### Gate 1D: CoreS3 Zephyr board and drivers
 
 Start with Zephyr 4.4.1's existing CoreS3 board and independently prove power
