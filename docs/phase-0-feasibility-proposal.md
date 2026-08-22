@@ -1,6 +1,7 @@
 # Phase 0 feasibility and dependency proposal
 
-- Status: Proposed; implementation and dependency approval required
+- Status: Partially approved; GPL-3.0 feasibility use accepted, remaining
+  implementation approvals required
 - Evidence checked: 2026-08-22
 - Scope: Phase 1 foundation spikes only
 
@@ -13,8 +14,8 @@ first failing boundary rather than repairing later layers around it.
 
 This proposal does not authorize a Rust workspace, source code, toolchain
 configuration, dependency installation, board changes, flashing, or release.
-Those changes begin only after the approval items at the end of this document
-are accepted.
+Those changes begin only after all remaining approval items at the end of this
+document are accepted.
 
 The largest uncertainty is narrower than originally expected. Zephyr 4.4.1
 already contains a CoreS3 board definition with ILI9342C display, FT6336U
@@ -377,6 +378,10 @@ distribution model or a commercial Slint embedded license. The repository's
 MIT source license does not by itself resolve the license obligations of a
 combined binary. This is a project decision, not legal advice.
 
+This local, non-distributed GPL-3.0 feasibility use was approved on 2026-08-22.
+The distribution-license stop remains mandatory and was not waived by that
+approval.
+
 The main safety obligations are:
 
 - keep all generated/raw Zephyr bindings and C FFI behind a narrow platform
@@ -396,14 +401,15 @@ listed dependencies, pins, local artifacts, and bounded patch series. It does
 not authorize release, push, remote fork/PR creation, live external services,
 or application features.
 
-The approval must explicitly accept:
+Phase 1 begins only after all four items have been explicitly accepted. Current
+approval state:
 
-1. the pinned foundation and direct dependencies above;
-2. the local, non-distributed GPL-3.0 Slint feasibility use and the later
-   distribution-license stop;
-3. the bounded `zephyr-lang-rust` patch policy;
-4. physical CoreS3 flashing and observation for Gates 1C-1E when those gates
-   are reached.
+1. **Pending:** the pinned foundation and direct dependencies above;
+2. **Approved 2026-08-22:** the local, non-distributed GPL-3.0 Slint
+   feasibility use and the later distribution-license stop;
+3. **Pending:** the bounded `zephyr-lang-rust` patch policy;
+4. **Pending:** physical CoreS3 flashing and observation for Gates 1C-1E when
+   those gates are reached.
 
 ## Primary evidence
 
