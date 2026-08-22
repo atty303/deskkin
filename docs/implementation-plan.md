@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: documentation-only repository scaffold
+Status: Phase 0 proposal prepared; dependency approval pending
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -13,14 +13,20 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: none
 Application dependencies: none
-Next action: prepare the Phase 0 feasibility and dependency proposal; do not
-             add a Rust workspace, toolchain, crate, board, binding, or code
+Next action: review and approve or revise docs/phase-0-feasibility-proposal.md;
+             do not add a Rust workspace, toolchain, crate, board, binding, or
+             code before approval
 ```
 
 This document is the source of truth for resuming development. Accepted
 cross-cutting decisions are immutable ADRs under `docs/decisions/`. Update this
 checkpoint when a phase is completed, but do not duplicate detailed contracts
 from the architecture or ADRs here.
+
+The proposed foundation pins, dependency effects, spike matrix, observation
+contract, patch boundary, and removal criteria are in
+[`phase-0-feasibility-proposal.md`](phase-0-feasibility-proposal.md). It is a
+proposal, not authorization to install or implement its contents.
 
 ## Product goal
 
@@ -97,9 +103,9 @@ References:
 - Safe Rust coverage is not complete for display, input, SPI, I2C, audio,
   networking, storage, and other subsystems needed by Deskkin. Narrow wrappers
   or C shims will be required where the module lacks an accepted API.
-- The module's current platform list includes ESP32-C3 but not the Xtensa
-  ESP32-S3 used by CoreS3. CoreS3 therefore needs a language/toolchain gate in
-  addition to board and driver work.
+- The module's pinned platform list contains QEMU Cortex-M and RISC-V targets
+  but no Xtensa target. CoreS3 therefore needs a language/toolchain gate in
+  addition to board and driver verification.
 - The Embassy integration can host an executor in a Zephyr thread and use a
   Zephyr timer as the Embassy time driver. Async Zephyr driver interfaces remain
   incomplete.
@@ -130,6 +136,11 @@ contains:
 Request approval before changing repository files to add those dependencies.
 Do not propose application feature crates yet; Phase 0 is limited to proving
 the selected foundation.
+
+The current proposal is
+[`phase-0-feasibility-proposal.md`](phase-0-feasibility-proposal.md). Phase 0 is
+complete only when that proposal is approved or revised into an approved
+baseline.
 
 ## Phase 1: prove the foundation in independent vertical spikes
 
@@ -174,10 +185,11 @@ strategy before expanding it.
 
 ### Gate 1D: CoreS3 Zephyr board and drivers
 
-Define the CoreS3 board and independently prove power sequencing, GPIO
-expansion, display, touch, memory, and required buses through Zephyr. Use the
-Slint `esp-hal` board support and M5Stack sources as behavioral references, not
-as application architecture.
+Start with Zephyr 4.4.1's existing CoreS3 board and independently prove power
+sequencing, GPIO expansion, display, touch, memory, and required buses through
+Zephyr. Add or change board support only for an observed missing or incorrect
+boundary. Use the Slint `esp-hal` board support and M5Stack sources as
+behavioral references, not as application architecture.
 
 The display gate must verify partial RGB565 writes at arbitrary supported
 rectangles. Record transfer size and duration. Do not claim smooth dirty
@@ -290,12 +302,12 @@ cross-cutting decision as a new ADR.
 
 Start a future development session with:
 
-> Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs, and
-> `docs/implementation-plan.md`. Confirm that the repository is still at the
-> documentation-only checkpoint. Do not implement yet. Prepare the complete
-> Phase 0 feasibility and dependency proposal, including exact versions,
-> alternatives, maintenance and reproducibility impact, target matrix,
-> pass/fail criteria, planned evidence, and temporary-patch boundaries. Request
-> approval before adding toolchains, dependencies, generated bindings, board
-> files, or code. Record actual pass/fail evidence only when executing the
-> approved Phase 1 gates.
+> Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
+> `docs/implementation-plan.md`, and
+> `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
+> Phase 0 dependency-approval checkpoint and refresh any drift-prone upstream
+> pins or evidence before relying on them. Do not implement yet. Ask for the
+> proposal to be approved or revised. Before approval, do not add toolchains,
+> dependencies, generated bindings, board files, a Rust workspace, or code.
+> Record actual pass/fail evidence only when executing the approved Phase 1
+> gates.

@@ -11,14 +11,15 @@ and home automation.
 
 ## Status
 
-Deskkin is at a documentation-only checkpoint. The repository contains no
-application code or application dependencies. The agreed product boundary,
+Deskkin is at a Phase 0 dependency-approval checkpoint. The repository contains
+no application code or application dependencies. The agreed product boundary,
 architecture, decisions, risks, and phased implementation plan are recorded in
-[`docs/implementation-plan.md`](docs/implementation-plan.md).
+[`docs/implementation-plan.md`](docs/implementation-plan.md), and the bounded
+foundation proposal is in
+[`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).
 
-Do not begin implementation by selecting crates or adding a Rust workspace.
-The next checkpoint is a bounded feasibility and dependency proposal described
-in the implementation plan.
+Do not add a Rust workspace, toolchain, crate, board, binding, or implementation
+until the Phase 0 proposal is approved or revised into an approved baseline.
 
 ## Architecture
 
