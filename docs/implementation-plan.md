@@ -3,8 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 partially approved; foundation/dependencies, GPL-3.0
-        feasibility use, and bounded patch policy accepted
+Status: Phase 0 complete; Phase 1 Gate 1A ready
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -14,10 +13,9 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: none
 Application dependencies: none
-Next action: approve or revise physical CoreS3 flashing and observation in
-             docs/phase-0-feasibility-proposal.md; do not add a Rust workspace,
-             toolchain, crate, board, binding, or code before all items are
-             approved
+Next action: implement the approved Gate 1A foundation on supported Zephyr
+             targets; do not begin a later gate until its prerequisites and
+             the preceding gate's pass criteria are satisfied
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -27,8 +25,8 @@ from the architecture or ADRs here.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in
-[`phase-0-feasibility-proposal.md`](phase-0-feasibility-proposal.md). It is a
-proposal, not authorization to install or implement its contents.
+[`phase-0-feasibility-proposal.md`](phase-0-feasibility-proposal.md). It is the
+approved baseline for the ordered Phase 1 foundation gates.
 
 ## Product goal
 
@@ -56,16 +54,18 @@ are connectors and features, not dependencies of the device platform.
 - External and asynchronous paths are observable without placing diagnostics
   in public protocol results or UI models.
 
-## Explicit non-goals at this checkpoint
+## Explicit non-goals for Gate 1A
 
-- application, UI, firmware, connector, or simulator implementation;
-- Rust workspace or crate selection;
-- Zephyr workspace, fork, module, board, or driver creation;
-- Slint source files or generated bindings;
+- product application features, UI, connectors, or the product simulator;
+- Slint source files, Slint dependencies, or generated bindings;
+- Xtensa/CoreS3 Rust integration, board or driver changes, and physical
+  flashing;
+- any `zephyr-lang-rust` patch; the approved patch policy applies first at Gate
+  1C if observed evidence requires it;
 - transport, serialization, pairing, or authentication selection;
 - dynamic plugin ABI or public feature marketplace;
 - Unraid, ChatGPT, or desktop notification credentials;
-- installation, flashing, host daemon configuration, autostart, or deployment;
+- host daemon configuration, autostart, or deployment;
 - release, remote repository creation, push, or publication.
 
 ## Known upstream state
@@ -143,6 +143,9 @@ The current proposal is
 [`phase-0-feasibility-proposal.md`](phase-0-feasibility-proposal.md). Phase 0 is
 complete only when that proposal is approved or revised into an approved
 baseline.
+
+Phase 0 completed on 2026-08-22 when all four approval items in that proposal
+were accepted.
 
 ## Phase 1: prove the foundation in independent vertical spikes
 
@@ -284,10 +287,9 @@ physical hardware, real provider accounts, host mutation, or secret material.
 
 The following are deliberately unresolved:
 
-- exact Zephyr and Rust revisions for the first spike;
-- how ESP32-S3 support enters or extends `zephyr-lang-rust`;
-- safe Rust wrapper ownership for missing Zephyr subsystems;
-- Embassy executor count and thread priorities;
+- production Rust wrapper ownership beyond the approved Phase 1 gates;
+- production Embassy executor and thread topology beyond Gate 1A's single
+  executor;
 - desktop runtime and supported desktop operating systems;
 - protocol transport, schema language, serialization, and compatibility rule;
 - pairing, device identity storage, and transport security;
@@ -296,6 +298,10 @@ The following are deliberately unresolved:
 - local behavior while the host is disconnected;
 - OTA, rollback, and firmware compatibility policy;
 - packaging, repository split, and release strategy.
+
+The first-spike Zephyr and Rust revisions are fixed by the approved Phase 0
+baseline. If drift makes a pin unusable, revise and reapprove the baseline
+before changing it.
 
 Resolve an item only when its first vertical slice needs it. Record a
 cross-cutting decision as a new ADR.
@@ -307,12 +313,11 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, and
 > `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
-> Phase 0 partial-approval checkpoint and refresh any drift-prone upstream pins
-> or evidence before relying on them. The pinned foundation/direct
-> dependencies, local non-distributed GPL-3.0 Slint feasibility use, and bounded
-> `zephyr-lang-rust` patch policy are approved; ask for physical CoreS3 flashing
-> and observation to be approved or revised. Before all four items are approved,
-> do not add toolchains, dependencies, generated bindings, board files, a Rust
-> workspace, or code.
+> Phase 1 Gate 1A checkpoint and refresh any drift-prone upstream pins or
+> evidence before relying on them. All Phase 0 approval items are accepted.
+> Implement only the approved Gate 1A foundation on supported Zephyr targets,
+> record its specified evidence, and stop at its pass/fail boundary. Do not
+> begin Gate 1B or any physical CoreS3 gate until the ordered prerequisites are
+> satisfied.
 > Record actual pass/fail evidence only when executing the approved Phase 1
 > gates.

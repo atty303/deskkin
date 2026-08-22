@@ -11,19 +11,17 @@ and home automation.
 
 ## Status
 
-Deskkin is at a Phase 0 partial-approval checkpoint. The pinned foundation and
-direct dependencies, local non-distributed GPL-3.0 Slint feasibility use, and
-bounded `zephyr-lang-rust` patch policy are approved; physical CoreS3 flashing
-and observation remain pending. The repository contains no application code or
-application dependencies. The agreed product boundary, architecture,
+Deskkin has completed its Phase 0 approval checkpoint. The ordered Phase 1
+foundation gates are authorized, and Gate 1A on supported Zephyr targets is the
+next implementation slice. The repository currently contains no application
+code or application dependencies. The agreed product boundary, architecture,
 decisions, risks, and phased implementation plan are recorded in
 [`docs/implementation-plan.md`](docs/implementation-plan.md), and the bounded
 foundation proposal is in
 [`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).
 
-Do not add a Rust workspace, toolchain, crate, board, binding, or implementation
-until all Phase 0 approval items are accepted or revised into an approved
-baseline.
+Implement the approved gates in order and stop at each gate's pass/fail
+boundary. Do not start a later gate until its prerequisites pass.
 
 ## Architecture
 

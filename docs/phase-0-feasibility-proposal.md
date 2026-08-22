@@ -1,7 +1,6 @@
 # Phase 0 feasibility and dependency proposal
 
-- Status: Partially approved; foundation/dependencies, GPL-3.0 feasibility use,
-  and bounded patch policy accepted; physical-device approval required
+- Status: Approved 2026-08-22; Phase 1 foundation work authorized
 - Evidence checked: 2026-08-22
 - Scope: Phase 1 foundation spikes only
 
@@ -12,10 +11,11 @@ Approve a bounded Phase 1 experiment based on Zephyr 4.4.1, the
 Slint 1.17.1. Keep the five feasibility gates independent and stop after the
 first failing boundary rather than repairing later layers around it.
 
-This proposal does not authorize a Rust workspace, source code, toolchain
-configuration, dependency installation, board changes, flashing, or release.
-Those changes begin only after all remaining approval items at the end of this
-document are accepted.
+The approval recorded below authorizes the Rust workspace, Phase 1 source and
+toolchain configuration, listed dependency installation, bounded local patch
+series, and physical CoreS3 flashing only as required by the ordered gates. It
+does not authorize release or any external state outside the approved test
+device.
 
 The largest uncertainty is narrower than originally expected. Zephyr 4.4.1
 already contains a CoreS3 board definition with ILI9342C display, FT6336U
@@ -401,16 +401,16 @@ listed dependencies, pins, local artifacts, and bounded patch series. It does
 not authorize release, push, remote fork/PR creation, live external services,
 or application features.
 
-Phase 1 begins only after all four items have been explicitly accepted. Current
-approval state:
+All four items have been explicitly accepted. Phase 0 is complete and the
+ordered Phase 1 foundation gates are authorized. Approval record:
 
 1. **Approved 2026-08-22:** the pinned foundation and direct dependencies
    above;
 2. **Approved 2026-08-22:** the local, non-distributed GPL-3.0 Slint
    feasibility use and the later distribution-license stop;
 3. **Approved 2026-08-22:** the bounded `zephyr-lang-rust` patch policy;
-4. **Pending:** physical CoreS3 flashing and observation for Gates 1C-1E when
-   those gates are reached.
+4. **Approved 2026-08-22:** physical CoreS3 flashing and observation for Gates
+   1C-1E when those gates are reached.
 
 ## Primary evidence
 
