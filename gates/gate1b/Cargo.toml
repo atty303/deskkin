@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "deskkin-gate1b"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+description = "Deskkin Phase 1 Gate 1B Slint software-renderer feasibility slice"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+name = "rustapp"
+crate-type = ["staticlib"]
+
+[[bin]]
+name = "gate1b-host"
+path = "src/bin/host.rs"
+required-features = ["host"]
+
+[features]
+host = []
+
+[dependencies]
+slint = { version = "=1.17.1", default-features = false, features = ["compat-1-2", "renderer-software", "unsafe-single-threaded", "libm"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+critical-section = "=1.2.0"
+embassy-time = { version = "=0.4.0", features = ["tick-hz-10_000"] }
+static_cell = "=2.1.1"
+zephyr = { version = "=0.1.0", features = ["executor-zephyr", "time-driver"] }
+
+[target.'cfg(target_os = "none")'.dependencies.embassy-executor]
+version = "=0.7.0"
+features = ["log", "task-arena-size-2048"]
+
+[build-dependencies]
+slint-build = "=1.17.1"
+
+[profile.dev]
+codegen-units = 1
+debug = false
+lto = "fat"
+opt-level = "z"
+panic = "abort"
+
+[profile.release]
+codegen-units = 1
+debug = true
+lto = "fat"
+opt-level = "z"
+panic = "abort"

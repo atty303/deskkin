@@ -1,5 +1,6 @@
 import importlib.util
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -45,6 +47,18 @@ class GateRunnerTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text()), {"result": "pass", "run_id": "example"})
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
+    def test_read_result_rejects_incomplete_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "gate": "1b",
+                "mode": "default",
+                "run_id": str(uuid.uuid4()),
+                "result": "pass",
+            }))
+            self.assertIsNone(gate_runner.read_result_safe(path, "1b", "default"))
+
     def test_error_classification_is_stable(self):
         self.assertEqual(gate_runner.classify_error("could not compile rustapp"), "rust_compile_failed")
         self.assertEqual(gate_runner.classify_error("Kconfig error"), "configure_failed")
@@ -54,7 +68,7 @@ class GateRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run"
             recorder = gate_runner.Recorder(run, "run-id")
-            recorder.start({"run_id": "run-id", "gate": "1a"})
+            recorder.start({"run_id": "run-id", "gate": "1a", "mode": "default"})
             recorder.event("prepare", "success", 1)
             records = [json.loads(line) for line in (run / "diagnostic.jsonl").read_text().splitlines()]
             self.assertEqual([record["type"] for record in records], ["resource", "operation"])
@@ -83,7 +97,7 @@ class GateRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run"
             recorder = gate_runner.Recorder(run, "run-id")
-            recorder.start({"run_id": "run-id", "gate": "1a"})
+            recorder.start({"run_id": "run-id", "gate": "1a", "mode": "default"})
             with mock.patch.object(gate_runner, "publish_artifact", side_effect=OSError("artifact storage unavailable")):
                 recorder.finalize({"run_id": "run-id", "gate": "1a"}, [], "pass", "all_criteria_passed")
             self.assertEqual(recorder.health, "partial")
@@ -110,6 +124,55 @@ class GateRunnerTests(unittest.TestCase):
                 self.assertEqual(gate_runner.diagnostics_list(root), 0)
             self.assertIn(" partial ", output.getvalue())
 
+    def test_list_downgrades_complete_diagnostic_without_matching_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / ".deskkin/diagnostics" / str(uuid.uuid4())
+            run.mkdir(parents=True)
+            gate_runner.atomic_jsonl(run / "diagnostic.jsonl", [
+                {"schema_version": 1, "type": "resource", "run_id": run.name, "gate": "1b", "mode": "default"},
+                {"schema_version": 1, "type": "completeness", "status": "complete", "result": "pass", "reason_code": "all_criteria_passed"},
+            ])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(gate_runner.diagnostics_list(root), 0)
+            self.assertIn(" unknown partial ", output.getvalue())
+
+    def test_list_preserves_acknowledged_historical_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / ".deskkin/diagnostics" / str(uuid.uuid4())
+            run.mkdir(parents=True)
+            gate_runner.atomic_jsonl(run / "diagnostic.jsonl", [
+                {"schema_version": 1, "type": "resource", "run_id": run.name, "gate": "1b", "mode": "default"},
+                {"schema_version": 1, "type": "completeness", "status": "complete", "result": "pass", "reason_code": "all_criteria_passed"},
+                {"schema_version": 1, "type": "result_published", "run_id": run.name, "result": "pass"},
+            ])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                gate_runner.diagnostics_list(root)
+            self.assertIn(" pass complete ", output.getvalue())
+
+    def test_list_ignores_symlinked_untrusted_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / ".deskkin/diagnostics" / str(uuid.uuid4())
+            run.mkdir(parents=True)
+            gate_runner.atomic_jsonl(run / "diagnostic.jsonl", [
+                {"schema_version": 1, "type": "resource", "run_id": run.name, "gate": "1b", "mode": "default"},
+                {"schema_version": 1, "type": "completeness", "status": "complete", "result": "pass", "reason_code": "all_criteria_passed"},
+            ])
+            outside = root / "outside.json"
+            outside.write_text(json.dumps({"schema_version": 1, "gate": "1b", "mode": "default", "run_id": run.name, "result": "SENSITIVE_FIXTURE"}))
+            result = root / ".deskkin/results/1b/default/result.json"
+            result.parent.mkdir(parents=True)
+            result.symlink_to(outside)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                gate_runner.diagnostics_list(root)
+            self.assertNotIn("SENSITIVE_FIXTURE", output.getvalue())
+            self.assertIn("unknown partial", output.getvalue())
+
     def test_frozen_runs_count_toward_store_run_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -120,6 +183,52 @@ class GateRunnerTests(unittest.TestCase):
                 (run / ".frozen").touch()
             self.assertFalse(gate_runner.recording_capacity(root))
 
+    def test_retention_never_evicts_incomplete_active_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / ".deskkin/diagnostics"
+            for _ in range(gate_runner.STORE_LIMIT_RUNS - 1):
+                run = base / str(uuid.uuid4())
+                run.mkdir(parents=True)
+                (run / ".frozen").touch()
+            active = base / str(uuid.uuid4())
+            active.mkdir(parents=True)
+            gate_runner.atomic_jsonl(active / "diagnostic.jsonl", [{"schema_version": 1, "type": "resource", "run_id": active.name, "gate": "1a", "mode": "default"}])
+            old = time.time() - 15 * 24 * 60 * 60
+            os.utime(active, (old, old))
+            locks = root / ".deskkin/locks"
+            locks.mkdir()
+            lock = (locks / "1a.lock").open("w+", encoding="utf-8")
+            json.dump({"run_id": active.name}, lock); lock.flush()
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                gate_runner.prune_diagnostics(root, reserve_runs=1)
+                self.assertTrue(active.exists())
+                self.assertFalse(gate_runner.recording_capacity(root))
+            finally:
+                lock.close()
+
+    def test_retention_protects_latest_success_for_each_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / ".deskkin/diagnostics"
+            latest = {}
+            for index in range(gate_runner.STORE_LIMIT_RUNS + 2):
+                gate = "1a" if index % 2 == 0 else "1b"
+                run = base / str(uuid.uuid4())
+                run.mkdir(parents=True)
+                records = [
+                    {"schema_version": 1, "type": "resource", "run_id": run.name, "gate": gate, "mode": "default"},
+                    {"schema_version": 1, "type": "completeness", "status": "complete", "result": "pass", "reason_code": "all_criteria_passed"},
+                ]
+                gate_runner.atomic_jsonl(run / "diagnostic.jsonl", records)
+                latest[gate] = run
+                timestamp = time.time() + index
+                os.utime(run, (timestamp, timestamp))
+            gate_runner.prune_diagnostics(root)
+            self.assertLessEqual(len(list(base.iterdir())), gate_runner.STORE_LIMIT_RUNS)
+            self.assertTrue(all(path.exists() for path in latest.values()))
+
     def test_cancelled_build_command_reaps_its_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = gate_runner.Runner(Path(directory), False, str(uuid.uuid4()))
@@ -127,6 +236,25 @@ class GateRunnerTests(unittest.TestCase):
             runner.cancelled = True
             with self.assertRaises(gate_runner.GateCancelled):
                 runner.command("configure", [sys.executable, "-c", "import time; time.sleep(10)"], "test")
+            self.assertEqual(runner.cleanup_status, "success")
+
+    def test_command_selector_failure_reaps_process_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = gate_runner.Runner(Path(directory), False, str(uuid.uuid4()))
+            runner.state.mkdir()
+            selector = mock.Mock()
+            selector.register.side_effect = OSError("descriptor exhaustion")
+            with mock.patch.object(gate_runner.selectors, "DefaultSelector", return_value=selector):
+                with self.assertRaises(OSError):
+                    runner.command("configure", [sys.executable, "-c", "import time; time.sleep(30)"], "test")
+            selector.close.assert_called_once()
+
+    def test_command_reaps_descendant_after_parent_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = gate_runner.Runner(Path(directory), False, str(uuid.uuid4()))
+            runner.state.mkdir()
+            script = "import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+            runner.command("configure", [sys.executable, "-c", script], "test")
             self.assertEqual(runner.cleanup_status, "success")
 
     def test_termination_reaps_descendant_that_ignores_term(self):
@@ -191,7 +319,7 @@ class GateRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "run"
             recorder = gate_runner.Recorder(run, "run-id")
-            recorder.start({"run_id": "run-id", "gate": "1a"})
+            recorder.start({"run_id": "run-id", "gate": "1a", "mode": "default"})
             recorder.add_serial("qemu_cortex_m3", "normal", "DESKKIN_GATE_EVENT schema=1 token=SENSITIVE_FIXTURE")
             recorder.finalize({"run_id": "run-id", "gate": "1a"}, [], "pass", "all_criteria_passed")
             self.assertFalse((run / "serial.jsonl").exists())
@@ -201,13 +329,13 @@ class GateRunnerTests(unittest.TestCase):
     def test_sensitive_resource_and_link_fixtures_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             dropped = gate_runner.Recorder(Path(directory) / "dropped", "run-id")
-            dropped.start({"run_id": "run-id", "gate": "1a", "api_token": "SENSITIVE_FIXTURE"})
+            dropped.start({"run_id": "run-id", "gate": "1a", "mode": "default", "api_token": "SENSITIVE_FIXTURE"})
             self.assertIsNone(dropped.directory)
             self.assertEqual(dropped.health_reason, "privacy_filter_failed")
 
             run = Path(directory) / "partial"
             recorder = gate_runner.Recorder(run, "run-id")
-            recorder.start({"run_id": "run-id", "gate": "1a"})
+            recorder.start({"run_id": "run-id", "gate": "1a", "mode": "default"})
             recorder.finalize(
                 {"run_id": "run-id", "gate": "1a"},
                 [{"target": "qemu_cortex_m3", "mode": "normal", "sha256": "0" * 64, "bytes": 1, "credential": "SENSITIVE_FIXTURE"}],

@@ -11,12 +11,15 @@ and home automation.
 
 ## Status
 
-Deskkin has completed Phase 0 and Phase 1 Gate 1A. The pinned Rust application
-builds, links, boots, cleanly rebuilds, and captures deliberate panics on the
-supported Zephyr QEMU Cortex-M3 and RISC-V targets. Gate 1B, the bounded Slint
-Rust software-renderer spike, is the next implementation slice. The repository
-contains only this feasibility application and its tooling; it does not yet
-contain the portable product application. The agreed product boundary,
+Deskkin has completed Phase 0 and Phase 1 Gates 1A and 1B. The pinned Rust
+application builds, links, boots, cleanly rebuilds, and captures deliberate
+panics on the supported Zephyr QEMU Cortex-M3 and RISC-V targets. The bounded
+Slint 1.17.1 Rust software-renderer spike also renders the same UI on QEMU and
+the host with matching normalized RGB output, typed mock input, dirty ranges,
+and timer-driven animation without busy polling. Gate 1C, the ESP32-S3/Xtensa
+Zephyr Rust toolchain spike, is the next implementation slice. The repository
+contains only feasibility applications and tooling; it does not yet contain
+the portable product application. The agreed product boundary,
 architecture, decisions, risks, and phased implementation plan are recorded in
 [`docs/implementation-plan.md`](docs/implementation-plan.md), and the bounded
 foundation proposal is in
@@ -71,11 +74,12 @@ mise run test
 
 Pass selected files after `--`, for example `mise run check -- README.md`.
 
-Prepare and run the completed Gate 1A evidence path with:
+Prepare and run the completed Gate 1A and Gate 1B evidence paths with:
 
 ```sh
 mise run gate:1a:bootstrap
 mise run gate:1a
+mise run gate:1b
 mise run diagnostics:list
 ```
 
@@ -84,4 +88,7 @@ diagnostics remain under the ignored `.deskkin/` directory.
 
 ## License
 
-MIT
+Deskkin source is MIT except for the explicitly marked local Gate 1B Slint
+feasibility spike, which is GPL-3.0-only. Gate 1B firmware and binaries are not
+distributed; product distribution requires a separately approved Slint
+licensing decision.

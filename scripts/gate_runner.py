@@ -116,7 +116,7 @@ FORBIDDEN_NORMALIZED_KEYS = {
 def privacy_safe(value: object) -> bool:
     try:
         encoded = json.dumps(value, sort_keys=True)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return False
     if len(encoded.encode()) > RUN_LIMIT_BYTES:
         return False
@@ -141,7 +141,10 @@ def privacy_safe(value: object) -> bool:
             return all(safe_key(key) and visit(child) for key, child in item.items())
         return False
 
-    return visit(value)
+    try:
+        return visit(value)
+    except RecursionError:
+        return False
 
 
 def record_schema_safe(value: dict[str, object]) -> bool:
@@ -152,8 +155,61 @@ def record_schema_safe(value: dict[str, object]) -> bool:
         "resource_verified": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
         "operation": common | {"run_id", "operation", "status", "duration_ms", "error_type", "target"},
         "completeness": common | {"status", "reason", "result", "reason_code"},
+        "result_published": common | {"run_id", "result"},
     }.get(record_type)
-    return allowed is not None and set(value) <= allowed and privacy_safe(value)
+    required = {
+        "resource": {"schema_version", "type", "run_id", "gate", "mode"},
+        "resource_verified": {"schema_version", "type", "run_id", "gate", "mode"},
+        "operation": {"schema_version", "type", "run_id", "operation", "status", "duration_ms"},
+        "completeness": {"schema_version", "type", "status", "result", "reason_code"},
+        "result_published": {"schema_version", "type", "run_id", "result"},
+    }.get(record_type, set())
+    if allowed is None or not required <= set(value) <= allowed or value.get("schema_version") != 1 or not privacy_safe(value):
+        return False
+    if record_type == "operation":
+        return value.get("status") in {"success", "error", "timeout", "cancel"} and value.get("operation") in {"prepare", "configure", "rust-compile", "c-compile", "link", "boot", "probe", "render"} and type(value.get("duration_ms")) is int and value["duration_ms"] >= 0 and all(key not in value or isinstance(value[key], str) for key in ("error_type", "target"))
+    if record_type == "completeness":
+        return value.get("status") in {"complete", "partial", "dropped"} and value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("reason_code"), str) and (value.get("reason") is None or isinstance(value.get("reason"), str))
+    if record_type == "result_published":
+        return value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("run_id"), str)
+    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b"} and value.get("mode") == "default"):
+        return False
+    target = value.get("target")
+    if target is not None and not (isinstance(target, str) or isinstance(target, list) and all(isinstance(item, str) for item in target)):
+        return False
+    if record_type == "resource_verified":
+        maps = ("west_revisions", "sdk_file_digests", "input_digests")
+        if not all(isinstance(value.get(key), dict) and all(isinstance(name, str) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", digest) for name, digest in value[key].items()) for key in maps):
+            return False
+        if not isinstance(value.get("tool_identities"), dict) or not all(isinstance(name, str) and isinstance(identity, str) for name, identity in value["tool_identities"].items()):
+            return False
+        if not all(isinstance(value.get(key), str) for key in ("sdk_version", "application_version", "build_type", "deskkin_revision")) or type(value.get("deskkin_dirty")) is not bool:
+            return False
+    return True
+
+
+def diagnostic_records_safe(records: list[dict[str, object]], run_id: str) -> bool:
+    resources = [record for record in records if record.get("type") == "resource"]
+    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b"} or resources[0].get("mode") != "default":
+        return False
+    if records[0].get("type") != "resource" or not all(record_schema_safe(record) and ("run_id" not in record or record.get("run_id") == run_id) for record in records):
+        return False
+    completeness = [index for index, record in enumerate(records) if record.get("type") == "completeness"]
+    published = [index for index, record in enumerate(records) if record.get("type") == "result_published"]
+    verified = [record for record in records if record.get("type") == "resource_verified"]
+    if len(completeness) > 1 or len(published) > 1 or len(verified) > 1:
+        return False
+    if published and (not completeness or published[0] < completeness[0] or records[published[0]]["result"] != records[completeness[0]]["result"]):
+        return False
+    if verified and (verified[0].get("gate") != resources[0].get("gate") or verified[0].get("mode") != resources[0].get("mode")):
+        return False
+    if verified and resources[0].get("gate") == "1b" and verified[0].get("target") != resources[0].get("target"):
+        return False
+    if completeness and completeness[0] != len(records) - 1 - bool(published):
+        return False
+    if published and published[0] != len(records) - 1:
+        return False
+    return True
 
 
 def artifact_schema_safe(kind: str, value: object) -> bool:
@@ -221,13 +277,13 @@ def private_directory(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
-def prepare_control_state(root: Path) -> None:
+def prepare_control_state(root: Path, gate: str = "1a") -> None:
     state = root / ".deskkin"
     private_directory(state)
     for relative in (
         "results",
-        "results/1a",
-        "results/1a/default",
+        f"results/{gate}",
+        f"results/{gate}/default",
         "locks",
     ):
         private_directory(state / relative)
@@ -247,6 +303,82 @@ def publish_result(path: Path, value: object, writer: Callable[[Path, object], N
         return True
     except OSError:
         return False
+
+
+def read_result_safe(path: Path, gate: str, mode: str) -> dict[str, object] | None:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > RUN_LIMIT_BYTES:
+            return None
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = None
+            value = json.load(stream)
+        required = {
+            "schema_version", "gate", "mode", "run_id", "result", "reason_code",
+            "cleanup_status", "criteria", "started_at", "ended_at",
+        }
+        if (
+            not isinstance(value, dict)
+            or not required <= set(value)
+            or value.get("schema_version") != 1
+            or value.get("gate") != gate
+            or value.get("mode") != mode
+            or value.get("result") not in {"pass", "fail", "inconclusive"}
+            or not isinstance(value.get("run_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", value["run_id"])
+            or not isinstance(value.get("reason_code"), str)
+            or value.get("cleanup_status") not in {"success", "failed"}
+            or not isinstance(value.get("started_at"), str)
+            or not isinstance(value.get("ended_at"), str)
+            or not privacy_safe(value)
+        ):
+            return None
+        criteria = value.get("criteria")
+        if not isinstance(criteria, list) or not all(
+            isinstance(item, dict)
+            and set(item) == {"name", "value", "unit", "threshold", "passed"}
+            and isinstance(item["name"], str)
+            and type(item["value"]) in {int, float}
+            and isinstance(item["unit"], str)
+            and type(item["threshold"]) in {int, float}
+            and type(item["passed"]) is bool
+            for item in criteria
+        ):
+            return None
+        return value
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def read_diagnostic_records(base: Path, run_id: str) -> list[dict[str, object]] | None:
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", run_id):
+        return None
+    base_fd = run_fd = file_fd = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        base_fd = os.open(base, flags)
+        run_fd = os.open(run_id, flags, dir_fd=base_fd)
+        file_fd = os.open("diagnostic.jsonl", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=run_fd)
+        metadata = os.fstat(file_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > RUN_LIMIT_BYTES:
+            return None
+        with os.fdopen(file_fd, "r", encoding="utf-8") as stream:
+            file_fd = None
+            records = [json.loads(line) for line in stream.read().splitlines()]
+        if not all(isinstance(record, dict) for record in records) or not diagnostic_records_safe(records, run_id):
+            return None
+        return records
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+        return None
+    finally:
+        for descriptor in (file_fd, run_fd, base_fd):
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def classify_error(output: str) -> str:
@@ -430,6 +562,7 @@ class Runner:
         self.supported_targets: set[str] = set()
         self.clean_rebuilds: set[str] = set()
         self.deliberate_panics: set[str] = set()
+        self.west_paths: dict[str, Path] = {}
 
     def _environment(self) -> dict[str, str]:
         sdk = self.state / "sdk"
@@ -466,6 +599,7 @@ class Runner:
                     "host",
                 ).strip()
                 project = Path(path_text)
+                self.west_paths[name] = project
                 actual = self.command(
                     "prepare",
                     ["git", "-C", str(project), "rev-parse", "HEAD"],
@@ -538,7 +672,7 @@ class Runner:
                     "input_digests": {relative: sha256(self.root / relative) for relative in gate_inputs},
                 }
             )
-            self.recorder._append({"schema_version": 1, "type": "resource_verified", **self.verified_resources})
+            self.publish_verified_resources()
             self.recorder.event("prepare", "success", round((time.monotonic() - start) * 1000))
         except (GateCancelled, GateTimeout):
             raise
@@ -551,6 +685,9 @@ class Runner:
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError, KeyError) as error:
             self.recorder.event("prepare", "error", round((time.monotonic() - start) * 1000), "setup_probe_failed")
             raise GateInconclusive("setup_probe_failed") from error
+
+    def publish_verified_resources(self) -> None:
+        self.recorder._append({"schema_version": 1, "type": "resource_verified", **self.verified_resources})
 
     def remaining(self) -> float:
         if self.cancelled:
@@ -572,48 +709,49 @@ class Runner:
             bufsize=0,
         )
         assert process.stdout is not None
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
+        selector: selectors.BaseSelector | None = None
         output = bytearray()
         interrupted: str | None = None
-        while process.poll() is None:
-            for key, _ in selector.select(timeout=0.1):
-                chunk = os.read(key.fileobj.fileno(), 65536)
-                if chunk:
-                    output.extend(chunk)
-                    if len(output) > 2_000_000:
-                        del output[:-2_000_000]
-            if self.cancelled:
-                interrupted = "cancel"
-                break
-            if time.monotonic() >= self.deadline:
-                interrupted = "timeout"
-                break
-        for key, _ in selector.select(timeout=0):
-            chunk = os.read(key.fileobj.fileno(), 65536)
-            output.extend(chunk)
-        selector.close()
-        if interrupted:
-            cleanup_ok = self._terminate_group(process)
-            process.stdout.close()
-            if not cleanup_ok:
-                self.cleanup_status = "failed"
+        try:
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while process.poll() is None:
+                for key, _ in selector.select(timeout=0.1):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if chunk:
+                        output.extend(chunk)
+                        if len(output) > 2_000_000:
+                            del output[:-2_000_000]
+                if self.cancelled:
+                    interrupted = "cancel"
+                    break
+                if time.monotonic() >= self.deadline:
+                    interrupted = "timeout"
+                    break
+            for key, _ in selector.select(timeout=0):
+                output.extend(os.read(key.fileobj.fileno(), 65536))
+            if interrupted:
+                duration = round((time.monotonic() - start) * 1000)
+                if interrupted == "cancel":
+                    self.recorder.event(operation, "cancel", duration, "cancelled", target)
+                    raise GateCancelled("cancelled")
+                self.recorder.event(operation, "timeout", duration, "deadline_exceeded", target)
+                raise GateTimeout("deadline_exceeded")
+            process.wait()
             duration = round((time.monotonic() - start) * 1000)
-            if interrupted == "cancel":
-                self.recorder.event(operation, "cancel", duration, "cancelled", target)
-                raise GateCancelled("cancelled")
-            self.recorder.event(operation, "timeout", duration, "deadline_exceeded", target)
-            raise GateTimeout("deadline_exceeded")
-        process.wait()
-        process.stdout.close()
-        duration = round((time.monotonic() - start) * 1000)
-        output_text = output.decode("utf-8", errors="replace")
-        if process.returncode != 0:
-            error_type = classify_error(output_text)
-            self.recorder.event(operation, "error", duration, error_type, target)
-            raise GateFailure(error_type)
-        self.recorder.event(operation, "success", duration, target=target)
-        return output_text
+            output_text = output.decode("utf-8", errors="replace")
+            if process.returncode != 0:
+                error_type = classify_error(output_text)
+                self.recorder.event(operation, "error", duration, error_type, target)
+                raise GateFailure(error_type)
+            self.recorder.event(operation, "success", duration, target=target)
+            return output_text
+        finally:
+            if not self._terminate_group(process):
+                self.cleanup_status = "failed"
+            if selector is not None:
+                selector.close()
+            process.stdout.close()
 
     def _terminate_group(self, process: subprocess.Popen[bytes]) -> bool:
         process_group = process.pid
@@ -818,27 +956,36 @@ def diagnostics_list(root: Path) -> int:
     base = root / ".deskkin/diagnostics"
     if not base.exists():
         return 0
-    for directory in sorted((item for item in base.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime, reverse=True):
+    for directory in sorted((item for item in base.iterdir() if item.is_dir() and not item.is_symlink()), key=lambda item: item.stat().st_mtime, reverse=True):
         files = [item for item in directory.rglob("*") if item.is_file()]
         completeness = "partial"
         result = "unknown"
+        gate = "unknown"
+        mode = "unknown"
+        published = False
         diagnostic = directory / "diagnostic.jsonl"
-        if diagnostic.exists():
-            for line in diagnostic.read_text(encoding="utf-8").splitlines():
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    completeness = "partial"
-                    continue
+        records = read_diagnostic_records(base, directory.name)
+        if records is not None:
+            for item in records:
+                if item.get("type") == "resource":
+                    gate = str(item.get("gate", gate))
+                    mode = str(item.get("mode", mode))
                 if item.get("type") == "completeness":
                     completeness = str(item.get("status"))
                     result = str(item.get("result", result))
-        result_path = root / ".deskkin/results/1a/default/result.json"
+                if item.get("type") == "result_published" and item.get("run_id") == directory.name:
+                    published = True
+        result_path = root / f".deskkin/results/{gate}/{mode}/result.json"
+        result_matches = False
         if result_path.exists():
-            value = json.loads(result_path.read_text(encoding="utf-8"))
-            if value.get("run_id") == directory.name:
+            value = read_result_safe(result_path, gate, mode)
+            if value is not None and value.get("run_id") == directory.name:
                 result = str(value.get("result"))
-        print(f"{directory.name} 1a default {datetime.fromtimestamp(directory.stat().st_mtime, UTC).isoformat()} {result} {completeness} {sum(item.stat().st_size for item in files)}")
+                result_matches = True
+        if gate == "1b" and completeness == "complete" and not (result_matches or published):
+            completeness = "partial"
+            result = "unknown"
+        print(f"{directory.name} {gate} {mode} {datetime.fromtimestamp(directory.stat().st_mtime, UTC).isoformat()} {result} {completeness} {sum(item.stat().st_size for item in files)}")
     return 0
 
 
@@ -861,34 +1008,86 @@ def prune_diagnostics(root: Path, reserve_runs: int = 0, reserve_bytes: int = 0)
         return
     now = datetime.now(UTC)
     records: list[dict[str, object]] = []
-    for directory in (item for item in base.iterdir() if item.is_dir()):
+    for directory in (item for item in base.iterdir() if item.is_dir() and not item.is_symlink()):
         modified = datetime.fromtimestamp(directory.stat().st_mtime, UTC)
         size = sum(item.stat().st_size for item in directory.rglob("*") if item.is_file())
         outcome = "unknown"
         reason = "unknown"
-        diagnostic = directory / "diagnostic.jsonl"
-        if diagnostic.exists():
-            with contextlib.suppress(OSError):
-                for line in diagnostic.read_text(encoding="utf-8").splitlines():
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if value.get("type") == "completeness":
-                        outcome = str(value.get("result", outcome))
-                        reason = str(value.get("reason_code", reason))
-        records.append({"path": directory, "modified": modified, "size": size, "outcome": outcome, "reason": reason, "frozen": (directory / ".frozen").exists()})
+        gate = "unknown"
+        published = False
+        values = read_diagnostic_records(base, directory.name)
+        if values is not None:
+            for value in values:
+                if value.get("type") == "completeness":
+                    outcome = str(value.get("result", outcome))
+                    reason = str(value.get("reason_code", reason))
+                elif value.get("type") == "resource":
+                    gate = str(value.get("gate", gate))
+                elif value.get("type") == "result_published" and value.get("run_id") == directory.name:
+                    published = True
+        if gate == "1b" and outcome == "pass" and not published:
+            outcome = "unknown"
+            reason = "result_not_published"
+        records.append({"path": directory, "modified": modified, "size": size, "outcome": outcome, "reason": reason, "gate": gate, "frozen": (directory / ".frozen").exists()})
     records.sort(key=lambda item: item["modified"], reverse=True)
+    active_runs: set[str] = set()
+    lock_scan_safe = True
+    locks = root / ".deskkin/locks"
+    if locks.is_symlink() or (locks.exists() and not locks.is_dir()):
+        return
+    if locks.is_dir():
+        lock_base_fd: int | None = None
+        try:
+            lock_base_fd = os.open(locks, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+            for name in os.listdir(lock_base_fd):
+                if not name.endswith(".lock"):
+                    continue
+                stream = None
+                try:
+                    metadata = os.stat(name, dir_fd=lock_base_fd, follow_symlinks=False)
+                    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+                        raise OSError("ambiguous lock entry")
+                    descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=lock_base_fd)
+                    stream = os.fdopen(descriptor, "r", encoding="utf-8")
+                    try:
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(stream, fcntl.LOCK_UN)
+                    except BlockingIOError:
+                        try:
+                            value = json.load(stream)
+                            owner = str(value["run_id"])
+                            if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", owner):
+                                raise ValueError("invalid owner")
+                            active_runs.add(owner)
+                        except (UnicodeError, json.JSONDecodeError, KeyError, RecursionError, ValueError):
+                            lock_scan_safe = False
+                except (OSError, UnicodeError, json.JSONDecodeError, KeyError, RecursionError):
+                    lock_scan_safe = False
+                finally:
+                    if stream is not None:
+                        stream.close()
+                if not lock_scan_safe:
+                    break
+        except OSError:
+            lock_scan_safe = False
+        finally:
+            if lock_base_fd is not None:
+                os.close(lock_base_fd)
+    if not lock_scan_safe:
+        return
     protected: set[Path] = set()
-    successes = [item for item in records if item["outcome"] == "pass"]
-    failures = [item for item in records if item["outcome"] != "pass"]
-    if successes:
-        protected.add(successes[0]["path"])
-    protected.update(item["path"] for item in failures[:3])
+    for gate in {str(item["gate"]) for item in records}:
+        successes = [item for item in records if item["gate"] == gate and item["outcome"] == "pass"]
+        failures = [item for item in records if item["gate"] == gate and item["outcome"] != "pass" and item["reason"] != "cancelled"]
+        if successes:
+            protected.add(successes[0]["path"])
+        protected.update(item["path"] for item in failures[:3])
     total = sum(int(item["size"]) for item in records)
     count = len(records)
     for item in list(reversed(records)):
         if bool(item["frozen"]):
+            continue
+        if item["path"].name in active_runs:
             continue
         if now - item["modified"] > timedelta(days=14):
             shutil.rmtree(item["path"])
@@ -906,7 +1105,7 @@ def prune_diagnostics(root: Path, reserve_runs: int = 0, reserve_bytes: int = 0)
         else:
             group = 2
         return group, item["modified"]
-    candidates = sorted((item for item in records if not bool(item["frozen"])), key=priority)
+    candidates = sorted((item for item in records if not bool(item["frozen"]) and item["path"].name not in active_runs), key=priority)
     for item in candidates:
         if count + reserve_runs <= STORE_LIMIT_RUNS and total + reserve_bytes <= STORE_LIMIT_BYTES:
             break
@@ -927,7 +1126,7 @@ def publish_recording_health(root: Path, run_id: str, status: str, reason: str) 
     )
 
 
-def initialize_recording(root: Path, recorder: Recorder) -> None:
+def initialize_recording(root: Path, recorder: Recorder, gate: str = "1a", target: list[str] | None = None) -> None:
     if recorder.directory is None:
         return
     try:
@@ -938,7 +1137,10 @@ def initialize_recording(root: Path, recorder: Recorder) -> None:
             recorder.health_reason = "store_capacity_exceeded"
             recorder.directory = None
         else:
-            recorder.start({"run_id": recorder.run_id, "gate": "1a", "mode": "default"})
+            resource: dict[str, object] = {"run_id": recorder.run_id, "gate": gate, "mode": "default"}
+            if target is not None:
+                resource["target"] = target
+            recorder.start(resource)
     except (OSError, json.JSONDecodeError) as error:
         recorder.health = "dropped"
         recorder.health_reason = f"recording_io_{getattr(error, 'errno', None) or 'invalid'}"

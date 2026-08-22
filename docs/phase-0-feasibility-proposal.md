@@ -203,14 +203,18 @@ boundaries and therefore require three separate surfaces.
 
 | Surface | Contract |
 | --- | --- |
-| Result | After acquiring the gate lock and before execution, remove the previous result for that gate and mode. Each invocation atomically renames a temporary file to `.deskkin/results/<gate>/<mode>/result.json` only after final classification. `.deskkin/results` is mode 0700 and result files are 0600. The stable schema contains `schema_version`, `gate`, `mode`, `run_id`, `result` (`pass`, `fail`, or `inconclusive`), one stable `reason_code`, `cleanup_status`, optional `device_state` and firmware digest, evaluated criteria with numeric value/unit/threshold, and start/end timestamps. Both Gate 1E modes also contain `workload_identity_digest`, `disabled_semantic_event_digest`, and `disabled_framebuffer_digest`; conformance contains its matched `qualification_run_id`. A missing file or mismatched run ID is not success. stdout contains only a one-line human summary, run ID, and result path. At most one result file per gate and mode is retained. |
+| Result | Gate 1A removes its previous result after acquiring the lock and before execution. Gate 1B keeps the previous result authoritative until a new result is ready and atomically replaces it only after final classification and diagnostic finalization. Later gates must select and implement one of these crash semantics explicitly before their first run. `.deskkin/results` is mode 0700 and result files are 0600. The stable schema contains `schema_version`, `gate`, `mode`, `run_id`, `result` (`pass`, `fail`, or `inconclusive`), one stable `reason_code`, `cleanup_status`, optional `device_state` and firmware digest, evaluated criteria with numeric value/unit/threshold, and start/end timestamps. Both Gate 1E modes also contain `workload_identity_digest`, `disabled_semantic_event_digest`, and `disabled_framebuffer_digest`; conformance contains its matched `qualification_run_id`. A missing file or mismatched run ID is not success. stdout contains only a one-line human summary, run ID, and result path. At most one result file per gate and mode is retained. |
 | Control | `mise run gate:1a` through `gate:1e` invoke one common runner with a gate and target. Gate 1E defaults to `mode=qualification`; `--recording=off` selects its non-qualifying `mode=conformance`. For other gates the flag only opts out of diagnostics. Before touching a result, the supervisor atomically acquires an OS-released exclusive lock for that gate under `.deskkin/locks` and holds it through result publication and cleanup. A competitor exits 2 and reports the owning run ID without deleting or overwriting state. Defaults are 15 minutes for 1A/1B, 20 minutes for 1C, 10 minutes for 1D, and 5 minutes for either 1E mode. SIGINT requests cancellation and triggers bounded cleanup. Exit status is 0 for pass, 1 for gate fail, 2 for invalid setup/invocation or inconclusive cleanup, 124 for timeout, and 130 for cancellation; diagnostic recording failure never changes it. stderr contains only actionable control/setup errors plus the run ID. |
 | Diagnostic | Out-of-band records live under `.deskkin/diagnostics/<run-id>/`, separate from `result.json`. `diagnostic.jsonl`, recording health, and allowlisted artifacts describe causal stages. The runner prints the run ID before the first operation so an incomplete live run can be inspected. No diagnostic payload is put in the result schema, stdout summary, serial test protocol, or UI. |
 
-Result publication follows diagnostic finalization: when recording is enabled,
+Gate 1B result publication follows diagnostic finalization: when recording is enabled,
 artifacts and the final diagnostic completeness marker are closed first, then
-`result.json` is renamed into place. A crash before that rename leaves an
-inspectable partial diagnostic run and no result for the current run ID.
+`result.json` is atomically replaced. A crash before that rename leaves an
+inspectable partial diagnostic run while the previous run ID and result remain
+authoritative. The new diagnostic run cannot be mistaken for that prior result.
+Successful publication is acknowledged in diagnostics when recording is
+enabled; acknowledgement failure degrades diagnostics but never changes the
+gate result or exit status.
 Cancellation gives the owned process group and serial device five seconds to
 close before forced cleanup, and records cleanup failure without converting the
 cancellation into pass.

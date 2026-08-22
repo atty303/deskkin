@@ -55,6 +55,10 @@ run = "./scripts/bootstrap_gate1a.sh"
 description = "Run the Rust, Zephyr, and Embassy feasibility gate on supported QEMU targets"
 run = "python scripts/gate_runner.py run"
 
+[tasks."gate:1b"]
+description = "Run the Slint software-renderer feasibility gate on QEMU and the host"
+run = "python scripts/gate1b_runner.py"
+
 [tasks."diagnostics:list"]
 description = "List bounded local gate diagnostic runs"
 run = "python scripts/gate_runner.py list"

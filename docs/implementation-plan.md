@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gate 1A complete; Gate 1B ready
+Status: Phase 0 and Phase 1 Gates 1A-1B complete; Gate 1C ready
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,11 +11,11 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A feasibility application and local gate runner
-Application dependencies: approved Gate 1A Rust dependency set only
-Next action: implement only the approved Gate 1B Slint software-renderer spike
-             on the proven Zephyr Rust target; do not begin Gate 1C or a
-             physical CoreS3 gate until its ordered prerequisites pass
+Implementation: bounded Gate 1A and Gate 1B feasibility applications and local gate runners
+Application dependencies: approved Gate 1A set plus exact Slint 1.17.1 Gate 1B set
+Next action: implement only the approved Gate 1C ESP32-S3/Xtensa Zephyr Rust
+             toolchain spike; do not begin Gate 1D or a physical CoreS3 gate
+             until its ordered prerequisites pass
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -204,6 +204,34 @@ Verify:
 - desktop rendering of the exact same `.slint` UI;
 - no C++ application layer is required for this selected Rust path.
 
+Gate 1B passed on 2026-08-22. Complete local diagnostic run
+`73a3cc38-06dd-4581-ad1b-75bb81b8e221` recorded the bounded Slint 1.17.1
+software-renderer slice on `qemu_cortex_m3` and the host:
+
+- the exact `thumbv7m-none-eabi` Zephyr Rust target built, linked, booted, and
+  reproduced ELF digest
+  `5e28156cc39db148288d932a6e084548950ed1edb87cff93c482cb737e964133`
+  after removal and clean reconstruction of its build directory;
+- the shared `.slint` source rendered all 240 initial RGB565 lines, dispatched
+  one mock pointer callback through the typed UI callback, and returned 34
+  dirty line ranges covering exactly the 2,720 changed pixels;
+- the animation advanced through ten Embassy timer waits with zero busy polls;
+  eight dirty-render stages changed 2,352 pixels after input;
+- QEMU and host rendering normalized to the same 320x240 RGB image, digest
+  `ee51bbe3ed7662d999ee50c27985c30bcb34e253e04d8c00f18905a7f6f47416`;
+- the selected application layer is Rust and Slint with no C++ source, and the
+  exact direct dependency/version/feature review matched the approved Gate 1B
+  boundary;
+- the 48-test conformance suite passed, and the mode-0600 artifacts were
+  recorded with completeness `complete` and no forbidden path, identity, or
+  credential fixture.
+
+This proves only the bounded software-renderer integration on an already
+supported QEMU architecture. It does not establish Xtensa, CoreS3 display or
+touch support, physical-device performance, or a distribution license for
+embedded Slint firmware. The result remains a local, non-distributed
+GPL-3.0-only feasibility spike.
+
 ### Gate 1C: ESP32-S3/Xtensa Zephyr Rust toolchain
 
 Prove that a minimal `zephyr-lang-rust` application can compile, link, boot,
@@ -340,12 +368,11 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, and
 > `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
-> Phase 1 Gate 1B checkpoint and refresh any drift-prone upstream pins or
+> Phase 1 Gate 1C checkpoint and refresh any drift-prone upstream pins or
 > evidence before relying on them. All Phase 0 approval items are accepted and
-> Gate 1A passed with its result recorded above. Implement only the approved
-> Gate 1B Slint software-renderer spike on the proven Zephyr Rust target,
-> record its specified evidence, and stop at its pass/fail boundary. Do not
-> begin Gate 1C or any physical CoreS3 gate until the ordered prerequisites are
-> satisfied.
+> Gates 1A and 1B passed with their results recorded above. Implement only the
+> approved Gate 1C ESP32-S3/Xtensa Zephyr Rust toolchain spike, record its
+> specified evidence, and stop at its pass/fail boundary. Do not begin Gate 1D
+> or any physical CoreS3 gate until the ordered prerequisites are satisfied.
 > Record actual pass/fail evidence only when executing the approved Phase 1
 > gates.
