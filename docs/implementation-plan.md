@@ -3,8 +3,8 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 partially approved; foundation/dependencies and GPL-3.0
-        feasibility use accepted
+Status: Phase 0 partially approved; foundation/dependencies, GPL-3.0
+        feasibility use, and bounded patch policy accepted
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -14,10 +14,10 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: none
 Application dependencies: none
-Next action: approve or revise the remaining bounded patch and CoreS3 flashing
-             items in docs/phase-0-feasibility-proposal.md; do not add a Rust
-             workspace, toolchain, crate, board, binding, or code before all
-             are approved
+Next action: approve or revise physical CoreS3 flashing and observation in
+             docs/phase-0-feasibility-proposal.md; do not add a Rust workspace,
+             toolchain, crate, board, binding, or code before all items are
+             approved
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -308,10 +308,11 @@ Start a future development session with:
 > `docs/implementation-plan.md`, and
 > `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
 > Phase 0 partial-approval checkpoint and refresh any drift-prone upstream pins
-> or evidence before relying on them. The pinned foundation/direct dependencies
-> and local, non-distributed GPL-3.0 Slint feasibility use are approved; ask for
-> the remaining bounded patch and CoreS3 flashing items to be approved or
-> revised. Before all four items are approved, do not add toolchains,
-> dependencies, generated bindings, board files, a Rust workspace, or code.
+> or evidence before relying on them. The pinned foundation/direct
+> dependencies, local non-distributed GPL-3.0 Slint feasibility use, and bounded
+> `zephyr-lang-rust` patch policy are approved; ask for physical CoreS3 flashing
+> and observation to be approved or revised. Before all four items are approved,
+> do not add toolchains, dependencies, generated bindings, board files, a Rust
+> workspace, or code.
 > Record actual pass/fail evidence only when executing the approved Phase 1
 > gates.

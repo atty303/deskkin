@@ -12,11 +12,11 @@ and home automation.
 ## Status
 
 Deskkin is at a Phase 0 partial-approval checkpoint. The pinned foundation and
-direct dependencies plus local, non-distributed GPL-3.0 Slint feasibility use
-are approved; the bounded patch and CoreS3 flashing items remain pending. The
-repository contains no application code or application dependencies. The
-agreed product boundary, architecture, decisions, risks, and phased
-implementation plan are recorded in
+direct dependencies, local non-distributed GPL-3.0 Slint feasibility use, and
+bounded `zephyr-lang-rust` patch policy are approved; physical CoreS3 flashing
+and observation remain pending. The repository contains no application code or
+application dependencies. The agreed product boundary, architecture,
+decisions, risks, and phased implementation plan are recorded in
 [`docs/implementation-plan.md`](docs/implementation-plan.md), and the bounded
 foundation proposal is in
 [`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).

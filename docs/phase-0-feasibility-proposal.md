@@ -1,7 +1,7 @@
 # Phase 0 feasibility and dependency proposal
 
-- Status: Partially approved; foundation/dependencies and GPL-3.0 feasibility
-  use accepted, remaining implementation approvals required
+- Status: Partially approved; foundation/dependencies, GPL-3.0 feasibility use,
+  and bounded patch policy accepted; physical-device approval required
 - Evidence checked: 2026-08-22
 - Scope: Phase 1 foundation spikes only
 
@@ -408,7 +408,7 @@ approval state:
    above;
 2. **Approved 2026-08-22:** the local, non-distributed GPL-3.0 Slint
    feasibility use and the later distribution-license stop;
-3. **Pending:** the bounded `zephyr-lang-rust` patch policy;
+3. **Approved 2026-08-22:** the bounded `zephyr-lang-rust` patch policy;
 4. **Pending:** physical CoreS3 flashing and observation for Gates 1C-1E when
    those gates are reached.
 
