@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 complete; Phase 1 Gate 1A ready
+Status: Phase 0 and Phase 1 Gate 1A complete; Gate 1B ready
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,11 +11,11 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: none
-Application dependencies: none
-Next action: implement the approved Gate 1A foundation on supported Zephyr
-             targets; do not begin a later gate until its prerequisites and
-             the preceding gate's pass criteria are satisfied
+Implementation: bounded Gate 1A feasibility application and local gate runner
+Application dependencies: approved Gate 1A Rust dependency set only
+Next action: implement only the approved Gate 1B Slint software-renderer spike
+             on the proven Zephyr Rust target; do not begin Gate 1C or a
+             physical CoreS3 gate until its ordered prerequisites pass
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -160,6 +160,33 @@ Kconfig access, typed devicetree access, logging, and a clean reproducible
 build.
 
 This gate proves the baseline only. It does not prove Slint or ESP32-S3.
+
+Gate 1A passed on 2026-08-22. Local diagnostic run
+`c7fd0a3d-a090-4516-aedf-8c1c57617900` recorded complete evidence for both
+`qemu_cortex_m3` and `qemu_riscv32`:
+
+- each target configured through the pinned west manifest, compiled the Rust
+  static library, compiled and linked Zephyr, and booted under SDK 1.0.1 QEMU;
+- typed Kconfig and devicetree reads, logging, allocation value 42, and an
+  Embassy timer/channel wakeup emitted their fixed semantic markers;
+- each target emitted the final pass record and the deliberate Rust panic was
+  captured separately;
+- rebuilding each normal image from a removed build directory at the same path
+  reproduced its ELF digest: Cortex-M3
+  `5307cb81a7e6d0a79a9b39fa8f160b365bd2290514980f2f628908dda2ef4fcf`
+  and RISC-V
+  `0014f14da6c26aabf911d002e81c38decc9e62eb61d06d3f60e52f2f0cb8baac`;
+- the atomic result and diagnostic files were mode 0600, the diagnostic
+  directory was mode 0700, completeness was `complete`, and the privacy scan
+  found no absolute home path, username, or credential-pattern value.
+- the 24-test conformance suite covered observation on/off equivalence,
+  timeout/panic/cancellation separation, recording-storage degradation,
+  truncated and sensitive artifacts, remote-connection exclusion, concurrent
+  ownership, process-tree cleanup, retention, and deletion safety.
+
+The gate remains a feasibility boundary. These results do not establish Slint,
+Xtensa, CoreS3 board support, display behavior, or product application
+architecture.
 
 ### Gate 1B: Slint Rust software renderer on Zephyr
 
@@ -313,11 +340,12 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, and
 > `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
-> Phase 1 Gate 1A checkpoint and refresh any drift-prone upstream pins or
-> evidence before relying on them. All Phase 0 approval items are accepted.
-> Implement only the approved Gate 1A foundation on supported Zephyr targets,
+> Phase 1 Gate 1B checkpoint and refresh any drift-prone upstream pins or
+> evidence before relying on them. All Phase 0 approval items are accepted and
+> Gate 1A passed with its result recorded above. Implement only the approved
+> Gate 1B Slint software-renderer spike on the proven Zephyr Rust target,
 > record its specified evidence, and stop at its pass/fail boundary. Do not
-> begin Gate 1B or any physical CoreS3 gate until the ordered prerequisites are
+> begin Gate 1C or any physical CoreS3 gate until the ordered prerequisites are
 > satisfied.
 > Record actual pass/fail evidence only when executing the approved Phase 1
 > gates.

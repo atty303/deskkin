@@ -1,2 +1,6 @@
 .idea/
 .DS_Store
+.deskkin/
+.west/
+__pycache__/
+*.pyc

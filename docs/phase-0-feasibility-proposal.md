@@ -37,6 +37,7 @@ bindings, allocator, and atomic assumptions.
 | Python | `3.12.14` | Zephyr host tooling | Zephyr 4.4 requires Python 3.12 and warns that newer feature releases can be incompatible. |
 | CMake | `3.28.6` | Zephyr configuration | Last 3.28 patch line; matches the 3.28 minimum in current Zephyr guidance and `zephyr-lang-rust` samples. |
 | Ninja | `1.13.2` | Zephyr builds | Pinned current patch release; no project-specific customization. |
+| Clang/libclang | `15.0.7` | Gate 1A binding generation | The pinned `zephyr-sys` bindgen path produces valid target layouts with Clang 15; host Clang 22 generated invalid one-byte Zephyr structures during the approved spike. It is a host-only generator and is not linked into firmware. |
 | west | `1.5.0` | Workspace/module/SDK fetch | Stable west release, installed inside the project Python environment rather than globally. |
 | `espup` | `0.17.1` | Xtensa toolchain install | Official installer for the pinned ESP Rust toolchain; it is not used by non-Xtensa gates. |
 
@@ -57,7 +58,7 @@ adds `slint` plus the `slint-build` build dependency. `zephyr-build`,
 | --- | --- | --- | --- | --- | --- | --- |
 | `zephyr` | `0.1.0` from the pinned `zephyr-lang-rust` commit; 1A integration for Kconfig, devicetree, logging, allocation, panic, raw bindings, and the Zephyr-hosted Embassy adapter | Hand-written C ABI duplicates an early upstream integration; a C++ application layer violates the selected Rust path. | High while the upstream API is pre-1.0; upgrades require rerunning 1A-1C. | Apache-2.0 | Generated/raw bindings and FFI remain behind the platform adapter; causes and panic state must cross the boundary intact. | Patched to the immutable module path selected by the west manifest; Cargo lock records all transitive crates. |
 | `log` | `=0.4.22`; facade used by the pinned Zephyr/Embassy sample and captured by Zephyr's logger | Direct `printk` couples library code to Zephyr and turns public output into diagnostics. | Low; stable facade, no logger implementation owned by portable crates. | MIT/Apache-2.0 | Message fields use a static allowlist; no credential or arbitrary input formatting. | Exact version in Cargo lock; logger implementation comes from the pinned Zephyr adapter. |
-| `static_cell` | `=2.1.0`; statically initialize the one executor without `static mut` | Heap allocation makes executor creation depend on allocator availability; handwritten unsafe static initialization adds no value. | Low; narrow single use that can be removed if upstream owns executor storage. | MIT/Apache-2.0 | Encapsulates one-time static initialization; the UI/executor ownership invariant is still enforced by Deskkin types. | Exact version and features in Cargo lock; no build-time download beyond crates.io. |
+| `static_cell` | `=2.1.1`; statically initialize the one executor without `static mut` | Heap allocation makes executor creation depend on allocator availability; handwritten unsafe static initialization adds no value. | Low; narrow single use that can be removed if upstream owns executor storage. | MIT/Apache-2.0 | Encapsulates one-time static initialization; the UI/executor ownership invariant is still enforced by Deskkin types. Version 2.1.1 replaces the yanked 2.1.0 pin and restores the required `T: Send` bound on `ConstStaticCell`'s `Send` and `Sync` implementations. | Exact version and features in Cargo lock; no build-time download beyond crates.io. |
 | `embassy-executor` | `=0.7.0` with `log` and `task-arena-size-2048`; one executor hosted by one Zephyr thread | A Zephyr-only synchronous loop does not prove the accepted async role; the generic Embassy thread executor duplicates Zephyr scheduling. | Medium; feature flags and task arena size are reviewed on upgrade. | MIT/Apache-2.0 | Fixed task arena bounds memory; no interrupt executor or global application-core executor. | Exact version/features in Cargo lock; Gate 1A records the arena configuration. |
 | `embassy-sync` | `=0.6.2`; one bounded typed channel/signal in 1A | Custom queues or raw Zephyr synchronization leak platform types and require bespoke wakeup safety. | Medium; version remains aligned with the pinned `zephyr` crate. | MIT/Apache-2.0 | Bounded capacity, no unbounded queue, and one declared mutex strategy; overflow is a typed failure. | Exact version in Cargo lock; no independently floating Embassy version. |
 | `embassy-time` | `=0.4.0` with `tick-hz-10_000`; Zephyr-backed timer and Slint animation wakeup | Direct Zephyr timers in presenter/UI code break the runtime boundary and virtual-time design; busy polling is forbidden. | Medium; tick-rate and driver compatibility are remeasured on change. | MIT/Apache-2.0 | One time driver, bounded timer queue, and explicit timeout/cancel status; no ambient clock in the core. | Exact version/features in Cargo lock; build record includes tick rate and Zephyr timer configuration. |
@@ -85,7 +86,8 @@ The repository's mise configuration will pin and provide:
 
 - Rust/Cargo 1.95.0 and the standard targets `thumbv7m-none-eabi` and
   `riscv32i-unknown-none-elf`;
-- Python 3.12.14, CMake 3.28.6, Ninja 1.13.2, and `espup` 0.17.1;
+- Python 3.12.14, CMake 3.28.6, Ninja 1.13.2, Clang/libclang 15.0.7,
+  and `espup` 0.17.1;
 - tasks that create a repository-local Python environment and invoke west,
   Cargo, and the existing validation entrypoints.
 

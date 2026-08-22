@@ -11,11 +11,13 @@ and home automation.
 
 ## Status
 
-Deskkin has completed its Phase 0 approval checkpoint. The ordered Phase 1
-foundation gates are authorized, and Gate 1A on supported Zephyr targets is the
-next implementation slice. The repository currently contains no application
-code or application dependencies. The agreed product boundary, architecture,
-decisions, risks, and phased implementation plan are recorded in
+Deskkin has completed Phase 0 and Phase 1 Gate 1A. The pinned Rust application
+builds, links, boots, cleanly rebuilds, and captures deliberate panics on the
+supported Zephyr QEMU Cortex-M3 and RISC-V targets. Gate 1B, the bounded Slint
+Rust software-renderer spike, is the next implementation slice. The repository
+contains only this feasibility application and its tooling; it does not yet
+contain the portable product application. The agreed product boundary,
+architecture, decisions, risks, and phased implementation plan are recorded in
 [`docs/implementation-plan.md`](docs/implementation-plan.md), and the bounded
 foundation proposal is in
 [`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).
@@ -68,6 +70,17 @@ mise run test
 `mise run fix` applies available fixes without staging the changed files.
 
 Pass selected files after `--`, for example `mise run check -- README.md`.
+
+Prepare and run the completed Gate 1A evidence path with:
+
+```sh
+mise run gate:1a:bootstrap
+mise run gate:1a
+mise run diagnostics:list
+```
+
+Gate state, SDKs, fetched sources, builds, results, and bounded local
+diagnostics remain under the ignored `.deskkin/` directory.
 
 ## License
 

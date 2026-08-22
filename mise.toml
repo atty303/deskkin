@@ -2,7 +2,13 @@ min_version = "2026.8.6"
 
 [tools]
 actionlint = "1.7.12"
+clang = "15.0.7"
+"conda:libclang" = "15.0.7"
+cmake = "3.28.6"
 hk = "1.55.0"
+ninja = "1.13.2"
+python = "3.12.14"
+rust = { version = "1.95.0", targets = "thumbv7m-none-eabi,riscv32i-unknown-none-elf" }
 taplo = "0.10.0"
 
 [env]
@@ -39,3 +45,20 @@ exec hk fix --all --safe --no-stage
 [tasks.test]
 description = "Run all reproducible checks"
 depends = ["check"]
+run = "python -m unittest discover -s tests"
+
+[tasks."gate:1a:bootstrap"]
+description = "Prepare the repository-local Gate 1A Zephyr workspace and SDK"
+run = "./scripts/bootstrap_gate1a.sh"
+
+[tasks."gate:1a"]
+description = "Run the Rust, Zephyr, and Embassy feasibility gate on supported QEMU targets"
+run = "python scripts/gate_runner.py run"
+
+[tasks."diagnostics:list"]
+description = "List bounded local gate diagnostic runs"
+run = "python scripts/gate_runner.py list"
+
+[tasks."diagnostics:delete"]
+description = "Delete exactly one resolved local gate diagnostic run"
+run = "python scripts/gate_runner.py delete"
