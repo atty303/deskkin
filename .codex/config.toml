@@ -1,0 +1,16 @@
+[mcp_servers.hk]
+command = "mise"
+args = ["exec", "--", "hk", "mcp", "--root", "."]
+required = false
+startup_timeout_sec = 60
+default_tools_approval_mode = "writes"
+disabled_tools = ["start_check"]
+
+[mcp_servers.hk.tools.cancel_run]
+approval_mode = "auto"
+
+[mcp_servers.hk.tools.start_safe_check]
+approval_mode = "auto"
+
+[mcp_servers.hk.tools.start_safe_fix]
+approval_mode = "auto"
