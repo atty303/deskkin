@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gates 1A-1E complete; Phase 2 proposal awaiting approval
+Status: Phase 0 and Phase 1 Gates 1A-1E complete; Phase 2 implementation approved
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -12,9 +12,9 @@ Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: bounded Gate 1A through Gate 1E feasibility applications and local gate runners
-Application dependencies: approved Gate 1A set plus exact Slint 1.17.1 Gate 1B set
-Next action: review and approve the Phase 2 portable-core and
-             deterministic-simulator vertical slice before implementation
+Application dependencies: approved Gate 1A set plus exact hosted Phase 2 set
+Next action: implement and verify the approved Phase 2 periodic
+             infrastructure-status simulator
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -380,21 +380,20 @@ expected face colors and partial updates without noisy dirty rectangles.
 
 After the foundation passes:
 
-1. introduce only the application core, message types, effect model, and
-   runtime ports needed by one character interaction;
-2. keep the core `no_std` and runtime-neutral;
-3. add a desktop Slint application using the same UI and presenter;
-4. add virtual time and scripted fake effects;
-5. record semantic input, requested effects, state transitions, and UI views;
-6. prove deterministic replay of one interaction and one injected failure.
+1. add the pure `no_std` application core for a provider-neutral availability;
+2. start a read immediately and refresh it every five seconds;
+3. map read failure to `Unknown` and retry, but stop on timer-arm failure;
+4. share one 320 x 240 Slint status surface and presenter across native Linux
+   and deterministic headless runtimes;
+5. record bounded semantic refresh runs without changing results;
+6. prove byte-identical replay of success and injected read failure.
 
 Do not add the host protocol or Unraid connector merely to fill the proposed
 workspace shape.
 
-The proposed first slice, exact dependency boundary, observation contract,
-acceptance criteria, and approval items are in
-[`phase-2-slice-proposal.md`](phase-2-slice-proposal.md). No Phase 2 workspace
-or application code is authorized until that checkpoint is approved.
+The exact domain contract, two-crate boundary, dependency and licensing
+decisions, observation contract, acceptance criteria, and 2026-08-23 approval
+record are in [`phase-2-slice-proposal.md`](phase-2-slice-proposal.md).
 
 ## Phase 3: host and protocol vertical slice
 
@@ -459,7 +458,7 @@ The following are deliberately unresolved:
 - production Rust wrapper ownership beyond the approved Phase 1 gates;
 - production Embassy executor and thread topology beyond Gate 1A's single
   executor;
-- desktop runtime and supported desktop operating systems;
+- desktop runtime and support beyond the approved Linux simulator;
 - protocol transport, schema language, serialization, and compatibility rule;
 - pairing, device identity storage, and transport security;
 - host process and connector isolation;
@@ -482,12 +481,9 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`, and
 > `docs/phase-2-slice-proposal.md`. Confirm that the repository is at the
-> completed Phase 1 Gate 1E checkpoint and refresh any drift-prone upstream
-> pins or evidence before relying on them. Gates 1A-1E passed with the physical
-> qualification and recording-off conformance evidence recorded above. Preserve
-> the physical residual-state contract for any later device run. The current
-> checkpoint is review and explicit approval of the Phase 2 proposal; do not add
-> its workspace, dependencies, tooling integration, or application code before
-> that approval. Do not add the host protocol or Unraid connector merely to fill
-> the proposed workspace shape. Record actual pass/fail evidence only when
-> executing an approved gate or slice.
+> completed Phase 1 Gate 1E checkpoint and that the Phase 2 periodic
+> infrastructure-status slice was approved on 2026-08-23. Implement only its
+> pure core and Linux simulator boundary. Do not add a protocol, connector,
+> device build, provider access, release, or publication. Preserve the physical
+> residual-state contract for any later device run and record actual pass/fail
+> evidence only when executing an approved gate or slice.

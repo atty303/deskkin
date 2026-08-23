@@ -18,11 +18,10 @@ the combined CoreS3 Slint touch-to-dirty-display path. The repository still
 contains feasibility applications and tooling rather than the portable product
 application.
 
-The next checkpoint is approval of the smallest Phase 2 portable-core and
-deterministic-simulator vertical slice in
-[`docs/phase-2-slice-proposal.md`](docs/phase-2-slice-proposal.md). Do not add
-the Phase 2 workspace or application code before that approval. The agreed
-product boundary, architecture, decisions, evidence, and phased plan remain in
+The approved next checkpoint is the Phase 2 provider-neutral periodic
+availability status: a pure portable core and a deterministic Linux simulator
+described in [`docs/phase-2-slice-proposal.md`](docs/phase-2-slice-proposal.md).
+The agreed product boundary, architecture, decisions, evidence, and phased plan remain in
 [`docs/implementation-plan.md`](docs/implementation-plan.md), with the Phase 1
 foundation baseline in
 [`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).
@@ -87,7 +86,7 @@ diagnostics remain under the ignored `.deskkin/` directory.
 
 ## License
 
-Deskkin source is MIT except for the explicitly marked local Gate 1B Slint
-feasibility spike, which is GPL-3.0-only. Gate 1B firmware and binaries are not
-distributed; product distribution requires a separately approved Slint
-licensing decision.
+Deskkin source is MIT. Slint-bearing Gate 1B and Phase 2 combined binaries use
+Slint under GPL-3.0-only and are GPLv3 as a whole. Phase 2 authorizes that
+distribution model but adds no release or publication; actual distribution
+requires a separately approved corresponding-source bundle and delivery method.
