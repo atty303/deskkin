@@ -36,6 +36,8 @@ WEST_REVISIONS = {
     **common.WEST_REVISIONS,
     "hal_espressif": "19f979cfe66bcab09abe3b0b3aa419a664c1606c",
     "hal_xtensa": "0495a1afd300b644d3ec8dd2c3bd11007e69a892",
+    "mbedtls": "a3e190fe44c78d1ba67f55979e1257328cc7d0d8",
+    "tf-psa-crypto": "dc575a2ddcc8cb16275d24c42a52eaf79ebe2231",
 }
 PATCHES = tuple(f"patches/gate1c-zephyr-lang-rust/{name}" for name in (
     "0001-map-esp32s3-xtensa-target.patch",

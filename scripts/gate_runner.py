@@ -151,8 +151,8 @@ def record_schema_safe(value: dict[str, object]) -> bool:
     record_type = value.get("type")
     common = {"schema_version", "type"}
     allowed = {
-        "resource": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
-        "resource_verified": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
+        "resource": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "rf_blob_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
+        "resource_verified": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "rf_blob_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
         "operation": common | {"run_id", "operation", "status", "duration_ms", "error_type", "target"},
         "completeness": common | {"status", "reason", "result", "reason_code"},
         "result_published": common | {"run_id", "result"},
@@ -186,6 +186,16 @@ def record_schema_safe(value: dict[str, object]) -> bool:
     if record_type == "resource_verified":
         maps = ("west_revisions", "sdk_file_digests", "input_digests")
         if not all(isinstance(value.get(key), dict) and all(isinstance(name, str) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", digest) for name, digest in value[key].items()) for key in maps):
+            return False
+        if "rf_blob_digests" in value and not (
+            isinstance(value["rf_blob_digests"], dict)
+            and all(
+                isinstance(name, str)
+                and isinstance(digest, str)
+                and re.fullmatch(r"[0-9a-f]{64}", digest)
+                for name, digest in value["rf_blob_digests"].items()
+            )
+        ):
             return False
         if not isinstance(value.get("tool_identities"), dict) or not all(isinstance(name, str) and isinstance(identity, str) for name, identity in value["tool_identities"].items()):
             return False

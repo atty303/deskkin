@@ -71,6 +71,11 @@ for patch_file in "$repo_root"/patches/gate1c-zephyr-lang-rust/*.patch; do
   fi
 done
 
+(
+  cd -- "$state_dir"
+  venv/bin/west blobs fetch hal_espressif
+)
+
 "$rustup_dir/toolchains/$toolchain_name/bin/rustc" --version
 "$xtensa_gcc" --version | head -1
 printf 'Gate 1C bootstrap complete: %s\n' "$state_dir"

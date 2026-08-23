@@ -17,6 +17,8 @@ manifest:
           - cmsis_6
           - hal_espressif
           - hal_xtensa
+          - mbedtls
+          - tf-psa-crypto
     - name: zephyr-lang-rust
       remote: zephyrproject-rtos
       revision: dd73abc242e995784da62352fe8c70d9a6c7ac2e

@@ -48,6 +48,7 @@ static const struct device *const flash = DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_c
 static const struct device *const i2c0 = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 static const struct device *const i2c1 = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 static const struct device *const spi2 = DEVICE_DT_GET(DT_NODELABEL(spi2));
+static const struct device *const wifi = DEVICE_DT_GET(DT_NODELABEL(wifi));
 static const struct device *const gpio_expander = DEVICE_DT_GET(DT_NODELABEL(aw9523b_gpio));
 static const struct device *const power_regulator =
 	DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(regulator)));
@@ -191,6 +192,14 @@ static bool probe_psram(const char *run_id)
 	return true;
 }
 
+static bool probe_wifi(const char *run_id)
+{
+	const bool ready = device_is_ready(wifi);
+	printk("DESKKIN_GATE_EVENT schema=1 event=wifi run_id=%s status=%s\n", run_id,
+	       ready ? "ready" : "not_ready");
+	return ready;
+}
+
 static bool probe_flash(const char *run_id)
 {
 	uint8_t bytes[FLASH_PROBE_BYTES];
@@ -283,7 +292,8 @@ int main(void)
 		printk("DESKKIN_GATE_EVENT schema=1 event=boot run_id=%s board=m5stack_cores3 "
 		       "firmware_digest=%s\n",
 		       run_id, DESKKIN_FIRMWARE_DIGEST);
-		if (!probe_devices(run_id) || !probe_psram(run_id) || !probe_flash(run_id) ||
+		if (!probe_devices(run_id) || !probe_wifi(run_id) || !probe_psram(run_id) ||
+		    !probe_flash(run_id) ||
 		    !draw_rectangles(run_id)) {
 			printk("DESKKIN_GATE_RESULT schema=1 run_id=%s result=fail\n", run_id);
 			printk("DESKKIN_GATE_EVENT schema=1 event=idle run_id=%s firmware_digest=%s\n",

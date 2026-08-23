@@ -23,6 +23,14 @@ import gate_runner as common
 TARGET = gate1c.TARGET
 WEST_REVISIONS = gate1c.WEST_REVISIONS
 TOOL_DIGESTS = {"xtensa_gcc": gate1c.TOOL_DIGESTS["xtensa_gcc"]}
+RF_BLOB_DIGESTS = {
+    "libcore.a": "01e5e7540db58e46d4d9144c5003a00588f146dcee786f22d5ba822b6727243d",
+    "libnet80211.a": "ab462592d9c3533e67064fea500f6f8d54c5222bffbe7eaabd1902aeec5dab04",
+    "libpp.a": "07c4eeb8198f35a600878e131bed20b43e7463fc29b0986acacd79ba4d46b655",
+    "libphy.a": "29dcc18a035801bd41486d5d59f3caeb62f8ed153533c488828bffef1abb99fd",
+    "libcoexist.a": "fc370f917302c0da9437063ba76113e9102bc8af4a6985aa9ba2d2c09231dfbd",
+}
+PREVIOUS_GATE1D_FIRMWARE_DIGEST = "994f4902ba0363a101314bd62128f931382dc0ef7210e15f65702cb1c3ff9758"
 INPUTS = (
     "west.yml",
     "mise.toml",
@@ -47,6 +55,7 @@ SERIAL_PATTERNS = {
     "idle": re.compile(rf"^DESKKIN_GATE_EVENT schema=1 event=idle run_id=(?P<run_id>{UUID_PATTERN}) firmware_digest=(?P<firmware_digest>{DIGEST_PATTERN})$"),
     "boot": re.compile(rf"^DESKKIN_GATE_EVENT schema=1 event=boot run_id=(?P<run_id>{UUID_PATTERN}) board=(?P<board>m5stack_cores3) firmware_digest=(?P<firmware_digest>{DIGEST_PATTERN})$"),
     "devices": re.compile(rf"^DESKKIN_GATE_EVENT schema=1 event=devices run_id=(?P<run_id>{UUID_PATTERN}) power=(?P<power>ok) gpio=(?P<gpio>ok) display=(?P<display>ok) touch=(?P<touch>ok) flash=(?P<flash>ok) i2c0=(?P<i2c0>ok) i2c1=(?P<i2c1>ok) spi2=(?P<spi2>ok) width=(?P<width>[0-9]+) height=(?P<height>[0-9]+) format=(?P<format>rgb565)$"),
+    "wifi": re.compile(rf"^DESKKIN_GATE_EVENT schema=1 event=wifi run_id=(?P<run_id>{UUID_PATTERN}) status=(?P<status>ready|not_ready)$"),
     "psram": re.compile(rf"^DESKKIN_GATE_EVENT schema=1 event=psram run_id=(?P<run_id>{UUID_PATTERN}) bytes=(?P<bytes>[0-9]+) status=(?P<status>ok)$"),
     "flash_read": re.compile(rf"^DESKKIN_GATE_EVENT schema=1 event=flash_read run_id=(?P<run_id>{UUID_PATTERN}) bytes=(?P<bytes>[0-9]+) status=(?P<status>ok)$"),
     "display_rect": re.compile(rf"^DESKKIN_GATE_EVENT schema=1 event=display_rect run_id=(?P<run_id>{UUID_PATTERN}) index=(?P<index>[0-9]+) x=(?P<x>[0-9]+) y=(?P<y>[0-9]+) width=(?P<width>[0-9]+) height=(?P<height>[0-9]+) bytes=(?P<bytes>[0-9]+) duration_us=(?P<duration_us>[0-9]+) status=(?P<status>ok)$"),
@@ -101,6 +110,7 @@ class Runner(gate1c.Runner):
         self.verified_resources.update({"gate": "1d", "target": [TARGET]})
         self.builds = self.rebuilds = self.linker_checks = 0
         self.physical_boots = self.device_checks = self.psram_checks = 0
+        self.wifi_checks = 0
         self.flash_checks = self.display_rect_checks = self.touch_checks = 0
         self.panel_checks = self.idle_checks = 0
 
@@ -121,6 +131,14 @@ class Runner(gate1c.Runner):
         return {
             "xtensa_gcc": self.state / "sdk/gnu/xtensa-espressif_esp32s3_zephyr-elf/bin/xtensa-espressif_esp32s3_zephyr-elf-gcc",
         }
+
+    def _verify_rf_blobs(self) -> None:
+        directory = self.state / "west/modules/hal/espressif/zephyr/blobs/lib/esp32s3"
+        if any(
+            not (path := directory / name).is_file() or common.sha256(path) != digest
+            for name, digest in RF_BLOB_DIGESTS.items()
+        ):
+            raise common.GateInconclusive("rf_blob_mismatch")
 
     def prepare(self) -> None:
         started = time.monotonic()
@@ -147,6 +165,7 @@ class Runner(gate1c.Runner):
                 raise common.GateInconclusive("host_tool_mismatch")
             if any(common.sha256(self._tool_paths()[name]) != digest for name, digest in TOOL_DIGESTS.items()):
                 raise common.GateInconclusive("tool_digest_mismatch")
+            self._verify_rf_blobs()
             revision = self.command("prepare", ["git", "-C", str(self.root), "rev-parse", "HEAD"], "host").strip()
             self.verified_resources.update({
                 "application_version": "gate1d-0.1.0",
@@ -155,6 +174,7 @@ class Runner(gate1c.Runner):
                 "deskkin_dirty": bool(self.command("prepare", ["git", "-C", str(self.root), "status", "--porcelain"], "host").strip()),
                 "west_revisions": actual,
                 "sdk_file_digests": dict(TOOL_DIGESTS),
+                "rf_blob_digests": dict(RF_BLOB_DIGESTS),
                 "sdk_version": "1.0.1",
                 "tool_identities": probes,
                 "input_digests": {name: common.sha256(self.root / name) for name in INPUTS},
@@ -177,6 +197,7 @@ class Runner(gate1c.Runner):
         self._verify_west_trees("input_changed")
         if any(common.sha256(self._tool_paths()[name]) != digest for name, digest in TOOL_DIGESTS.items()):
             raise common.GateInconclusive("input_changed")
+        self._verify_rf_blobs()
 
     def _verify_west_trees(self, reason: str) -> None:
         for name, path in self.west_paths.items():
@@ -227,9 +248,10 @@ class Runner(gate1c.Runner):
             "gpio_aw9523b_init",
             "ili9xxx_write",
             "mfd_axp2101_init",
+            "esp32_wifi_dev_init",
             "shared_multi_heap_aligned_alloc",
         )
-        required_config = ("CONFIG_BOARD_M5STACK_CORES3=y", "CONFIG_DISPLAY=y", "CONFIG_ESP_SPIRAM=y", "CONFIG_INPUT=y")
+        required_config = ("CONFIG_BOARD_M5STACK_CORES3=y", "CONFIG_DISPLAY=y", "CONFIG_ESP_SPIRAM=y", "CONFIG_INPUT=y", "CONFIG_WIFI_ESP32=y")
         if "Class:                             ELF32" not in header or "Machine:                           Tensilica Xtensa Processor" not in header:
             raise common.GateFailure("target_attributes_failed")
         if not all(re.search(rf"\b{re.escape(name)}$", symbols, re.MULTILINE) for name in required_symbols):
@@ -302,7 +324,11 @@ class Runner(gate1c.Runner):
                 os.close(descriptor)
 
     def preflight(self) -> None:
-        recognized = {self.firmware_digest, gate1c.firmware_digest(self.root)}
+        recognized = {
+            self.firmware_digest,
+            gate1c.firmware_digest(self.root),
+            PREVIOUS_GATE1D_FIRMWARE_DIGEST,
+        }
         previous = common.read_result_safe(
             self.state / "results/1d/default/result.json", "1d", "default"
         )
@@ -326,19 +352,22 @@ class Runner(gate1c.Runner):
         self.serial_exchange("status", "postflash", {"idle"}, 5)
         records = self.serial_exchange(
             "run", "normal",
-            {"boot", "devices", "psram", "flash_read", "display_rect", "panel", "touch", "result", "idle"},
+            {"boot", "devices", "wifi", "psram", "flash_read", "display_rect", "panel", "touch", "result", "idle"},
             120,
         )
         result = [record for record in records if record["event"] == "result"]
         rects = [record for record in records if record["event"] == "display_rect"]
         touches = [record for record in records if record["event"] == "touch"]
         devices = next(record for record in records if record["event"] == "devices")
+        wifi = next(record for record in records if record["event"] == "wifi")
         psram = next(record for record in records if record["event"] == "psram")
         flash = next(record for record in records if record["event"] == "flash_read")
         if len(result) != 1 or result[0].get("result") != "pass":
             raise common.GateFailure("board_runtime_failed")
         if devices.get("width") != 320 or devices.get("height") != 240:
             raise common.GateFailure("display_capabilities_failed")
+        if wifi.get("status") != "ready":
+            raise common.GateFailure("wifi_device_not_ready")
         if psram.get("bytes") != 32768 or flash.get("bytes") != 32:
             raise common.GateFailure("memory_runtime_failed")
         if len(rects) != 3 or any(any(record.get(key) != value for key, value in expected.items()) or record.get("duration_us", 0) <= 0 for record, expected in zip(rects, RECTANGLES, strict=True)):
@@ -352,6 +381,7 @@ class Runner(gate1c.Runner):
         if not touches_valid:
             raise common.GateFailure("touch_sequence_failed")
         self.physical_boots = self.device_checks = self.psram_checks = 1
+        self.wifi_checks = 1
         self.flash_checks = self.panel_checks = self.idle_checks = 1
         self.display_rect_checks = self.touch_checks = 3
 
@@ -399,6 +429,7 @@ class Runner(gate1c.Runner):
             ("linker_checks", self.linker_checks, 1),
             ("physical_boots", self.physical_boots, 1),
             ("device_initialization_checks", self.device_checks, 1),
+            ("wifi_readiness_checks", self.wifi_checks, 1),
             ("psram_checks", self.psram_checks, 1),
             ("flash_read_checks", self.flash_checks, 1),
             ("partial_display_rectangles", self.display_rect_checks, 3),

@@ -295,6 +295,9 @@ Gate 1D passed on a physical CoreS3. Complete local diagnostic run
 - AXP2101 power management, AW9523 GPIO expansion, the ILI9342C RGB565
   display, FT6336 touch, flash, PSRAM, I2C0, I2C1, and SPI2 all initialized
   through their upstream Zephyr devices;
+- a follow-up bounded readiness probe enables Zephyr's pinned ESP32-S3 Wi-Fi
+  driver and RF blobs and requires its device to report ready, without scanning,
+  joining an access point, acquiring an address, or handling credentials;
 - a 32 KiB external-PSRAM allocation passed a bounded read/write probe, and a
   read-only 32-byte flash probe returned nonzero contents;
 - three non-fullscreen 80x60 RGB565 rectangles at `(20,20)`, `(120,90)`, and
@@ -314,6 +317,21 @@ Gate 1D passed on a physical CoreS3. Complete local diagnostic run
   `cleanup_status=success`, and `device_state=test_firmware_idle`; cleanup
   reflashed and re-read inert idle in 3,508 milliseconds, within the approved
   ten-second residual-state limit.
+
+Complete follow-up diagnostic run
+`07613046-2cb5-4259-b63b-a908a72b750e` added that Wi-Fi readiness criterion.
+The pinned west manifest now includes the Mbed TLS and TF-PSA-Crypto revisions
+required by Zephyr's ESP32-S3 Wi-Fi driver, and bootstrap fetches the
+HAL-declared RF blob set that Zephyr verifies before configuring the driver.
+The run retained `event=wifi status=ready`, with no scan, association, address
+acquisition, or credential input. It passed every prior Gate 1D criterion with
+firmware-input digest
+`ad47d753cc40978656efa6eb649fc8f7fcc8668e0213557f24c2abea43b41912`,
+image SHA-256
+`aa1f06ed28ec2130dd078e15654c95feafcec5cf225360beaa92a0b762a07398`,
+`cleanup_status=success`, and `device_state=test_firmware_idle`. Cleanup
+reflashed in 4,381 milliseconds and re-read inert idle in 1,737 milliseconds,
+remaining within the approved ten-second residual-state limit.
 
 The runner also retains the run-bound transfer and raw touch samples needed to
 distinguish a missing touch from a coordinate outside the expected rectangle.

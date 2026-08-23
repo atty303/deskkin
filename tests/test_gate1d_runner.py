@@ -41,6 +41,21 @@ class Gate1DRunnerTests(unittest.TestCase):
         self.assertEqual(record["bytes"], 9600)
         self.assertIsNone(gate.parse_serial_record(line + " arbitrary=payload", gate.TARGET, "normal"))
 
+    def test_wifi_readiness_is_run_bound_and_structured(self):
+        run_id = str(uuid.uuid4())
+        ready = gate.parse_serial_record(
+            f"DESKKIN_GATE_EVENT schema=1 event=wifi run_id={run_id} status=ready",
+            gate.TARGET,
+            "normal",
+        )
+        not_ready = gate.parse_serial_record(
+            f"DESKKIN_GATE_EVENT schema=1 event=wifi run_id={run_id} status=not_ready",
+            gate.TARGET,
+            "normal",
+        )
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(not_ready["status"], "not_ready")
+
     def test_zero_duration_is_not_accepted_as_transfer_evidence(self):
         source = Path(gate.__file__).read_text(encoding="utf-8")
         self.assertIn('record.get("duration_us", 0) <= 0', source)
@@ -85,10 +100,14 @@ class Gate1DRunnerTests(unittest.TestCase):
         runner.preflight()
         self.assertEqual(runner.observed[:3], ("status", "preflight", {"idle"}))
         self.assertTrue(
-            {runner.firmware_digest, gate.gate1c.firmware_digest(root)}
+            {
+                runner.firmware_digest,
+                gate.gate1c.firmware_digest(root),
+                gate.PREVIOUS_GATE1D_FIRMWARE_DIGEST,
+            }
             <= runner.observed[3]
         )
-        self.assertLessEqual(len(runner.observed[3]), 3)
+        self.assertLessEqual(len(runner.observed[3]), 4)
         self.assertFalse(runner.device_touched)
 
     def test_preflight_accepts_last_confirmed_idle_digest(self):
@@ -184,6 +203,28 @@ class Gate1DRunnerTests(unittest.TestCase):
         resource = {"schema_version": 1, "type": "resource", "run_id": run_id, "gate": "1d", "mode": "recover", "target": [gate.TARGET]}
         completeness = {"schema_version": 1, "type": "completeness", "status": "complete", "reason": None, "result": "inconclusive", "reason_code": "serial_protocol_timeout"}
         self.assertTrue(gate.common.diagnostic_records_safe([resource, completeness], run_id))
+
+    def test_rf_blob_digests_are_allowed_verified_resource_fields(self):
+        run_id = str(uuid.uuid4())
+        resource = {
+            "schema_version": 1,
+            "type": "resource_verified",
+            "run_id": run_id,
+            "gate": "1d",
+            "mode": "default",
+            "target": [gate.TARGET],
+            "west_revisions": {"zephyr": "a" * 40},
+            "sdk_file_digests": {"gcc": "b" * 64},
+            "rf_blob_digests": {"libphy.a": "c" * 64},
+            "input_digests": {"west.yml": "d" * 64},
+            "tool_identities": {"gcc": "gcc 14.3.0"},
+            "sdk_version": "1.0.1",
+            "application_version": "gate1d-0.1.0",
+            "build_type": "dev",
+            "deskkin_revision": "e" * 40,
+            "deskkin_dirty": True,
+        }
+        self.assertTrue(gate.common.record_schema_safe(resource))
 
 
 if __name__ == "__main__":
