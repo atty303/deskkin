@@ -11,22 +11,21 @@ and home automation.
 
 ## Status
 
-Deskkin has completed Phase 0 and Phase 1 Gates 1A and 1B. The pinned Rust
-application builds, links, boots, cleanly rebuilds, and captures deliberate
-panics on the supported Zephyr QEMU Cortex-M3 and RISC-V targets. The bounded
-Slint 1.17.1 Rust software-renderer spike also renders the same UI on QEMU and
-the host with matching normalized RGB output, typed mock input, dirty ranges,
-and timer-driven animation without busy polling. Gate 1C, the ESP32-S3/Xtensa
-Zephyr Rust toolchain spike, is the next implementation slice. The repository
-contains only feasibility applications and tooling; it does not yet contain
-the portable product application. The agreed product boundary,
-architecture, decisions, risks, and phased implementation plan are recorded in
-[`docs/implementation-plan.md`](docs/implementation-plan.md), and the bounded
-foundation proposal is in
-[`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).
+Deskkin has completed Phase 0 and all Phase 1 foundation gates. The bounded
+evidence covers Rust and Slint on supported Zephyr QEMU targets, the
+ESP32-S3/Xtensa Rust toolchain, upstream CoreS3 board and driver behavior, and
+the combined CoreS3 Slint touch-to-dirty-display path. The repository still
+contains feasibility applications and tooling rather than the portable product
+application.
 
-Implement the approved gates in order and stop at each gate's pass/fail
-boundary. Do not start a later gate until its prerequisites pass.
+The next checkpoint is approval of the smallest Phase 2 portable-core and
+deterministic-simulator vertical slice in
+[`docs/phase-2-slice-proposal.md`](docs/phase-2-slice-proposal.md). Do not add
+the Phase 2 workspace or application code before that approval. The agreed
+product boundary, architecture, decisions, evidence, and phased plan remain in
+[`docs/implementation-plan.md`](docs/implementation-plan.md), with the Phase 1
+foundation baseline in
+[`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).
 
 ## Architecture
 

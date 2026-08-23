@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gates 1A-1E complete; Phase 2 has not started
+Status: Phase 0 and Phase 1 Gates 1A-1E complete; Phase 2 proposal awaiting approval
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -13,8 +13,8 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: bounded Gate 1A through Gate 1E feasibility applications and local gate runners
 Application dependencies: approved Gate 1A set plus exact Slint 1.17.1 Gate 1B set
-Next action: define the smallest Phase 2 portable-core and deterministic-simulator
-             vertical slice before adding the host protocol or a connector
+Next action: review and approve the Phase 2 portable-core and
+             deterministic-simulator vertical slice before implementation
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -391,6 +391,11 @@ After the foundation passes:
 Do not add the host protocol or Unraid connector merely to fill the proposed
 workspace shape.
 
+The proposed first slice, exact dependency boundary, observation contract,
+acceptance criteria, and approval items are in
+[`phase-2-slice-proposal.md`](phase-2-slice-proposal.md). No Phase 2 workspace
+or application code is authorized until that checkpoint is approved.
+
 ## Phase 3: host and protocol vertical slice
 
 Design the smallest semantic protocol slice for one paired desktop host and one
@@ -475,13 +480,14 @@ cross-cutting decision as a new ADR.
 Start a future development session with:
 
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
-> `docs/implementation-plan.md`, and
-> `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
+> `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`, and
+> `docs/phase-2-slice-proposal.md`. Confirm that the repository is at the
 > completed Phase 1 Gate 1E checkpoint and refresh any drift-prone upstream
 > pins or evidence before relying on them. Gates 1A-1E passed with the physical
 > qualification and recording-off conformance evidence recorded above. Preserve
-> the physical residual-state contract for any later device run. Begin Phase 2
-> with only the smallest portable application-core and deterministic-simulator
-> vertical slice; do not add the host protocol or Unraid connector merely to
-> fill the proposed workspace shape. Record actual pass/fail evidence only when
+> the physical residual-state contract for any later device run. The current
+> checkpoint is review and explicit approval of the Phase 2 proposal; do not add
+> its workspace, dependencies, tooling integration, or application code before
+> that approval. Do not add the host protocol or Unraid connector merely to fill
+> the proposed workspace shape. Record actual pass/fail evidence only when
 > executing an approved gate or slice.
