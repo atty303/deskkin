@@ -356,6 +356,8 @@ class GateRunnerTests(unittest.TestCase):
         for fixture in fixtures:
             self.assertFalse(gate_runner.privacy_safe(fixture), fixture)
         self.assertTrue(gate_runner.privacy_safe({"tool_identities": {"rust": "rustc 1.95.0 (https://github.com/rust-lang/rust)"}}))
+        self.assertTrue(gate_runner.privacy_safe({"deadline_miss_percent": 0.0}))
+        self.assertFalse(gate_runner.privacy_safe({"deadline_miss_percent": float("nan")}))
 
     def test_truncated_artifact_is_omitted(self):
         with tempfile.TemporaryDirectory() as directory:

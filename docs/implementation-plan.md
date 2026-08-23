@@ -3,8 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gates 1A-1D complete; Gate 1E qualification passed,
-        but required conformance is inconclusive; Phase 2 is blocked
+Status: Phase 0 and Phase 1 Gates 1A-1E complete; Phase 2 has not started
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -14,8 +13,8 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: bounded Gate 1A through Gate 1E feasibility applications and local gate runners
 Application dependencies: approved Gate 1A set plus exact Slint 1.17.1 Gate 1B set
-Next action: stop at the Gate 1E conformance control blocker; do not begin
-             Phase 2 until recording-off conformance passes with matching evidence
+Next action: define the smallest Phase 2 portable-core and deterministic-simulator
+             vertical slice before adding the host protocol or a connector
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -353,29 +352,29 @@ Exercise a StackChan-scale face animation and interaction. Measure dirty area,
 render time, transfer time, end-to-end input latency, and missed deadlines.
 
 The physical qualification run
-`16d221ec-f0fb-4997-a029-a2b52ec1f750` passed all criteria with firmware digest
-`3e240861b0c65ef174406d1427adbfa3402bfd28eb6dfedd0efefd03245d7c78`
+`a0401b75-31d3-4823-b0b7-1cda09f5e110` and required recording-off conformance
+run `9c56aa9f-cf5c-4d19-ad13-10bf50bad99b` both passed with firmware digest
+`fae8edd2254308dadfd6b15a10ee61338b6e6c2844067be1a158aa1a90d781aa`
 and workload identity
-`400930caa1fed74e65fcb2aa6ed7a9fcc2875b2da8813731c6084cb1f0076d2f`.
-Disabled/enabled render p95 was 4,196/4,236 microseconds, transfer p95 was
-1,766/1,762 microseconds, combined p95 was 5,958/6,000 microseconds, and both
-phases had zero deadline misses. The enabled phase retained all 1,740
-post-warm-up frame records, recording overhead passed, diagnostics completed,
-and cleanup returned the recognized firmware to inert idle within ten seconds.
-The physical display also showed the expected face colors and partial updates
-without the prior noisy dirty rectangles.
+`0f352ecc704c3122fa682b42399d2fd8840d8d708c01c6ee3d3cff38a3d1bdf2`.
+Qualification disabled/enabled render p95 was 4,242/4,254 microseconds,
+transfer p95 was 1,764/1,767 microseconds, and combined p95 was 6,010/6,033
+microseconds. Both phases had zero deadline misses, all 1,740 enabled
+post-warm-up frame records were retained, recording overhead passed, and
+diagnostics completed. Conformance created no diagnostic directory, linked the
+qualification run explicitly, and matched its disabled semantic-event and
+framebuffer digests. Both runs returned the recognized firmware to inert idle
+within ten seconds.
 
-Gate 1E is not complete. The required recording-off conformance run
-`1a918308-6b66-4389-b9a1-96ea71bf9c2b`, with the same firmware and workload
-identity, was inconclusive with `serial_protocol_timeout_after_idle`. It
-created no diagnostic directory as required, cleanup succeeded, and the device
-ended in `test_firmware_idle`. Repeated bounded probes ruled out permission,
-device selection, timeout length, serial descriptor reopening, retry/dedup,
-and the conformance command spelling, but did not establish whether the
-firmware runtime started because recording-off deliberately retains no serial
-artifact. Do not treat qualification alone as Gate 1E acceptance, and do not
-begin Phase 2 until conformance passes and links matching semantic-event and
-framebuffer digests.
+The recording-off control failure was caused by status retries remaining in
+the serial path when the next command was sent without the incidental delay of
+starting the recorder. Status completion now requires a bounded quiet period,
+and the firmware emits a run-bound acceptance marker before starting the
+workload. The result reader also accepts finite floating-point criterion values
+already permitted by the result schema, while rejecting non-finite values.
+These changes remove the timing dependency and the false
+`qualification_required` classification. The physical display showed the
+expected face colors and partial updates without noisy dirty rectangles.
 
 ## Phase 2: portable application and deterministic simulator
 
@@ -478,13 +477,11 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, and
 > `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
-> Phase 1 Gate 1E conformance-blocked checkpoint and refresh any drift-prone
-> upstream pins or evidence before relying on them. Gates 1A-1D passed and Gate
-> 1E qualification passed with the evidence recorded above, but recording-off
-> conformance repeatedly ended `serial_protocol_timeout_after_idle`. Preserve
-> the physical residual-state contract, inspect whether the face animation ran
-> during a conformance attempt before adding another probe, and fix only that
-> control boundary. Gate 1E requires both modes to pass with matching workload,
-> semantic-event, and framebuffer digests. Do not begin Phase 2 meanwhile.
-> Record actual pass/fail evidence only when executing the approved Phase 1
-> gates.
+> completed Phase 1 Gate 1E checkpoint and refresh any drift-prone upstream
+> pins or evidence before relying on them. Gates 1A-1E passed with the physical
+> qualification and recording-off conformance evidence recorded above. Preserve
+> the physical residual-state contract for any later device run. Begin Phase 2
+> with only the smallest portable application-core and deterministic-simulator
+> vertical slice; do not add the host protocol or Unraid connector merely to
+> fill the proposed workspace shape. Record actual pass/fail evidence only when
+> executing an approved gate or slice.

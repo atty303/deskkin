@@ -108,6 +108,10 @@ int deskkin_wait_command(char *run_id)
 				printk("DESKKIN_GATE_EVENT schema=1 event=idle run_id=%s firmware_digest=%s\n",
 				       run_id, DESKKIN_FIRMWARE_DIGEST);
 			} else if (action != 0) {
+				printk("DESKKIN_GATE_EVENT schema=1 event=accepted run_id=%s mode=%s "
+				       "firmware_digest=%s workload_digest=%s\n",
+				       run_id, action == 2 ? "qualification" : "conformance",
+				       DESKKIN_FIRMWARE_DIGEST, DESKKIN_WORKLOAD_DIGEST);
 				return action;
 			}
 			continue;

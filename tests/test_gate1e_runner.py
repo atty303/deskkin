@@ -59,6 +59,18 @@ class Gate1ERunnerTests(unittest.TestCase):
         self.assertEqual(record["error_type"], "initial_frame_incomplete")
         self.assertEqual(record["frame"], 0)
 
+    def test_accepted_protocol_identifies_mode_and_workload(self):
+        run_id = str(uuid.uuid4())
+        line = (
+            f"DESKKIN_GATE_EVENT schema=1 event=accepted run_id={run_id} mode=conformance "
+            f"firmware_digest={'1' * 64} workload_digest={'2' * 64}"
+        )
+        record = gate.parse_serial_record(line, gate.TARGET, "conformance")
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record["run_mode"], "conformance")
+        self.assertEqual(record["workload_digest"], "2" * 64)
+
     def test_gate1e_resource_modes_are_allowlisted(self):
         for mode in ("qualification", "conformance"):
             value = {
@@ -107,6 +119,18 @@ class Gate1ERunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(common.GateFailure, "recording_opt_out_failed"):
             runner._validate_frame_records()
 
+    def test_runtime_completion_requires_ordered_terminal_idle(self):
+        qualification = gate.Runner(ROOT, True, str(uuid.uuid4()), "qualification")
+        events = ["idle", "accepted", "boot", "summary", "summary", "result"]
+        records = [{"event": event} for event in events]
+        self.assertFalse(qualification._runtime_sequence_complete(records))
+        records.append({"event": "idle"})
+        self.assertTrue(qualification._runtime_sequence_complete(records))
+
+        conformance = gate.Runner(ROOT, False, str(uuid.uuid4()), "conformance")
+        records = [{"event": event} for event in ("accepted", "boot", "summary", "result", "idle")]
+        self.assertTrue(conformance._runtime_sequence_complete(records))
+
     def test_workload_identity_binds_firmware_and_ui(self):
         firmware = gate.firmware_digest(ROOT)
         first = gate.workload_digest(ROOT, firmware)
@@ -122,7 +146,8 @@ class Gate1ERunnerTests(unittest.TestCase):
         self.assertEqual(runner.name, "gate1e_runner.py")
 
     def test_timeout_reason_is_bounded_to_parsed_event_names(self):
-        self.assertEqual(set(gate.SERIAL_PATTERNS), {"idle", "boot", "summary", "frame", "runtime_error", "result"})
+        self.assertEqual(set(gate.SERIAL_PATTERNS), {"idle", "boot", "accepted", "summary", "frame", "runtime_error", "result"})
+        self.assertEqual(gate.STATUS_QUIET_SECONDS, 0.25)
 
 
 if __name__ == "__main__":

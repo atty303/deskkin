@@ -9,6 +9,7 @@ import fcntl
 import getpass
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
@@ -132,6 +133,8 @@ def privacy_safe(value: object) -> bool:
     def visit(item: object) -> bool:
         if item is None or isinstance(item, (bool, int)):
             return True
+        if isinstance(item, float):
+            return math.isfinite(item)
         if isinstance(item, str):
             contains_identity = bool(local_identity) and re.search(rf"(?<![A-Za-z0-9]){re.escape(local_identity)}(?![A-Za-z0-9])", item, re.IGNORECASE) is not None
             return not contains_identity and EMBEDDED_ABSOLUTE_PATH_RE.search(item) is None and FORBIDDEN_VALUE_RE.search(item) is None

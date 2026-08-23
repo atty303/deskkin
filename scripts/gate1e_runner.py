@@ -32,6 +32,7 @@ SAMPLES = 1_740
 FRAMES = 1_800
 TOUCHES = 60
 MAX_DIRTY_PIXELS = 19_200
+STATUS_QUIET_SECONDS = 0.25
 
 GATE_INPUTS = (
     "mise.toml",
@@ -58,6 +59,11 @@ SERIAL_PATTERNS = {
     ),
     "boot": re.compile(
         rf"^DESKKIN_GATE_EVENT schema=1 event=boot run_id=(?P<run_id>{UUID_PATTERN}) "
+        rf"mode=(?P<run_mode>qualification|conformance) firmware_digest=(?P<firmware_digest>{DIGEST_PATTERN}) "
+        rf"workload_digest=(?P<workload_digest>{DIGEST_PATTERN})$"
+    ),
+    "accepted": re.compile(
+        rf"^DESKKIN_GATE_EVENT schema=1 event=accepted run_id=(?P<run_id>{UUID_PATTERN}) "
         rf"mode=(?P<run_mode>qualification|conformance) firmware_digest=(?P<firmware_digest>{DIGEST_PATTERN}) "
         rf"workload_digest=(?P<workload_digest>{DIGEST_PATTERN})$"
     ),
@@ -375,6 +381,7 @@ class Runner(gate1d.Runner):
         selector: selectors.BaseSelector | None = None
         records: list[dict[str, object]] = []
         pending = b""
+        status_quiet_until: float | None = None
         allowed = allowed_digests or {self.firmware_digest}
         try:
             descriptor = os.open(self.device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -385,13 +392,17 @@ class Runner(gate1d.Runner):
                 command = f"DESKKIN_GATE_COMMAND schema=1 action=run mode={mode} run_id={self.run_id}\n".encode()
             else:
                 command = f"DESKKIN_GATE_COMMAND schema=1 action=status run_id={self.run_id}\n".encode()
+            deadline = min(self.deadline, time.monotonic() + timeout)
             os.write(descriptor, command)
             next_retry = time.monotonic() + 0.25
-            deadline = min(self.deadline, time.monotonic() + timeout)
             while time.monotonic() < deadline:
                 if self.cancelled:
                     raise common.GateCancelled("cancelled")
-                if action == "status" and time.monotonic() >= next_retry:
+                if (
+                    action == "status"
+                    and status_quiet_until is None
+                    and time.monotonic() >= next_retry
+                ):
                     os.write(descriptor, command)
                     next_retry = time.monotonic() + 0.25
                 for key, _ in selector.select(timeout=0.05):
@@ -411,7 +422,7 @@ class Runner(gate1d.Runner):
                             continue
                         if "firmware_digest" in record and record["firmware_digest"] not in allowed:
                             raise common.GateInconclusive("firmware_digest_mismatch")
-                        if record["event"] == "boot" and (
+                        if record["event"] in {"accepted", "boot"} and (
                             record.get("run_mode") != self.mode
                             or record.get("workload_digest") != self.workload_identity
                         ):
@@ -423,7 +434,18 @@ class Runner(gate1d.Runner):
                                 self.writer.submit(record)
                         else:
                             self.recorder.serial.append(record)
-                if required <= {str(record["event"]) for record in records}:
+                        if action == "status":
+                            status_quiet_until = time.monotonic() + STATUS_QUIET_SECONDS
+                complete = (
+                    self._runtime_sequence_complete(records)
+                    if action == "run"
+                    else required <= {str(record["event"]) for record in records}
+                )
+                if complete and (
+                    action != "status"
+                    or status_quiet_until is not None
+                    and time.monotonic() >= status_quiet_until
+                ):
                     self.recorder.event("boot" if action == "run" else mode, "success", round((time.monotonic() - started) * 1000), target=TARGET)
                     return records
             if time.monotonic() >= self.deadline:
@@ -440,6 +462,18 @@ class Runner(gate1d.Runner):
                 selector.close()
             if descriptor is not None:
                 os.close(descriptor)
+
+    def _runtime_sequence_complete(self, records: list[dict[str, object]]) -> bool:
+        expected = ["accepted", "boot", "summary"]
+        if self.mode == "qualification":
+            expected.append("summary")
+        expected.extend(("result", "idle"))
+        events = [
+            str(record["event"])
+            for record in records
+            if record["event"] in {"accepted", "boot", "summary", "result", "idle"}
+        ]
+        return events[-len(expected) :] == expected
 
     def _validate_frame_records(self) -> None:
         if self.mode == "conformance":
@@ -547,7 +581,7 @@ class Runner(gate1d.Runner):
         self.writer = MeasurementWriter(artifact)
         self.writer.start()
         try:
-            records = self.serial_exchange("run", self.mode, {"boot", "summary", "result", "idle"}, 140 if self.mode == "qualification" else 75)
+            records = self.serial_exchange("run", self.mode, {"accepted", "boot", "summary", "result", "idle"}, 140 if self.mode == "qualification" else 75)
         finally:
             if not self.writer.stop():
                 self.recorder.health = "partial"
