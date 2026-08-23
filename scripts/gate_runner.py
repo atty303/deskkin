@@ -178,7 +178,7 @@ def record_schema_safe(value: dict[str, object]) -> bool:
     if record_type == "result_published":
         return value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("run_id"), str)
     mode = value.get("mode")
-    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b", "1c"} and (mode == "default" or value.get("gate") == "1c" and mode == "recover")):
+    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b", "1c", "1d"} and (mode == "default" or value.get("gate") in {"1c", "1d"} and mode == "recover")):
         return False
     target = value.get("target")
     if target is not None and not (isinstance(target, str) or isinstance(target, list) and all(isinstance(item, str) for item in target)):
@@ -196,9 +196,9 @@ def record_schema_safe(value: dict[str, object]) -> bool:
 
 def diagnostic_records_safe(records: list[dict[str, object]], run_id: str) -> bool:
     resources = [record for record in records if record.get("type") == "resource"]
-    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b", "1c"} or resources[0].get("mode") not in {"default", "recover"}:
+    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b", "1c", "1d"} or resources[0].get("mode") not in {"default", "recover"}:
         return False
-    if resources[0].get("mode") == "recover" and resources[0].get("gate") != "1c":
+    if resources[0].get("mode") == "recover" and resources[0].get("gate") not in {"1c", "1d"}:
         return False
     if records[0].get("type") != "resource" or not all(record_schema_safe(record) and ("run_id" not in record or record.get("run_id") == run_id) for record in records):
         return False
@@ -260,7 +260,10 @@ def publish_serial_artifact(path: Path, values: list[dict[str, object]]) -> bool
         "schema_version", "target", "mode", "event", "status", "board",
         "clock_hz", "console_ord", "value", "panic_type", "run_id",
         "firmware_digest", "c_to_rust", "rust_to_c", "nesting",
-        "restoration", "freed", "reason", "result",
+        "restoration", "freed", "reason", "result", "power", "gpio",
+        "display", "touch", "flash", "i2c0", "i2c1", "spi2", "width",
+        "height", "format", "bytes", "duration_us", "index", "x", "y",
+        "pattern", "expected_index", "inside",
     }
     if not all(set(value) <= allowed and privacy_safe(value) for value in values):
         return False

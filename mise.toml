@@ -68,9 +68,13 @@ run = "./scripts/bootstrap_gate1c.sh"
 description = "Run the ESP32-S3/Xtensa Rust feasibility gate"
 run = ".deskkin/venv/bin/python scripts/gate1c_runner.py run"
 
+[tasks."gate:1d"]
+description = "Run the existing CoreS3 Zephyr board-support feasibility gate"
+run = ".deskkin/venv/bin/python scripts/gate1d_runner.py run"
+
 [tasks."device:recover"]
-description = "Recover a CoreS3 into the approved Gate 1C inert test firmware"
-run = ".deskkin/venv/bin/python scripts/gate1c_runner.py recover"
+description = "Recover a CoreS3 into a recognized inert gate test firmware"
+run = ".deskkin/venv/bin/python scripts/device_recover.py"
 
 [tasks."diagnostics:list"]
 description = "List bounded local gate diagnostic runs"

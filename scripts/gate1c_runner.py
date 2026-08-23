@@ -96,7 +96,7 @@ def parse_serial_record(line: str, target: str, mode: str) -> dict[str, object] 
     return None
 
 
-def acquire_lock(state: Path, run_id: str):
+def acquire_lock(state: Path, run_id: str, gate: str = "1c"):
     locks = state / "locks"
     common.private_directory(locks)
     directory_fd = os.open(locks, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
@@ -122,7 +122,7 @@ def acquire_lock(state: Path, run_id: str):
         raise common.GateInconclusive("lock_unavailable") from error
     stream.seek(0)
     stream.truncate()
-    json.dump({"gate": "1c", "run_id": run_id, "pid": os.getpid(), "started_at": common.utc_now()}, stream, sort_keys=True)
+    json.dump({"gate": gate, "run_id": run_id, "pid": os.getpid(), "started_at": common.utc_now()}, stream, sort_keys=True)
     stream.write("\n")
     stream.flush()
     os.fsync(stream.fileno())

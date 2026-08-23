@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gates 1A-1C complete; Gate 1D ready
+Status: Phase 0 and Phase 1 Gates 1A-1D complete; Gate 1E eligible but not started
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,10 +11,10 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1C feasibility applications and local gate runners
+Implementation: bounded Gate 1A through Gate 1D feasibility applications and local gate runners
 Application dependencies: approved Gate 1A set plus exact Slint 1.17.1 Gate 1B set
-Next action: implement only the approved Gate 1D CoreS3 Zephyr board and driver
-             spike; do not combine it with Slint or the Gate 1E vertical slice
+Next action: stop at the Gate 1D checkpoint; obtain an explicit continuation
+             before starting the approved Gate 1E combined Slint slice
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -287,6 +287,39 @@ behavioral references, not as application architecture.
 The display gate must verify partial RGB565 writes at arbitrary supported
 rectangles. Record transfer size and duration. Do not claim smooth dirty
 rendering from a successful full-frame update.
+
+Gate 1D passed on a physical CoreS3. Complete local diagnostic run
+`33e4ab9c-4ecf-4149-a5d0-7d305796dca6` used Zephyr 4.4.1's existing
+`m5stack_cores3/esp32s3/procpu` board without a board overlay or driver change:
+
+- AXP2101 power management, AW9523 GPIO expansion, the ILI9342C RGB565
+  display, FT6336 touch, flash, PSRAM, I2C0, I2C1, and SPI2 all initialized
+  through their upstream Zephyr devices;
+- a 32 KiB external-PSRAM allocation passed a bounded read/write probe, and a
+  read-only 32-byte flash probe returned nonzero contents;
+- three non-fullscreen 80x60 RGB565 rectangles at `(20,20)`, `(120,90)`, and
+  `(220,160)` each transferred 9,600 bytes in 4,288, 4,211, and 4,211
+  microseconds respectively;
+- because the upstream display node is write-only, the deterministic panel
+  oracle bound the displayed red, green, and blue rectangles to FT6336 touch
+  coordinates `(63,59)`, `(159,124)`, and `(251,195)` in that order;
+- removing and reconstructing the same build directory reproduced its ELF
+  digest, while ELF/map/config evidence confirmed the Xtensa target, upstream
+  CoreS3 board selection, required driver owners, and text/data/BSS/external
+  RAM placement;
+- the final result is `pass` with firmware-input digest
+  `994f4902ba0363a101314bd62128f931382dc0ef7210e15f65702cb1c3ff9758`,
+  image SHA-256
+  `a6096965d4d84c139764f3e19e5baad76cee7cf60a73a63521773abd89e903a0`,
+  `cleanup_status=success`, and `device_state=test_firmware_idle`; cleanup
+  reflashed and re-read inert idle in 3,508 milliseconds, within the approved
+  ten-second residual-state limit.
+
+The runner also retains the run-bound transfer and raw touch samples needed to
+distinguish a missing touch from a coordinate outside the expected rectangle.
+This evidence proves the independent board/driver boundary only. It does not
+establish Slint on CoreS3, dirty-render integration, animation performance, or
+the Gate 1E combined path.
 
 ### Gate 1E: combined CoreS3 Slint slice
 
