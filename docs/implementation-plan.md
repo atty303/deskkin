@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gates 1A-1E complete; Phase 2 implementation approved
+Status: Phase 0, Phase 1 Gates 1A-1E, and Phase 2 complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,10 +11,9 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1E feasibility applications and local gate runners
+Implementation: bounded Gate 1A through Gate 1E feasibility applications and the Phase 2 simulator
 Application dependencies: approved Gate 1A set plus exact hosted Phase 2 set
-Next action: implement and verify the approved Phase 2 periodic
-             infrastructure-status simulator
+Next action: approve the Phase 3 host and protocol vertical-slice contract
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -385,7 +384,8 @@ After the foundation passes:
 3. map read failure to `Unknown` and retry, but stop on timer-arm failure;
 4. share one 320 x 240 Slint status surface and presenter across native Linux
    and deterministic headless runtimes;
-5. record bounded semantic refresh runs without changing results;
+5. record bounded semantic refresh runs with correlated operation lifecycle,
+   typed failure, and crash recovery without changing results;
 6. prove byte-identical replay of success and injected read failure.
 
 Do not add the host protocol or Unraid connector merely to fill the proposed
@@ -394,6 +394,16 @@ workspace shape.
 The exact domain contract, two-crate boundary, dependency and licensing
 decisions, observation contract, acceptance criteria, and 2026-08-23 approval
 record are in [`phase-2-slice-proposal.md`](phase-2-slice-proposal.md).
+
+Phase 2 passed on 2026-08-23. The dependency-free `no_std` core, native Linux
+simulator, two deterministic software-rendered scenarios, bounded diagnostic
+recorder, control surface, tooling, and licensing artifacts passed the complete
+`mise run test` entrypoint. The two scenario replays matched semantically and
+at the RGB565 frame level, recording on/off preserved results, and a fresh
+independent review found no actionable defect. The user then confirmed the
+native 320 x 240 surface visibly progressed through
+`Unknown -> Available -> Unavailable -> Unknown`. No protocol, connector,
+device adapter, package, release, or published artifact was added.
 
 ## Phase 3: host and protocol vertical slice
 
@@ -481,9 +491,9 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`, and
 > `docs/phase-2-slice-proposal.md`. Confirm that the repository is at the
-> completed Phase 1 Gate 1E checkpoint and that the Phase 2 periodic
-> infrastructure-status slice was approved on 2026-08-23. Implement only its
-> pure core and Linux simulator boundary. Do not add a protocol, connector,
-> device build, provider access, release, or publication. Preserve the physical
+> completed Phase 2 checkpoint. Prepare and review only the Phase 3 host and
+> protocol vertical-slice proposal. Do not add protocol code, dependencies,
+> connector behavior, device changes, provider access, release, or publication
+> before that contract is explicitly approved. Preserve the physical
 > residual-state contract for any later device run and record actual pass/fail
 > evidence only when executing an approved gate or slice.

@@ -14,6 +14,23 @@ local linters = new Mapping<String, Step> {
   ["merge-conflict"] = Builtins.check_merge_conflict
   ["mise"] = Builtins.mise
   ["private-key"] = Builtins.detect_private_key
+  ["rustfmt"] {
+    glob = List("apps/simulator/**/*.rs", "crates/application-core/**/*.rs")
+    stage = glob
+    check = new CommandSpec {
+      command = new Command {
+        argv = List("mise", "exec", "--", "rustfmt", "--edition", "2024", "--check", "{{files}}")
+      }
+      effect = "read"
+    }
+    fix = new CommandSpec {
+      command = new Command {
+        argv = List("mise", "exec", "--", "rustfmt", "--edition", "2024", "{{files}}")
+      }
+      effect = "write"
+    }
+    check_first = false
+  }
   ["taplo"] = Builtins.taplo
 }
 

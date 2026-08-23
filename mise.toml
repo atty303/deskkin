@@ -8,7 +8,7 @@ cmake = "3.28.6"
 hk = "1.55.0"
 ninja = "1.13.2"
 python = "3.12.14"
-rust = { version = "1.95.0", targets = "thumbv7m-none-eabi,riscv32i-unknown-none-elf" }
+rust = { version = "1.95.0", components = "clippy,rustfmt", targets = "thumbv7m-none-eabi,riscv32i-unknown-none-elf" }
 taplo = "0.10.0"
 "cargo:espup" = "0.17.1"
 
@@ -46,7 +46,28 @@ exec hk fix --all --safe --no-stage
 [tasks.test]
 description = "Run all reproducible checks"
 depends = ["check"]
-run = "python -m unittest discover -s tests"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo run --locked --quiet --bin deskkin-scenario -- periodic-success --recording-off
+cargo run --locked --quiet --bin deskkin-scenario -- periodic-read-failure --recording-off
+cargo check --locked -p application-core --target thumbv7m-none-eabi
+python -m unittest discover -s tests
+'''
+
+[tasks."phase2:desktop"]
+description = "Run the native Linux periodic status simulator"
+run = "cargo run --locked --bin deskkin-desktop"
+
+[tasks."phase2:scenario"]
+description = "Run a deterministic Phase 2 headless scenario"
+run = "cargo run --locked --quiet --bin deskkin-scenario --"
+
+[tasks."phase2:diagnostics"]
+description = "Administer bounded local Phase 2 diagnostic runs"
+run = "cargo run --locked --quiet --bin deskkin-diagnostics --"
 
 [tasks."gate:1a:bootstrap"]
 description = "Prepare the repository-local Gate 1A Zephyr workspace and SDK"

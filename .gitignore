@@ -1,6 +1,7 @@
 .idea/
 .DS_Store
 .deskkin/
+target/
 .west/
 gates/gate1b/target/
 __pycache__/

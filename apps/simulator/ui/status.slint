@@ -1,0 +1,31 @@
+export component StatusWindow inherits Window {
+    width: 320px;
+    height: 240px;
+    title: "Deskkin Status";
+
+    in property <string> status-text: "Unknown";
+    in property <color> status-color: #f3b33d;
+
+    background: #16191d;
+
+    Rectangle {
+        x: 24px;
+        y: 58px;
+        width: 272px;
+        height: 124px;
+        border-radius: 18px;
+        background: #23282f;
+        border-width: 4px;
+        border-color: root.status-color;
+
+        Text {
+            text: root.status-text;
+            color: root.status-color;
+            font-size: 32px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+

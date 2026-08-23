@@ -83,12 +83,20 @@ reachable. The source-side closed operation allowlist is:
 Attributes are restricted to closed enum values, effect identity, integer
 duration or virtual time, and render dimensions. No free-form payload, path,
 environment, screen content, identity, credential, or provider data is
-recorded.
+recorded. Each operation also carries a stable per-run operation identity,
+parent identity, start and end virtual time, terminal status, and a closed
+machine-readable error type when it fails. Resource identity is limited to the
+simulator program name and version.
 
 Records live below ignored `.deskkin/phase2/` with directories mode 0700 and
 files mode 0600. Recording is on by default, can be disabled, and has no remote
 export. Publication is atomic and reports `complete`, `partial`, or `dropped`
-plus bounded recording health. Retention keeps the ten most recent unretained
+plus bounded recording health. A refresh publishes an in-progress marker at
+start and atomically replaces it at termination. A clean driver failure
+terminalizes its marker as a typed error. A later locked store access recovers
+only a marker whose Linux process owner is no longer live as a `partial` crash
+run; process identity is used solely for local liveness validation. Retention
+keeps the ten most recent unretained
 successful runs and twenty most recent unretained failed, cancelled, or
 timed-out runs under a total 32 MiB cap. Explicitly retained runs are pinned
 outside those outcome-count limits but still count toward the byte cap. Oldest
@@ -169,3 +177,12 @@ MIT source plus GPLv3 combined-binary distribution; and the bounded default-on
 diagnostic recording and conformance contract. This approval excludes push,
 release, artifact publication, protocol, connector, provider access, device
 adapter, and non-Linux desktop support.
+
+## Completion record
+
+Phase 2 completed on 2026-08-23. The complete locked test entrypoint passed,
+both headless scenarios replayed byte-identically, the portable core remained
+dependency-free, and fresh independent review reported no actionable defect.
+The user visually confirmed the native Linux sequence
+`Unknown -> Available -> Unavailable -> Unknown`. No push, release, or artifact
+publication was performed.

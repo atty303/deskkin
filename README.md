@@ -84,9 +84,35 @@ mise run diagnostics:list
 Gate state, SDKs, fetched sources, builds, results, and bounded local
 diagnostics remain under the ignored `.deskkin/` directory.
 
+Run the Phase 2 Linux simulator and deterministic scenarios with:
+
+```sh
+mise run phase2:desktop
+mise run phase2:scenario -- periodic-success
+mise run phase2:scenario -- periodic-read-failure
+```
+
+The native fake repeats `Available`, `Unavailable`, and read failure after an
+initial 250 ms read and five-second refresh timers. Headless results and bounded
+default-on diagnostics are atomically written below `.deskkin/phase2/`.
+Recording can be disabled by passing `--recording-off` to either binary.
+Refresh runs publish a private in-progress marker and replace it on completion;
+the next store access recovers a marker left by a crash as a partial run.
+
+Diagnostic administration accepts only an exact operation and run ID:
+
+```sh
+mise run phase2:diagnostics -- list
+mise run phase2:diagnostics -- retain RUN-ID
+mise run phase2:diagnostics -- unretain RUN-ID
+mise run phase2:diagnostics -- delete RUN-ID
+```
+
 ## License
 
 Deskkin source is MIT. Slint-bearing Gate 1B and Phase 2 combined binaries use
 Slint under GPL-3.0-only and are GPLv3 as a whole. Phase 2 authorizes that
 distribution model but adds no release or publication; actual distribution
 requires a separately approved corresponding-source bundle and delivery method.
+See [`docs/licensing.md`](docs/licensing.md) for the exact source and combined
+binary boundary.

@@ -1008,6 +1008,14 @@ backend = "core:rust"
 [tools.rust.options]
 targets = "riscv32i-unknown-none-elf,thumbv7m-none-eabi"
 
+[[tools.rust]]
+version = "1.95.0"
+backend = "core:rust"
+
+[tools.rust.options]
+components = "clippy,rustfmt"
+targets = "riscv32i-unknown-none-elf,thumbv7m-none-eabi"
+
 [[tools.taplo]]
 version = "0.10.0"
 backend = "aqua:tamasfe/taplo"
