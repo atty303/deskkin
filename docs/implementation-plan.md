@@ -13,7 +13,7 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: bounded Gate 1A through Gate 1E feasibility applications and the Phase 2 simulator
 Application dependencies: approved Gate 1A set plus exact hosted Phase 2 set
-Next action: approve the Phase 3 host and protocol vertical-slice contract
+Next action: review and approve the proposed Phase 3 host and protocol contract
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -407,6 +407,18 @@ device adapter, package, release, or published artifact was added.
 
 ## Phase 3: host and protocol vertical slice
 
+The proposed contract is in
+[`phase-3-slice-proposal.md`](phase-3-slice-proposal.md). It is not approved.
+Do not add its workspace members, dependencies, protocol code, identity state,
+listener, or host runtime before explicit approval of its five requested
+decision groups.
+
+After approval, first record the accepted transport, wire, authentication,
+pairing, persistence, compatibility, and observation contract in a new ADR;
+synchronize the proposal approval record, architecture, this checkpoint, and
+open decisions; and commit that documentation checkpoint separately. Only then
+may the approved implementation and dependencies be added.
+
 Design the smallest semantic protocol slice for one paired desktop host and one
 simulated device. Before dependencies, approve transport, serialization,
 framing, identity, pairing, authentication, versioning, reconnection,
@@ -490,10 +502,11 @@ Start a future development session with:
 
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`, and
-> `docs/phase-2-slice-proposal.md`. Confirm that the repository is at the
-> completed Phase 2 checkpoint. Prepare and review only the Phase 3 host and
-> protocol vertical-slice proposal. Do not add protocol code, dependencies,
-> connector behavior, device changes, provider access, release, or publication
-> before that contract is explicitly approved. Preserve the physical
+> `docs/phase-2-slice-proposal.md`, and `docs/phase-3-slice-proposal.md`. Confirm
+> that the repository is at the completed Phase 2 checkpoint and that the
+> Phase 3 proposal is not yet approved. Review and revise only that proposal.
+> Do not add protocol code, dependencies, connector behavior, device changes,
+> provider access, release, or publication before its five decision groups are
+> explicitly approved. Preserve the physical
 > residual-state contract for any later device run and record actual pass/fail
 > evidence only when executing an approved gate or slice.
