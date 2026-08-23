@@ -178,7 +178,9 @@ def record_schema_safe(value: dict[str, object]) -> bool:
     if record_type == "result_published":
         return value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("run_id"), str)
     mode = value.get("mode")
-    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b", "1c", "1d"} and (mode == "default" or value.get("gate") in {"1c", "1d"} and mode == "recover")):
+    valid_mode = mode == "default" or value.get("gate") in {"1c", "1d"} and mode == "recover"
+    valid_mode = valid_mode or value.get("gate") == "1e" and mode in {"qualification", "conformance"}
+    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b", "1c", "1d", "1e"} and valid_mode):
         return False
     target = value.get("target")
     if target is not None and not (isinstance(target, str) or isinstance(target, list) and all(isinstance(item, str) for item in target)):
@@ -206,7 +208,7 @@ def record_schema_safe(value: dict[str, object]) -> bool:
 
 def diagnostic_records_safe(records: list[dict[str, object]], run_id: str) -> bool:
     resources = [record for record in records if record.get("type") == "resource"]
-    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b", "1c", "1d"} or resources[0].get("mode") not in {"default", "recover"}:
+    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b", "1c", "1d", "1e"} or resources[0].get("mode") not in {"default", "recover", "qualification", "conformance"}:
         return False
     if resources[0].get("mode") == "recover" and resources[0].get("gate") not in {"1c", "1d"}:
         return False
@@ -274,6 +276,11 @@ def publish_serial_artifact(path: Path, values: list[dict[str, object]]) -> bool
         "display", "touch", "flash", "i2c0", "i2c1", "spi2", "width",
         "height", "format", "bytes", "duration_us", "index", "x", "y",
         "pattern", "expected_index", "inside",
+        "run_mode", "workload_digest", "phase", "frames", "samples",
+        "render_p95_us", "transfer_p95_us", "combined_p95_us",
+        "combined_p99_us", "touch_p95_us", "missed_frames",
+        "max_dirty_pixels", "post_initial_full_frames", "touches",
+        "semantic_digest", "framebuffer_digest", "error_type", "frame",
     }
     if not all(set(value) <= allowed and privacy_safe(value) for value in values):
         return False
@@ -309,10 +316,12 @@ def prepare_control_state(root: Path, gate: str = "1a") -> None:
     for relative in (
         "results",
         f"results/{gate}",
-        f"results/{gate}/default",
         "locks",
     ):
         private_directory(state / relative)
+    modes = ("qualification", "conformance") if gate == "1e" else ("default",)
+    for mode in modes:
+        private_directory(state / f"results/{gate}/{mode}")
 
 
 def clear_result(path: Path) -> bool:
@@ -1008,7 +1017,7 @@ def diagnostics_list(root: Path) -> int:
             if value is not None and value.get("run_id") == directory.name:
                 result = str(value.get("result"))
                 result_matches = True
-        if gate == "1b" and completeness == "complete" and not (result_matches or published):
+        if gate in {"1b", "1e"} and completeness == "complete" and not (result_matches or published):
             completeness = "partial"
             result = "unknown"
         print(f"{directory.name} {gate} {mode} {datetime.fromtimestamp(directory.stat().st_mtime, UTC).isoformat()} {result} {completeness} {sum(item.stat().st_size for item in files)}")
@@ -1051,7 +1060,7 @@ def prune_diagnostics(root: Path, reserve_runs: int = 0, reserve_bytes: int = 0)
                     gate = str(value.get("gate", gate))
                 elif value.get("type") == "result_published" and value.get("run_id") == directory.name:
                     published = True
-        if gate == "1b" and outcome == "pass" and not published:
+        if gate in {"1b", "1e"} and outcome == "pass" and not published:
             outcome = "unknown"
             reason = "result_not_published"
         records.append({"path": directory, "modified": modified, "size": size, "outcome": outcome, "reason": reason, "gate": gate, "frozen": (directory / ".frozen").exists()})

@@ -10,12 +10,14 @@ from pathlib import Path
 
 import gate1c_runner
 import gate1d_runner
+import gate1e_runner
 
 
 def runner_for_digest(root: Path, expected_firmware: str) -> Path | None:
     choices = {
         gate1c_runner.firmware_digest(root): root / "scripts/gate1c_runner.py",
         gate1d_runner.firmware_digest(root): root / "scripts/gate1d_runner.py",
+        gate1e_runner.firmware_digest(root): root / "scripts/gate1e_runner.py",
     }
     return choices.get(expected_firmware)
 

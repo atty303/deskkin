@@ -72,6 +72,10 @@ run = ".deskkin/venv/bin/python scripts/gate1c_runner.py run"
 description = "Run the existing CoreS3 Zephyr board-support feasibility gate"
 run = ".deskkin/venv/bin/python scripts/gate1d_runner.py run"
 
+[tasks."gate:1e"]
+description = "Run the combined CoreS3 Slint feasibility gate"
+run = ".deskkin/venv/bin/python scripts/gate1e_runner.py"
+
 [tasks."device:recover"]
 description = "Recover a CoreS3 into a recognized inert gate test firmware"
 run = ".deskkin/venv/bin/python scripts/device_recover.py"

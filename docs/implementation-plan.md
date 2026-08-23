@@ -3,7 +3,8 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gates 1A-1D complete; Gate 1E eligible but not started
+Status: Phase 0 and Phase 1 Gates 1A-1D complete; Gate 1E qualification passed,
+        but required conformance is inconclusive; Phase 2 is blocked
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,10 +12,10 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1D feasibility applications and local gate runners
+Implementation: bounded Gate 1A through Gate 1E feasibility applications and local gate runners
 Application dependencies: approved Gate 1A set plus exact Slint 1.17.1 Gate 1B set
-Next action: stop at the Gate 1D checkpoint; obtain an explicit continuation
-             before starting the approved Gate 1E combined Slint slice
+Next action: stop at the Gate 1E conformance control blocker; do not begin
+             Phase 2 until recording-off conformance passes with matching evidence
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -351,6 +352,31 @@ Slint dirty render --> Rust adapter --> Zephyr partial display write
 Exercise a StackChan-scale face animation and interaction. Measure dirty area,
 render time, transfer time, end-to-end input latency, and missed deadlines.
 
+The physical qualification run
+`16d221ec-f0fb-4997-a029-a2b52ec1f750` passed all criteria with firmware digest
+`3e240861b0c65ef174406d1427adbfa3402bfd28eb6dfedd0efefd03245d7c78`
+and workload identity
+`400930caa1fed74e65fcb2aa6ed7a9fcc2875b2da8813731c6084cb1f0076d2f`.
+Disabled/enabled render p95 was 4,196/4,236 microseconds, transfer p95 was
+1,766/1,762 microseconds, combined p95 was 5,958/6,000 microseconds, and both
+phases had zero deadline misses. The enabled phase retained all 1,740
+post-warm-up frame records, recording overhead passed, diagnostics completed,
+and cleanup returned the recognized firmware to inert idle within ten seconds.
+The physical display also showed the expected face colors and partial updates
+without the prior noisy dirty rectangles.
+
+Gate 1E is not complete. The required recording-off conformance run
+`1a918308-6b66-4389-b9a1-96ea71bf9c2b`, with the same firmware and workload
+identity, was inconclusive with `serial_protocol_timeout_after_idle`. It
+created no diagnostic directory as required, cleanup succeeded, and the device
+ended in `test_firmware_idle`. Repeated bounded probes ruled out permission,
+device selection, timeout length, serial descriptor reopening, retry/dedup,
+and the conformance command spelling, but did not establish whether the
+firmware runtime started because recording-off deliberately retains no serial
+artifact. Do not treat qualification alone as Gate 1E acceptance, and do not
+begin Phase 2 until conformance passes and links matching semantic-event and
+framebuffer digests.
+
 ## Phase 2: portable application and deterministic simulator
 
 After the foundation passes:
@@ -452,11 +478,13 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, and
 > `docs/phase-0-feasibility-proposal.md`. Confirm that the repository is at the
-> Phase 1 Gate 1C checkpoint and refresh any drift-prone upstream pins or
-> evidence before relying on them. All Phase 0 approval items are accepted and
-> Gates 1A and 1B passed with their results recorded above. Implement only the
-> approved Gate 1C ESP32-S3/Xtensa Zephyr Rust toolchain spike, record its
-> specified evidence, and stop at its pass/fail boundary. Do not begin Gate 1D
-> or any physical CoreS3 gate until the ordered prerequisites are satisfied.
+> Phase 1 Gate 1E conformance-blocked checkpoint and refresh any drift-prone
+> upstream pins or evidence before relying on them. Gates 1A-1D passed and Gate
+> 1E qualification passed with the evidence recorded above, but recording-off
+> conformance repeatedly ended `serial_protocol_timeout_after_idle`. Preserve
+> the physical residual-state contract, inspect whether the face animation ran
+> during a conformance attempt before adding another probe, and fix only that
+> control boundary. Gate 1E requires both modes to pass with matching workload,
+> semantic-event, and framebuffer digests. Do not begin Phase 2 meanwhile.
 > Record actual pass/fail evidence only when executing the approved Phase 1
 > gates.
