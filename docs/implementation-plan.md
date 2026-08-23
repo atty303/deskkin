@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0 and Phase 1 Gates 1A-1B complete; Gate 1C ready
+Status: Phase 0 and Phase 1 Gates 1A-1C complete; Gate 1D ready
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,11 +11,10 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A and Gate 1B feasibility applications and local gate runners
+Implementation: bounded Gate 1A through Gate 1C feasibility applications and local gate runners
 Application dependencies: approved Gate 1A set plus exact Slint 1.17.1 Gate 1B set
-Next action: implement only the approved Gate 1C ESP32-S3/Xtensa Zephyr Rust
-             toolchain spike; do not begin Gate 1D or a physical CoreS3 gate
-             until its ordered prerequisites pass
+Next action: implement only the approved Gate 1D CoreS3 Zephyr board and driver
+             spike; do not combine it with Slint or the Gate 1E vertical slice
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -243,8 +242,8 @@ Do not combine CoreS3 display or Slint work into this gate. If an upstream
 change or maintained module patch is required, document its scope and upstream
 strategy before expanding it.
 
-Gate 1C is in progress. Local diagnostic run
-`8bdcbf2d-1041-4dcf-8520-4b321ade1261` established the host-side boundary:
+Gate 1C passed on a physical CoreS3. Local diagnostic run
+`015a39fd-7191-45ef-8ca5-4ea5681d8514` recorded complete evidence:
 
 - the pinned ESP Rust 1.95.0.0 compiler built `core` and `alloc` from source for
   `xtensa-esp32s3-none-elf`;
@@ -252,23 +251,30 @@ Gate 1C is in progress. Local diagnostic run
   ESP32-S3 image generation completed for the existing
   `m5stack_cores3/esp32s3/procpu` board;
 - a removed normal build directory reproduced ELF digest
-  `520e7b40501a7868745d028f61d029fcb9624f11083bbe3ed460ebe71ea97958`,
+  `c1b797b06ebd2d35e75c82c7155c17a66c8de626b842331377e841efc7ea5cab`,
   and a separate deliberate-panic image compiled and linked with digest
-  `c51d4f9b11c4d57ddd34299214627414c316167a27c7d9360dc800a8b6b3b93c`;
+  `93b48a91fc0a1a67fdbbfc5cadfba0ffb19eabd863b4dc24b5a799e8c30ff32f`;
 - the pinned Xtensa `readelf` and `nm` confirmed ELF32 Xtensa attributes,
   required bidirectional ABI symbols, one compiler-builtins owner for
   `__muldi3`, the linker map, and the expected text/data/BSS placements;
-- the result is intentionally `inconclusive` with reason
-  `physical_device_required`: no serial CoreS3 device was present, so boot,
-  bidirectional C ABI values, atomic/critical-section behavior, idle behavior,
-  and deliberate panic have not yet been observed on hardware.
+- the run-bound fixed serial protocol recorded normal boot, C-to-Rust and
+  Rust-to-C values of 42, nested critical-section behavior with interrupt-state
+  restoration, and one allocation/free probe;
+- the deliberate Rust panic was observed from the separate panic image, after
+  which cleanup reflashed the normal image and proved the same test firmware's
+  inert idle state in 1,937 ms;
+- the final result is `pass` with firmware-input digest
+  `3df0774203345a7c96da4034d0f49dd755eaf48788679e954c90b1a1feeec840`,
+  normal image SHA-256
+  `7e7c9ffec1be69a5ee507761e49bc01b09436b4ebb91f3be345e8ff0d193c45a`,
+  `cleanup_status=success`, and `device_state=test_firmware_idle`.
 
 The retained local patch scope, upstream strategy, and removal conditions are
-recorded in [`gate-1c-patch-series.md`](gate-1c-patch-series.md). Gate 1C must
-not be marked passed, and Gate 1D must not begin, until one physical run records
-all required markers. The current runner intentionally has no flash option;
-the approved preflight, run-bound serial protocol, recovery surface, and
-fail/timeout/cancel cleanup contract must be implemented before enabling it.
+recorded in [`gate-1c-patch-series.md`](gate-1c-patch-series.md). The runner
+enforces recognized-firmware preflight, a run-bound serial protocol, the
+explicit `device:recover` surface, and fail/timeout/cancel cleanup. Gate 1D may
+now start as its own checkpoint; this Gate 1C evidence does not establish any
+display, touch, power, memory, or bus behavior.
 
 ### Gate 1D: CoreS3 Zephyr board and drivers
 

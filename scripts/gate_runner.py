@@ -167,12 +167,18 @@ def record_schema_safe(value: dict[str, object]) -> bool:
     if allowed is None or not required <= set(value) <= allowed or value.get("schema_version") != 1 or not privacy_safe(value):
         return False
     if record_type == "operation":
-        return value.get("status") in {"success", "error", "timeout", "cancel"} and value.get("operation") in {"prepare", "configure", "rust-compile", "c-compile", "link", "boot", "probe", "render"} and type(value.get("duration_ms")) is int and value["duration_ms"] >= 0 and all(key not in value or isinstance(value[key], str) for key in ("error_type", "target"))
+        operations = {
+            "prepare", "configure", "rust-compile", "c-compile", "link",
+            "boot", "probe", "render", "flash", "preflight", "postflash",
+            "cleanup", "recover",
+        }
+        return value.get("status") in {"success", "error", "timeout", "cancel"} and value.get("operation") in operations and type(value.get("duration_ms")) is int and value["duration_ms"] >= 0 and all(key not in value or isinstance(value[key], str) for key in ("error_type", "target"))
     if record_type == "completeness":
         return value.get("status") in {"complete", "partial", "dropped"} and value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("reason_code"), str) and (value.get("reason") is None or isinstance(value.get("reason"), str))
     if record_type == "result_published":
         return value.get("result") in {"pass", "fail", "inconclusive"} and isinstance(value.get("run_id"), str)
-    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b", "1c"} and value.get("mode") == "default"):
+    mode = value.get("mode")
+    if not (isinstance(value.get("run_id"), str) and value.get("gate") in {"1a", "1b", "1c"} and (mode == "default" or value.get("gate") == "1c" and mode == "recover")):
         return False
     target = value.get("target")
     if target is not None and not (isinstance(target, str) or isinstance(target, list) and all(isinstance(item, str) for item in target)):
@@ -190,7 +196,9 @@ def record_schema_safe(value: dict[str, object]) -> bool:
 
 def diagnostic_records_safe(records: list[dict[str, object]], run_id: str) -> bool:
     resources = [record for record in records if record.get("type") == "resource"]
-    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b", "1c"} or resources[0].get("mode") != "default":
+    if len(resources) != 1 or resources[0].get("run_id") != run_id or resources[0].get("gate") not in {"1a", "1b", "1c"} or resources[0].get("mode") not in {"default", "recover"}:
+        return False
+    if resources[0].get("mode") == "recover" and resources[0].get("gate") != "1c":
         return False
     if records[0].get("type") != "resource" or not all(record_schema_safe(record) and ("run_id" not in record or record.get("run_id") == run_id) for record in records):
         return False
@@ -248,7 +256,12 @@ def publish_artifact(path: Path, value: object, kind: str, writer: Callable[[Pat
 
 
 def publish_serial_artifact(path: Path, values: list[dict[str, object]]) -> bool:
-    allowed = {"schema_version", "target", "mode", "event", "status", "board", "clock_hz", "console_ord", "value", "panic_type"}
+    allowed = {
+        "schema_version", "target", "mode", "event", "status", "board",
+        "clock_hz", "console_ord", "value", "panic_type", "run_id",
+        "firmware_digest", "c_to_rust", "rust_to_c", "nesting",
+        "restoration", "freed", "reason", "result",
+    }
     if not all(set(value) <= allowed and privacy_safe(value) for value in values):
         return False
     try:
@@ -1126,7 +1139,7 @@ def publish_recording_health(root: Path, run_id: str, status: str, reason: str) 
     )
 
 
-def initialize_recording(root: Path, recorder: Recorder, gate: str = "1a", target: list[str] | None = None) -> None:
+def initialize_recording(root: Path, recorder: Recorder, gate: str = "1a", target: list[str] | None = None, mode: str = "default") -> None:
     if recorder.directory is None:
         return
     try:
@@ -1137,7 +1150,7 @@ def initialize_recording(root: Path, recorder: Recorder, gate: str = "1a", targe
             recorder.health_reason = "store_capacity_exceeded"
             recorder.directory = None
         else:
-            resource: dict[str, object] = {"run_id": recorder.run_id, "gate": gate, "mode": "default"}
+            resource: dict[str, object] = {"run_id": recorder.run_id, "gate": gate, "mode": mode}
             if target is not None:
                 resource["target"] = target
             recorder.start(resource)

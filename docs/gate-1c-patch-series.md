@@ -6,8 +6,8 @@ or change another maintained module. The repository bootstrap verifies that
 each patch applies, or is already applied, before the gate runs.
 
 No upstream issue or pull request has been created. Opening either is a remote
-state change and requires separate approval. If Gate 1C passes on hardware,
-the upstream strategy is to split the series by concern, add the smallest
+state change and requires separate approval. Gate 1C passed on hardware; the
+upstream strategy remains to split the series by concern, add the smallest
 maintainer-accepted ESP32-S3 build test, and obtain issue or pull-request URLs
 before these patches are considered for use beyond this local feasibility
 spike.
@@ -39,7 +39,10 @@ two are narrowly demonstrated binding-generation fixes discovered by the
 CoreS3 build. The Gate 1C sample and runner are the local proof: they compile a
 Rust `no_std` image, link bidirectional C ABI calls, exercise the selected
 critical-section implementation, and build normal and deliberate-panic
-firmware. Physical serial markers remain the final oracle.
+firmware. Physical diagnostic run
+`015a39fd-7191-45ef-8ca5-4ea5681d8514` supplied the final serial oracle for
+boot, bidirectional ABI values, nested critical-section and interrupt-state
+restoration, allocation/free, deliberate panic, and normal inert-idle cleanup.
 
 ## Stop boundary
 

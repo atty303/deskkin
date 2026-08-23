@@ -65,8 +65,12 @@ description = "Prepare the repository-local Gate 1C Xtensa toolchains and module
 run = "./scripts/bootstrap_gate1c.sh"
 
 [tasks."gate:1c"]
-description = "Build and verify the host side of the ESP32-S3/Xtensa Rust feasibility gate"
-run = ".deskkin/venv/bin/python scripts/gate1c_runner.py"
+description = "Run the ESP32-S3/Xtensa Rust feasibility gate"
+run = ".deskkin/venv/bin/python scripts/gate1c_runner.py run"
+
+[tasks."device:recover"]
+description = "Recover a CoreS3 into the approved Gate 1C inert test firmware"
+run = ".deskkin/venv/bin/python scripts/gate1c_runner.py recover"
 
 [tasks."diagnostics:list"]
 description = "List bounded local gate diagnostic runs"
