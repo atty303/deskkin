@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+import { Button } from "std-widgets.slint";
+import { StatusSurface } from "../../../ui/status-surface.slint";
+
+export component DeviceWindow inherits Window {
+    width: 320px;
+    height: 240px;
+    background: #101820;
+
+    in-out property <string> shell-state: "SetupRequired";
+    in-out property <string> status-text: "Unknown";
+    in-out property <color> status-color: #9aa0a6;
+    in-out property <string> authentication-string: "";
+    callback pair();
+    callback confirm();
+    callback cancel();
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+        Text { text: root.shell-state; color: #d7e3f4; font-size: 20px; }
+        StatusSurface {
+            height: 92px;
+            status-text: root.authentication-string == "" ? root.status-text : root.authentication-string;
+            status-color: root.status-color;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "Pair";
+                visible: root.shell-state == "ReadyToPair";
+                enabled: root.authentication-string == "";
+                clicked => { root.pair(); }
+            }
+            Button {
+                text: "Confirm";
+                visible: root.authentication-string != "";
+                clicked => { root.confirm(); }
+            }
+            Button {
+                text: "Cancel";
+                visible: root.authentication-string != "";
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}

@@ -809,6 +809,7 @@ fn diagnostic_run(role: ResourceRole, record: DiagnosticRecord, terminal: bool) 
             match role {
                 ResourceRole::Host => "deskkin-desktop-host",
                 ResourceRole::DeviceSimulator => "deskkin-simulator",
+                ResourceRole::PhysicalDevice => "deskkin-core-s3-runner",
             },
             env!("CARGO_PKG_VERSION"),
             role,
@@ -1113,7 +1114,9 @@ const fn error_type(error: SessionError) -> local_run_recorder::ErrorType {
         SessionError::PairingRejected => local_run_recorder::ErrorType::PairingRejected,
         SessionError::PairingIncomplete => local_run_recorder::ErrorType::PairingIncomplete,
         SessionError::StoreFailed => local_run_recorder::ErrorType::StoreFailed,
-        SessionError::NonLoopback => local_run_recorder::ErrorType::InvalidAddress,
+        SessionError::NonLoopback | SessionError::NonPrivateLan => {
+            local_run_recorder::ErrorType::InvalidAddress
+        }
         SessionError::Io => local_run_recorder::ErrorType::ConnectionLost,
     }
 }
@@ -1121,6 +1124,7 @@ const fn error_type(error: SessionError) -> local_run_recorder::ErrorType {
 #[derive(Clone, Copy, Debug)]
 pub enum SessionError {
     NonLoopback,
+    NonPrivateLan,
     Io,
     Noise,
     Protocol,
@@ -1141,6 +1145,28 @@ pub fn bind_loopback(address: SocketAddr) -> Result<TcpListener, SessionError> {
     if !address.ip().is_loopback() {
         return Err(SessionError::NonLoopback);
     }
+    TcpListener::bind(address).map_err(|_| SessionError::Io)
+}
+
+pub const PRIVATE_LAN_PORT: u16 = 39_042;
+
+#[must_use]
+pub fn is_exact_private_lan_address(address: SocketAddr) -> bool {
+    let SocketAddr::V4(address) = address else {
+        return false;
+    };
+    let octets = address.ip().octets();
+    let private = octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168);
+    private && !address.ip().is_unspecified() && address.port() == PRIVATE_LAN_PORT
+}
+
+pub fn bind_private_lan(address: SocketAddr) -> Result<TcpListener, SessionError> {
+    if !is_exact_private_lan_address(address) {
+        return Err(SessionError::NonPrivateLan);
+    }
+    // Binding is also the authoritative local-assignment check on Linux.
     TcpListener::bind(address).map_err(|_| SessionError::Io)
 }
 
@@ -2460,6 +2486,27 @@ pub fn run_host_runtime_with_recording(
     if !address.ip().is_loopback() {
         return Err(SessionError::NonLoopback);
     }
+    run_host_runtime_scoped(address, role_root, result, recording)
+}
+
+pub fn run_private_lan_host_runtime_with_recording(
+    address: SocketAddr,
+    role_root: &Path,
+    result: AvailabilityResult,
+    recording: RecordingMode,
+) -> Result<(), SessionError> {
+    if !is_exact_private_lan_address(address) {
+        return Err(SessionError::NonPrivateLan);
+    }
+    run_host_runtime_scoped(address, role_root, result, recording)
+}
+
+fn run_host_runtime_scoped(
+    address: SocketAddr,
+    role_root: &Path,
+    result: AvailabilityResult,
+    recording: RecordingMode,
+) -> Result<(), SessionError> {
     let store = IdentityStore::new(role_root.join("identity")).with_recording(recording);
     store.peer().map_err(|_| SessionError::Identity)?;
     let actor = IdentityActor::start(store.clone());
@@ -4366,6 +4413,28 @@ mod tests {
             bind_loopback(SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 0)),
             Err(SessionError::NonLoopback)
         ));
+    }
+
+    #[test]
+    fn private_lan_scope_is_exact_rfc1918_ipv4_on_fixed_port() {
+        for address in [
+            SocketAddr::from(([10, 0, 0, 1], PRIVATE_LAN_PORT)),
+            SocketAddr::from(([172, 16, 0, 1], PRIVATE_LAN_PORT)),
+            SocketAddr::from(([172, 31, 255, 254], PRIVATE_LAN_PORT)),
+            SocketAddr::from(([192, 168, 1, 1], PRIVATE_LAN_PORT)),
+        ] {
+            assert!(is_exact_private_lan_address(address));
+        }
+        for address in [
+            SocketAddr::from(([0, 0, 0, 0], PRIVATE_LAN_PORT)),
+            SocketAddr::from(([127, 0, 0, 1], PRIVATE_LAN_PORT)),
+            SocketAddr::from(([169, 254, 1, 1], PRIVATE_LAN_PORT)),
+            SocketAddr::from(([172, 32, 0, 1], PRIVATE_LAN_PORT)),
+            SocketAddr::from(([192, 168, 1, 1], 0)),
+            "[::1]:39042".parse().unwrap(),
+        ] {
+            assert!(!is_exact_private_lan_address(address));
+        }
     }
     #[test]
     fn negotiation_keeps_features_and_permissions_independent() {

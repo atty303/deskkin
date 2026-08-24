@@ -4,6 +4,9 @@ members = [
   "apps/simulator",
   "crates/application-core",
   "crates/deskkin-protocol",
+  "crates/deskkin-protocol-client",
+  "crates/deskkin-noise-interop-tests",
+  "crates/deskkin-core-s3",
   "crates/local-run-recorder",
 ]
 # Slint-build enables Fontconfig's dlopen path. Resolver 1 shares that feature

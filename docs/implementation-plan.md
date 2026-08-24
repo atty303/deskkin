@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, and Phase 3 complete; Phase 3P approved
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, and Phase 3 complete; Phase 3P implementation complete, physical qualification pending
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,9 +11,9 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, Phase 3 paired loopback host slice, and approved Phase 3P work
-Application dependencies: approved Gate 1A, Phase 2, and exact Phase 3 sets resolved in the root lockfile
-Next action: implement and qualify Phase 3P before planning Phase 4
+Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, Phase 3 paired loopback host slice, and the Phase 3P host/device/tooling slice
+Application dependencies: approved Gate 1A, Phase 2, Phase 3, and exact Phase 3P sets resolved in the root and device lockfiles
+Next action: obtain live authority and physically qualify Phase 3P before planning Phase 4
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -541,7 +541,8 @@ Start a future development session with:
 > `docs/decisions/0004-paired-host-protocol.md`, and
 > `docs/decisions/0005-core-s3-paired-availability.md`. Confirm that Phase 3 is
 > complete and Phase 3P was approved on 2026-08-24 with separate documentation,
-> implementation, and physical-evidence checkpoints. Finish Phase 3P before
+> implementation, and physical-evidence checkpoints. The implementation
+> checkpoint is complete; physically qualify Phase 3P before
 > planning Phase 4. Do not flash, provision, mutate device state, power-cycle,
 > access a provider, release, push, or publish without the corresponding
 > explicit approval. Preserve and report the selected plaintext-NVS residual

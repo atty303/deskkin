@@ -1,0 +1,733 @@
+#!/usr/bin/env python3
+"""Build and control the bounded Phase 3P CoreS3 application."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import getpass
+import ipaddress
+import json
+import os
+import select
+import secrets
+import stat
+import subprocess
+import sys
+import termios
+import time
+import uuid
+from pathlib import Path
+
+SCHEMA = 1
+PORT = 39042
+FRAME_MAX = 188
+DEFAULT_PROFILE = Path(".deskkin/phase3-device/wifi.age")
+DEFAULT_IDENTITY = Path("~/.config/chezmoi/age/identity.txt")
+COMMANDS = {
+    "identity-init": 1,
+    "identity-list": 2,
+    "identity-unpair": 3,
+    "wifi-provision": 4,
+    "wifi-status": 5,
+    "wifi-clear": 6,
+    "run": 7,
+    "status": 8,
+    "shutdown": 9,
+}
+
+
+class DeviceError(Exception):
+    pass
+
+
+def zeroize(value: bytearray) -> None:
+    value[:] = b"\0" * len(value)
+
+
+def validate_profile(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {"schema_version", "ssid", "password", "host_ipv4"}:
+        raise DeviceError("profile_schema_invalid")
+    if value["schema_version"] != SCHEMA or not all(isinstance(value[key], str) for key in ("ssid", "password", "host_ipv4")):
+        raise DeviceError("profile_schema_invalid")
+    ssid = value["ssid"].encode("utf-8")
+    password = value["password"].encode("ascii", errors="strict")
+    try:
+        address = ipaddress.ip_address(value["host_ipv4"])
+    except ValueError as error:
+        raise DeviceError("profile_schema_invalid") from error
+    if not 1 <= len(ssid) <= 32 or not 8 <= len(password) <= 63:
+        raise DeviceError("profile_schema_invalid")
+    if any(byte < 0x20 or byte > 0x7E for byte in password):
+        raise DeviceError("profile_schema_invalid")
+    if not isinstance(address, ipaddress.IPv4Address) or not address.is_private or address.is_link_local or address.is_loopback:
+        raise DeviceError("profile_schema_invalid")
+    first, second = address.packed[:2]
+    if not (first == 10 or first == 172 and 16 <= second <= 31 or first == 192 and second == 168):
+        raise DeviceError("profile_schema_invalid")
+    return value
+
+
+def prompt_profile() -> dict[str, object]:
+    value = {
+        "schema_version": SCHEMA,
+        "ssid": getpass.getpass("SSID: "),
+        "password": getpass.getpass("WPA2 password: "),
+        "host_ipv4": getpass.getpass("Host RFC1918 IPv4: "),
+    }
+    return validate_profile(value)
+
+
+def age_recipient(identity: Path) -> str:
+    process = subprocess.run(
+        ["age-keygen", "-y", str(identity)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    recipient = process.stdout.strip()
+    if process.returncode != 0 or not recipient.startswith("age1"):
+        raise DeviceError("profile_encrypt_failed")
+    return recipient
+
+
+def create_profile(profile: Path, identity: Path, value: dict[str, object] | None = None) -> None:
+    profile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if stat.S_IMODE(profile.parent.stat().st_mode) & 0o077:
+        raise DeviceError("profile_directory_not_private")
+    data = bytearray(json.dumps(validate_profile(value or prompt_profile()), separators=(",", ":")).encode())
+    temporary = profile.with_name(f".{profile.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        recipient = age_recipient(identity)
+        process = subprocess.run(
+            ["age", "-r", recipient],
+            input=data,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if process.returncode != 0:
+            raise DeviceError("profile_encrypt_failed")
+        os.write(descriptor, process.stdout)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, profile)
+        directory = os.open(profile.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        zeroize(data)
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def mutable_subprocess_output(command: list[str], maximum: int, *, input_data: bytearray | None = None, cwd: Path | None = None) -> tuple[int, bytearray]:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        cwd=cwd,
+    )
+    if input_data is not None:
+        assert process.stdin is not None
+        process.stdin.write(input_data)
+        process.stdin.close()
+    assert process.stdout is not None
+    output = bytearray(maximum + 1)
+    length = process.stdout.readinto(output)
+    process.stdout.close()
+    returncode = process.wait()
+    del output[length:]
+    return returncode, output
+
+
+def decrypt_profile_raw(profile: Path, identity: Path) -> bytearray:
+    returncode, output = mutable_subprocess_output(
+        ["age", "-d", "-i", str(identity), str(profile)], 4096
+    )
+    if returncode != 0 or len(output) > 4096:
+        zeroize(output)
+        raise DeviceError("profile_decrypt_failed")
+    return output
+
+
+def decrypt_profile(profile: Path, identity: Path) -> bytearray:
+    plaintext = decrypt_profile_raw(profile, identity)
+    try:
+        value = json.loads(plaintext)
+        validate_profile(value)
+    except (UnicodeDecodeError, json.JSONDecodeError, DeviceError, ValueError) as error:
+        zeroize(plaintext)
+        raise DeviceError("profile_schema_invalid") from error
+    return plaintext
+
+
+def wifi_payload(value: dict[str, object]) -> bytearray:
+    validated = validate_profile(value)
+    ssid = bytearray(validated["ssid"], "utf-8")
+    password = bytearray(validated["password"], "utf-8")
+    address = ipaddress.IPv4Address(validated["host_ipv4"]).packed
+    try:
+        return bytearray([len(ssid)]) + ssid + bytearray([len(password)]) + password + bytearray(address) + bytearray(PORT.to_bytes(2, "big"))
+    finally:
+        zeroize(ssid)
+        zeroize(password)
+
+
+def profile_payload_from_json(root: Path, plaintext: bytearray) -> bytearray:
+    returncode, payload = mutable_subprocess_output(
+        ["cargo", "run", "--locked", "--quiet", "-p", "deskkin-desktop-host", "--bin", "device_profile"],
+        160,
+        input_data=plaintext,
+        cwd=root,
+    )
+    if returncode != 0 or len(payload) > 160:
+        zeroize(payload)
+        raise DeviceError("profile_schema_invalid")
+    return payload
+
+
+def control_frame(command: str, owner_generation: int, payload: bytearray | bytes = b"") -> bytearray:
+    if command not in COMMANDS or len(payload) > 160:
+        raise DeviceError("control_invalid")
+    command_id = secrets.token_bytes(16)
+    body = bytearray([SCHEMA, COMMANDS[command]]) + bytearray(command_id)
+    body.extend(owner_generation.to_bytes(8, "big"))
+    body.extend(len(payload).to_bytes(2, "big"))
+    body.extend(payload)
+    return bytearray(len(body).to_bytes(2, "big")) + body
+
+
+def discover_device(requested: str | None) -> Path:
+    if requested:
+        candidates = [Path(requested)]
+    else:
+        root = Path("/dev/serial/by-id")
+        candidates = sorted(root.glob("usb-Espressif_USB_JTAG_serial_debug_unit_*-if00")) if root.is_dir() else []
+    if len(candidates) != 1:
+        raise DeviceError("physical_device_required" if not candidates else "device_selection_ambiguous")
+    resolved = candidates[0].resolve(strict=True)
+    if not stat.S_ISCHR(resolved.stat().st_mode):
+        raise DeviceError("device_not_recognized")
+    return resolved
+
+
+def write_all(descriptor: int, value: bytes | bytearray, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    offset = 0
+    while offset < len(value):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([], [descriptor], [], remaining)[1]:
+            raise DeviceError("control_timeout")
+        try:
+            written = os.write(descriptor, value[offset:])
+        except BlockingIOError:
+            continue
+        if written <= 0:
+            raise DeviceError("control_timeout")
+        offset += written
+
+
+def read_exact(descriptor: int, length: int, timeout: float) -> bytes:
+    deadline = time.monotonic() + timeout
+    value = bytearray()
+    while len(value) < length:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
+            raise DeviceError("control_timeout")
+        try:
+            chunk = os.read(descriptor, length - len(value))
+        except BlockingIOError:
+            continue
+        if not chunk:
+            raise DeviceError("control_timeout")
+        value.extend(chunk)
+    return bytes(value)
+
+
+def exchange(device: Path, frame: bytearray) -> bytes:
+    descriptor = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        attributes = termios.tcgetattr(descriptor)
+        attributes[0] = attributes[1] = attributes[3] = 0
+        attributes[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
+        termios.tcflush(descriptor, termios.TCIFLUSH)
+
+        write_all(descriptor, frame, 2.0)
+        prefix = read_exact(descriptor, 2, 2.0)
+        length = int.from_bytes(prefix, "big")
+        if not 18 <= length <= 80:
+            raise DeviceError("control_invalid")
+        result = read_exact(descriptor, length, 2.0)
+        if result[0] != SCHEMA:
+            raise DeviceError("control_invalid")
+        if result[2:18] != frame[4:20]:
+            raise DeviceError("control_invalid")
+        return result
+    finally:
+        os.close(descriptor)
+
+
+def run_control(command: str, device_arg: str | None, payload: bytearray | bytes = b"") -> bytes:
+    device = discover_device(device_arg)
+    generation = 0
+    if command in {"identity-unpair", "wifi-provision", "wifi-clear"}:
+        status_frame = control_frame("status", 0)
+        try:
+            status = exchange(device, status_frame)
+            if status[1] != 0:
+                raise DeviceError("device_rejected")
+            generation = int.from_bytes(status[18:26], "big")
+        finally:
+            zeroize(status_frame)
+    frame = control_frame(command, generation, payload)
+    try:
+        result = exchange(device, frame)
+        if result[1] != 0:
+            raise DeviceError("device_rejected")
+        if command == "identity-list":
+            state = result[26] if len(result) >= 27 else 0
+            peer = result[27:59].hex() if len(result) == 59 else None
+            print(json.dumps({"state": state, "peer_id": peer}, separators=(",", ":")), file=sys.stderr)
+        return result
+    finally:
+        zeroize(frame)
+
+
+def device_environment(root: Path) -> tuple[Path, dict[str, str]]:
+    state = root / ".deskkin"
+    environment = os.environ.copy()
+    toolchain = state / "rustup/toolchains/deskkin-esp"
+    clang = toolchain / "xtensa-esp32-elf-clang/esp-20.1.1_20250829/esp-clang"
+    environment["ZEPHYR_TOOLCHAIN_VARIANT"] = "zephyr"
+    environment["ZEPHYR_SDK_INSTALL_DIR"] = str(state / "sdk")
+    environment["ZEPHYR_BASE"] = str(state / "west/zephyr")
+    environment["LIBCLANG_PATH"] = str(clang / "lib")
+    environment["SOURCE_DATE_EPOCH"] = "0"
+    environment["PATH"] = os.pathsep.join(
+        (
+            str(toolchain / "bin"),
+            str(state / "venv/bin"),
+            str(state / "sdk/sysroots/x86_64-pokysdk-linux/usr/bin"),
+            environment["PATH"],
+        )
+    )
+    return state, environment
+
+
+def build(root: Path) -> None:
+    state, environment = device_environment(root)
+    build_dir = state / "phase3-device/build"
+    west = state / "venv/bin/west"
+    subprocess.run(
+        [
+            str(west),
+            "build",
+            "--pristine",
+            "always",
+            "--board",
+            "m5stack_cores3/esp32s3/procpu",
+            "--build-dir",
+            str(build_dir),
+            str(root / "apps/core-s3-device"),
+        ],
+        check=True,
+        cwd=state / "west",
+        env=environment,
+        stdout=sys.stderr,
+    )
+    subprocess.run(
+        [
+            str(west),
+            "build",
+            "--pristine",
+            "always",
+            "--board",
+            "m5stack_cores3/esp32s3/procpu",
+            "--build-dir",
+            str(state / "phase3-device/inert-build"),
+            str(root / "apps/core-s3-inert"),
+        ],
+        check=True,
+        cwd=state / "west",
+        env=environment,
+        stdout=sys.stderr,
+    )
+
+
+def flash(root: Path, device_arg: str | None) -> None:
+    device = discover_device(device_arg)
+    state, environment = device_environment(root)
+    build_dir = state / "phase3-device/build"
+    if not (build_dir / "zephyr/zephyr.elf").is_file():
+        raise DeviceError("firmware_build_required")
+    subprocess.run(
+        [str(state / "venv/bin/west"), "flash", "--skip-rebuild", "--build-dir", str(build_dir), "--runner", "esp32", "--", "--esp-device", str(device)],
+        check=True,
+        cwd=state / "west",
+        env=environment,
+        stdout=sys.stderr,
+    )
+
+
+def recover(root: Path, device_arg: str | None) -> None:
+    device = discover_device(device_arg)
+    state, environment = device_environment(root)
+    build_dir = state / "phase3-device/inert-build"
+    if not (build_dir / "zephyr/zephyr.elf").is_file():
+        raise DeviceError("inert_firmware_build_required")
+    esptool = state / "venv/bin/esptool"
+    subprocess.run(
+        [str(esptool), "--port", str(device), "erase-region", "0x3b0000", "0x30000"],
+        check=True,
+        env=environment,
+        stdout=sys.stderr,
+    )
+    readback = state / f"phase3-device/.storage-readback-{secrets.token_hex(8)}.bin"
+    try:
+        subprocess.run(
+            [str(esptool), "--port", str(device), "read-flash", "0x3b0000", "0x30000", str(readback)],
+            check=True,
+            env=environment,
+            stdout=sys.stderr,
+        )
+        if readback.stat().st_size != 0x30000 or any(byte != 0xFF for byte in readback.read_bytes()):
+            raise DeviceError("storage_erase_readback_failed")
+    finally:
+        try:
+            readback.unlink()
+        except FileNotFoundError:
+            pass
+    subprocess.run(
+        [
+            str(state / "venv/bin/west"), "flash", "--skip-rebuild", "--build-dir",
+            str(build_dir), "--runner", "esp32", "--", "--esp-device", str(device),
+        ],
+        check=True,
+        cwd=state / "west",
+        env=environment,
+        stdout=sys.stderr,
+    )
+
+
+def publish_result(root: Path, action: str, result: str, run_id: str) -> Path:
+    directory = root / ".deskkin/phase3-device/results"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    path = directory / f"{action}.json"
+    temporary = directory / f".{action}.{secrets.token_hex(8)}.tmp"
+    value = {
+        "schema_version": 1,
+        "result": result,
+        "run_id": run_id,
+        "completed_unix_ms": int(time.time() * 1000),
+    }
+    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.write(descriptor, json.dumps(value, separators=(",", ":")).encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    return path
+
+
+def publish_diagnostic(root: Path, run_id: str, outcome: str, records: list[dict[str, object]]) -> None:
+    directory = root / ".deskkin/phase3/device/diagnostics"
+    for ancestor in (root / ".deskkin", root / ".deskkin/phase3", root / ".deskkin/phase3/device", directory):
+        if ancestor.is_symlink():
+            raise OSError("diagnostic_symlink")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    lock_path = directory.parent / ".diagnostics.lock"
+    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    created = int(time.time() * 1000)
+    latest = records[-1] if records else {}
+    session_context = latest.get("session_context_id")
+    operation_context = latest.get("operation_context_id")
+    value = {
+        "schema_version": 1,
+        "resource": {"program": "deskkin-core-s3-runner", "version": "0.1.0", "role": "physical_device"},
+        "run_id": run_id,
+        "scenario_run_id": run_id,
+        "session_context_id": session_context if session_context and session_context != "00" * 16 else None,
+        "operation_context_id": operation_context if operation_context and operation_context != "00" * 16 else None,
+        "outcome": outcome,
+        "completeness": "complete",
+        "health": "healthy",
+        "terminal": True,
+        "missing_reason": None,
+        "owner": None,
+        "retained": False,
+        "created_unix_ms": created,
+        "records": records,
+    }
+    path = directory / f"{run_id}.json"
+    temporary = directory / f".{run_id}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(descriptor, json.dumps(value, separators=(",", ":")).encode())
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        entries = []
+        for candidate in directory.glob("*.json"):
+            try:
+                item = json.loads(candidate.read_bytes())
+                entries.append((candidate, item.get("outcome") == "success", bool(item.get("retained")), candidate.stat().st_mtime_ns))
+            except (OSError, json.JSONDecodeError):
+                continue
+        for success, limit in ((True, 10), (False, 20)):
+            selected = sorted((entry for entry in entries if entry[1] == success and not entry[2]), key=lambda entry: entry[3], reverse=True)
+            for candidate, _, _, _ in selected[limit:]:
+                candidate.unlink()
+        retained = {entry[0] for entry in entries if entry[2]}
+        total = sorted((candidate for candidate in directory.glob("*.json") if candidate not in retained), key=lambda candidate: candidate.stat().st_mtime_ns)
+        size = sum(candidate.stat().st_size for candidate in total)
+        while size > 16 * 1024 * 1024 and total:
+            candidate = total.pop(0)
+            size -= candidate.stat().st_size
+            candidate.unlink()
+        directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        os.close(lock_descriptor)
+
+
+def monitor_device(device_arg: str | None, duration_seconds: float, expected_attempt: int) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    started = time.monotonic()
+    last_elapsed = 0
+    previous: tuple[int, int, int, bytes, bytes, bool, int, int, int, int, int] | None = None
+    try:
+        while duration_seconds <= 0 or time.monotonic() - started < duration_seconds:
+            result = run_control("status", device_arg)
+            if len(result) < 78:
+                raise DeviceError("control_invalid")
+            shell_and_valid = result[26]
+            value = (
+                shell_and_valid & 0x7F,
+                result[27],
+                int.from_bytes(result[28:32], "big"),
+                result[32:48],
+                result[48:64],
+                bool(shell_and_valid & 0x80),
+                int.from_bytes(result[64:68], "big"),
+                int.from_bytes(result[68:72], "big"),
+                int.from_bytes(result[72:76], "big"),
+                result[76],
+                result[77],
+            )
+            if value != previous:
+                elapsed = int((time.monotonic() - started) * 1000)
+                stage = ("idle", "wifi_association", "dhcp", "tcp_connect", "noise", "bootstrap", "availability_read", "view_application", "display_transfer")[min(value[9], 8)]
+                error_type = {
+                    0: None,
+                    1: "identity_store",
+                    2: "wifi_association",
+                    3: "dhcp_timeout",
+                    4: "tcp_connect" if value[9] <= 3 else "availability_timeout",
+                    5: "noise",
+                    6: "noise",
+                    7: "pairing_rejected",
+                    8: "pairing_busy",
+                    9: "pairing_expired",
+                    10: "protocol_incompatible",
+                    11: "authorization_denied",
+                }.get(value[10], "noise")
+                records.append(
+                    {
+                        "operation": stage,
+                        "operation_id": len(records) + 1,
+                        "parent_operation_id": None,
+                        "status": "success" if error_type is None else "error",
+                        "error_type": error_type,
+                        "effect_id": None,
+                        "virtual_time_ms": elapsed,
+                        "end_virtual_time_ms": elapsed,
+                        "duration_ms": elapsed - last_elapsed,
+                        "render_width": 320,
+                        "render_height": 240,
+                        "value": ("unknown", "available", "unavailable")[min(value[1], 2)],
+                        "session_context_id": value[3].hex(),
+                        "operation_context_id": value[4].hex(),
+                        "rgb565_digest": f"{value[2]:08x}",
+                        "shell_state": value[0],
+                        "valid_availability_result": value[5],
+                        "run_attempt": value[6],
+                        "result_attempt": value[7],
+                        "frame_attempt": value[8],
+                        "stage": stage,
+                    }
+                )
+                last_elapsed = elapsed
+                previous = value
+            time.sleep(0.25)
+    except KeyboardInterrupt:
+        pass
+    return records
+
+
+def run_succeeded(records: list[dict[str, object]], expected_attempt: int) -> bool:
+    zero_context = "00" * 16
+    return any(
+        record.get("shell_state") == 4
+        and record.get("valid_availability_result") is True
+        and record.get("session_context_id") != zero_context
+        and record.get("operation_context_id") != zero_context
+        and record.get("rgb565_digest") not in {None, "00000000"}
+        and record.get("run_attempt") == expected_attempt
+        and record.get("result_attempt") == expected_attempt
+        and record.get("frame_attempt") == expected_attempt
+        for record in records
+    )
+
+
+def action_record(action: str, status: str, error_type: str | None = None) -> dict[str, object]:
+    operation = {
+        "profile": "control_route",
+        "build": "control_route",
+        "flash": "device_ui",
+        "identity": "identity_init",
+        "provision": "nvs_publication",
+        "run": "device_ui",
+        "recover": "nvs_publication",
+    }[action]
+    return {
+        "operation": operation,
+        "operation_id": 1,
+        "parent_operation_id": None,
+        "status": status,
+        "error_type": error_type,
+        "effect_id": None,
+        "virtual_time_ms": 0,
+        "end_virtual_time_ms": 0,
+        "duration_ms": 0,
+        "render_width": None,
+        "render_height": None,
+        "value": "success" if status == "success" else "error",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "run", "recover"))
+    parser.add_argument("identity_action", nargs="?")
+    parser.add_argument("--profile", type=Path)
+    parser.add_argument("--age-identity", type=Path)
+    parser.add_argument("--device")
+    parser.add_argument("--peer-id")
+    parser.add_argument("--erase-storage", action="store_true")
+    parser.add_argument("--duration-seconds", type=float, default=0)
+    parser.add_argument("--recording", choices=("on", "off"), default="on")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    profile = (args.profile or root / DEFAULT_PROFILE).expanduser()
+    identity = (args.age_identity or DEFAULT_IDENTITY).expanduser()
+    run_id = str(uuid.uuid4())
+    result = "error"
+    exit_code = 2
+    records: list[dict[str, object]] = []
+    error_type: str | None = None
+    try:
+        if args.action == "profile":
+            create_profile(profile, identity)
+        elif args.action == "build":
+            build(root)
+        elif args.action == "flash":
+            flash(root, args.device)
+        elif args.action == "recover":
+            if not args.erase_storage:
+                raise DeviceError("erase_storage_confirmation_required")
+            recover(root, args.device)
+        elif args.action == "identity":
+            action = args.identity_action
+            if action not in {"init", "list", "unpair"}:
+                raise DeviceError("identity_action_required")
+            payload = bytearray.fromhex(args.peer_id) if action == "unpair" and args.peer_id else bytearray()
+            if action == "unpair" and len(payload) != 32:
+                raise DeviceError("exact_peer_id_required")
+            try:
+                run_control(f"identity-{action}", args.device, payload)
+            finally:
+                zeroize(payload)
+        elif args.action == "provision":
+            explicit = args.profile is not None
+            plaintext: bytearray | None = None
+            payload = bytearray()
+            try:
+                if profile.exists():
+                    plaintext = decrypt_profile_raw(profile, identity)
+                    payload = profile_payload_from_json(root, plaintext)
+                elif explicit:
+                    raise DeviceError("profile_decrypt_failed")
+                else:
+                    value = prompt_profile()
+                    payload = wifi_payload(value)
+                run_control("wifi-provision", args.device, payload)
+            finally:
+                zeroize(payload)
+                if plaintext is not None:
+                    zeroize(plaintext)
+        elif args.action == "run":
+            accepted = run_control("run", args.device)
+            if len(accepted) < 30:
+                raise DeviceError("control_invalid")
+            expected_attempt = int.from_bytes(accepted[26:30], "big")
+            records = monitor_device(args.device, args.duration_seconds, expected_attempt)
+            if not run_succeeded(records, expected_attempt):
+                raise DeviceError("availability_timeout")
+        result = "success"
+        exit_code = 0
+    except (DeviceError, OSError, subprocess.SubprocessError, UnicodeError, ValueError) as error:
+        message = str(error) if isinstance(error, DeviceError) else "device_operation_failed"
+        error_type = message if message in {
+            "profile_decrypt_failed",
+            "profile_schema_invalid",
+            "wifi_association",
+            "dhcp_timeout",
+            "tcp_connect",
+            "noise",
+            "availability_timeout",
+        } else "store_failed"
+        print(message, file=sys.stderr)
+    if not records:
+        records = [action_record(args.action, "success" if exit_code == 0 else "error", error_type)]
+    if args.recording == "on":
+        try:
+            publish_diagnostic(root, run_id, "success" if exit_code == 0 else "error", records)
+        except OSError:
+            pass
+    try:
+        result_path = str(publish_result(root, args.action, result, run_id))
+    except OSError:
+        result_path = ""
+    print(json.dumps({"result": result, "run_id": run_id, "result_path": result_path}, separators=(",", ":")))
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

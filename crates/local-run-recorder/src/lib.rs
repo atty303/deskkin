@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-const MAX_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const SUCCESS_LIMIT: usize = 10;
 const NON_SUCCESS_LIMIT: usize = 20;
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -74,6 +74,12 @@ pub enum Operation {
     ControlRoute,
     IdentityInit,
     IdentityUnpair,
+    WifiAssociation,
+    DhcpAcquire,
+    TcpConnect,
+    NvsPublication,
+    DeviceUi,
+    DisplayTransfer,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -134,6 +140,14 @@ pub enum ErrorType {
     StoreStalled,
     OwnerBusy,
     LockTimeout,
+    ProfileDecryptFailed,
+    ProfileSchemaInvalid,
+    WifiAssociation,
+    DhcpTimeout,
+    TcpConnect,
+    Noise,
+    AvailabilityTimeout,
+    RecordingDegraded,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -206,6 +220,7 @@ pub struct ResourceIdentity {
 pub enum ResourceRole {
     Host,
     DeviceSimulator,
+    PhysicalDevice,
 }
 
 #[must_use]

@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-3.0-only
+
+[workspace]
+resolver = "2"
+
+[package]
+name = "deskkin-core-s3-device"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+name = "rustapp"
+crate-type = ["staticlib"]
+
+[dependencies]
+application-core = { path = "../../crates/application-core" }
+critical-section = "=1.2.0"
+deskkin-core-s3 = { path = "../../crates/deskkin-core-s3" }
+deskkin-protocol = { path = "../../crates/deskkin-protocol" }
+deskkin-protocol-client = { path = "../../crates/deskkin-protocol-client" }
+embassy-time = { version = "=0.4.0", features = ["tick-hz-10_000"] }
+slint = { version = "=1.17.1", default-features = false, features = ["compat-1-2", "renderer-software", "unsafe-single-threaded", "libm"] }
+snow = { version = "=0.10.0", default-features = false, features = ["default-resolver", "use-blake2", "use-chacha20poly1305", "use-curve25519"] }
+static_cell = "=2.1.1"
+zephyr = { version = "=0.1.0", features = ["executor-zephyr", "time-driver"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+
+[dependencies.embassy-executor]
+version = "=0.7.0"
+features = ["log", "task-arena-size-8192"]
+
+[build-dependencies]
+slint-build = "=1.17.1"
+
+[profile.dev]
+codegen-units = 1
+debug = true
+lto = "fat"
+opt-level = 2
+panic = "abort"

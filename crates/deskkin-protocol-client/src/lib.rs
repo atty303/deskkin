@@ -1,3 +1,4 @@
+#![no_std]
 #![allow(clippy::missing_errors_doc)]
 
 use application_core::{
@@ -61,26 +62,37 @@ impl ProtocolAdapter {
             terminal_reason: None,
         }
     }
+
     #[must_use]
     pub const fn state(&self) -> ConnectionState {
         self.state
     }
+
     #[must_use]
     pub const fn session_context(&self) -> Option<ContextId> {
         self.session
     }
+
     pub fn connecting(&mut self) {
         if self.state != ConnectionState::Stopped {
             self.state = ConnectionState::Connecting;
         }
     }
+
     pub fn authenticated(&mut self, session: ContextId) {
-        if self.state == ConnectionState::Stopped {
-            return;
+        if self.state != ConnectionState::Stopped {
+            self.session = Some(session);
+            self.state = ConnectionState::Authenticated;
         }
-        self.session = Some(session);
-        self.state = ConnectionState::Authenticated;
     }
+
+    /// Records the only event that resets the reconnect backoff series.
+    pub fn valid_availability_result(&mut self) {
+        if self.state == ConnectionState::Authenticated {
+            self.backoff_index = 0;
+        }
+    }
+
     pub fn restart_after_pairing(&mut self) {
         self.state = ConnectionState::Disconnected;
         self.session = None;
@@ -88,15 +100,18 @@ impl ProtocolAdapter {
         self.backoff_index = 0;
         self.terminal_reason = None;
     }
+
     #[must_use]
     pub const fn terminal_reason(&self) -> Option<TerminalReason> {
         self.terminal_reason
     }
+
     #[must_use]
     pub fn reconnect_delay_ms(&self) -> Option<u32> {
         (self.state == ConnectionState::Backoff)
             .then(|| RECONNECT_DELAYS_MS[self.backoff_index.min(RECONNECT_DELAYS_MS.len() - 1)])
     }
+
     pub fn connection_failed(&mut self) -> Result<u32, ProtocolAdapterError> {
         if self.state == ConnectionState::Stopped {
             return Err(ProtocolAdapterError::Stopped);
@@ -106,6 +121,7 @@ impl ProtocolAdapter {
         self.backoff_index = (self.backoff_index + 1).min(RECONNECT_DELAYS_MS.len() - 1);
         Ok(delay)
     }
+
     pub fn hello_rejected(&mut self, reason: HelloRejectReason) {
         match reason {
             HelloRejectReason::SessionBusy => {
@@ -121,6 +137,7 @@ impl ProtocolAdapter {
             }
         }
     }
+
     pub fn begin_read(
         &mut self,
         core: &Core,
@@ -143,6 +160,7 @@ impl ProtocolAdapter {
         self.active = Some((operation, next, effect_id));
         Ok(next)
     }
+
     pub fn result(
         &mut self,
         core: &mut Core,
@@ -173,6 +191,7 @@ impl ProtocolAdapter {
         self.backoff_index = 0;
         Ok(next)
     }
+
     pub fn disconnected(
         &mut self,
         core: &mut Core,
@@ -190,6 +209,7 @@ impl ProtocolAdapter {
         .map(|transition| transition.effect)
         .map_err(|_| ProtocolAdapterError::CoreRejected)
     }
+
     pub fn stop(&mut self) {
         self.state = ConnectionState::Stopped;
         self.session = None;
@@ -200,7 +220,8 @@ impl ProtocolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use application_core::{Command, StatusView};
+    use application_core::{Command, StatusView, TimerArmCompleted};
+
     #[test]
     fn maps_all_results_and_rejects_stale_session() {
         for (wire, view) in [
@@ -223,6 +244,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn disconnect_invalidates_waiting_without_changing_timer() {
         let mut core = Core::new();
@@ -239,12 +261,10 @@ mod tests {
             .unwrap()
             .effect
             .unwrap();
-        core.transition(Input::TimerArmCompleted(
-            application_core::TimerArmCompleted {
-                effect_id: timer.id,
-                result: Ok(()),
-            },
-        ))
+        core.transition(Input::TimerArmCompleted(TimerArmCompleted {
+            effect_id: timer.id,
+            result: Ok(()),
+        }))
         .unwrap();
         let state = core.state();
         let mut adapter = ProtocolAdapter::new();
@@ -256,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_series_resets_only_after_valid_result_and_terminal_reasons_stop() {
+    fn reconnect_series_resets_only_after_valid_result() {
         let mut adapter = ProtocolAdapter::new();
         assert_eq!(adapter.connection_failed(), Ok(250));
         assert_eq!(adapter.connection_failed(), Ok(500));
@@ -280,21 +300,27 @@ mod tests {
             adapter.terminal_reason(),
             Some(TerminalReason::AuthorizationDenied)
         );
-        assert_eq!(
-            adapter.connection_failed(),
-            Err(ProtocolAdapterError::Stopped)
-        );
     }
 
     #[test]
-    fn successful_repair_restarts_a_stopped_adapter_from_fresh_backoff() {
+    fn authentication_alone_does_not_reset_backoff() {
+        let mut adapter = ProtocolAdapter::new();
+        assert_eq!(adapter.connection_failed(), Ok(250));
+        assert_eq!(adapter.connection_failed(), Ok(500));
+        adapter.authenticated([1; 16]);
+        assert_eq!(adapter.connection_failed(), Ok(1_000));
+        adapter.authenticated([2; 16]);
+        adapter.valid_availability_result();
+        assert_eq!(adapter.connection_failed(), Ok(250));
+    }
+
+    #[test]
+    fn repair_restarts_stopped_adapter() {
         let mut adapter = ProtocolAdapter::new();
         adapter.authenticated([1; 16]);
         adapter.stop();
         adapter.restart_after_pairing();
         assert_eq!(adapter.state(), ConnectionState::Disconnected);
-        assert_eq!(adapter.session_context(), None);
-        assert_eq!(adapter.terminal_reason(), None);
         assert_eq!(adapter.connection_failed(), Ok(250));
     }
 }

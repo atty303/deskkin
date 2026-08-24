@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use deskkin_desktop_host::{
     IdentityActor, IdentityStore, OwnerCommand, OwnerResponse, acquire_owner_lock, bind_loopback,
     call_owner_control, discover_owner, new_control_id, query_command_result,
-    run_host_runtime_with_recording, run_owner_control, serve_one,
+    run_host_runtime_with_recording, run_owner_control,
+    run_private_lan_host_runtime_with_recording, serve_one,
 };
 use deskkin_protocol::AvailabilityResult;
 use local_run_recorder::RecordingMode;
@@ -94,9 +95,36 @@ fn run() -> Result<(), String> {
             run_host_runtime_with_recording(address, &role_root, result, recording)
                 .map_err(debug)?;
         }
+        "run-private-lan" => {
+            let address = args.next().ok_or_else(usage)?.parse().map_err(debug)?;
+            let result = parse_availability(args.next().as_deref())?;
+            let remaining: Vec<_> = args.collect();
+            let recording = if remaining.iter().any(|value| value == "--recording-off") {
+                RecordingMode::Off
+            } else {
+                RecordingMode::On
+            };
+            let role_root = PathBuf::from(
+                remaining
+                    .into_iter()
+                    .find(|value| value != "--recording-off")
+                    .unwrap_or_else(|| ".deskkin/phase3/host".into()),
+            );
+            run_private_lan_host_runtime_with_recording(address, &role_root, result, recording)
+                .map_err(debug)?;
+        }
         _ => return Err(usage()),
     }
     Ok(())
+}
+
+fn parse_availability(value: Option<&str>) -> Result<AvailabilityResult, String> {
+    match value {
+        Some("available") => Ok(AvailabilityResult::Available),
+        Some("unavailable") => Ok(AvailabilityResult::Unavailable),
+        Some("read_failed") => Ok(AvailabilityResult::ReadFailed),
+        _ => Err(usage()),
+    }
 }
 
 fn identity_init(root: PathBuf) -> Result<(), String> {
@@ -273,7 +301,7 @@ fn query_owner_result(
 }
 
 fn usage() -> String {
-    "usage: deskkin-desktop-host identity-init|identity-list [ROOT] | unpair PEER [ROOT] | pairing-window-open [ROOT] | serve-once ADDRESS available|unavailable|read_failed [ROOT] | owner [ROLE_ROOT] | run ADDRESS available|unavailable|read_failed [ROLE_ROOT]".into()
+    "usage: deskkin-desktop-host identity-init|identity-list [ROOT] | unpair PEER [ROOT] | pairing-window-open [ROOT] | serve-once ADDRESS available|unavailable|read_failed [ROOT] | owner [ROLE_ROOT] | run ADDRESS available|unavailable|read_failed [ROLE_ROOT] | run-private-lan RFC1918_IPV4:39042 available|unavailable|read_failed [ROLE_ROOT]".into()
 }
 
 fn debug(error: impl std::fmt::Debug) -> String {

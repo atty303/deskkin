@@ -1,3 +1,5 @@
+import { StatusSurface } from "../../../ui/status-surface.slint";
+
 export component StatusWindow inherits Window {
     width: 320px;
     height: 240px;
@@ -8,24 +10,12 @@ export component StatusWindow inherits Window {
 
     background: #16191d;
 
-    Rectangle {
+    StatusSurface {
         x: 24px;
         y: 58px;
         width: 272px;
         height: 124px;
-        border-radius: 18px;
-        background: #23282f;
-        border-width: 4px;
-        border-color: root.status-color;
-
-        Text {
-            text: root.status-text;
-            color: root.status-color;
-            font-size: 32px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
+        status-text: root.status-text;
+        status-color: root.status-color;
     }
 }
-

@@ -1,0 +1,18 @@
+export component StatusSurface inherits Rectangle {
+    in property <string> status-text: "Unknown";
+    in property <color> status-color: #f3b33d;
+
+    border-radius: 18px;
+    background: #23282f;
+    border-width: 4px;
+    border-color: root.status-color;
+
+    Text {
+        text: root.status-text;
+        color: root.status-color;
+        font-size: 32px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}

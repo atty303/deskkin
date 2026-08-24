@@ -1,6 +1,7 @@
 min_version = "2026.8.6"
 
 [tools]
+age = "1.3.1"
 actionlint = "1.7.12"
 clang = "15.0.7"
 "conda:libclang" = "15.0.7"
@@ -56,7 +57,12 @@ cargo run --locked --quiet --bin deskkin-scenario -- periodic-read-failure --rec
 cargo run --locked --quiet --bin deskkin-scenario -- protocol-disconnect-recovery --recording-off
 cargo check --locked -p application-core --target thumbv7m-none-eabi
 cargo check --locked -p deskkin-protocol --target thumbv7m-none-eabi
-python -m unittest discover -s tests
+cargo check --locked -p deskkin-protocol-client --target thumbv7m-none-eabi
+cargo check --locked -p deskkin-core-s3 --target thumbv7m-none-eabi
+DESKKIN_TEST_AGE=1 python -m unittest discover -s tests
+python scripts/phase3_device.py build
+cargo tree --locked -p application-core --edges normal
+cargo tree --locked -p deskkin-protocol --edges normal
 '''
 
 [tasks."phase2:desktop"]
@@ -82,6 +88,34 @@ run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-desktop --"
 [tasks."phase3:diagnostics"]
 description = "Administer one exact Phase 3 role diagnostic store"
 run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-diagnostics --"
+
+[tasks."phase3:device:profile"]
+description = "Create the ignored age-encrypted Phase 3P Wi-Fi profile"
+run = "python scripts/phase3_device.py profile"
+
+[tasks."phase3:device:build"]
+description = "Build the Phase 3P CoreS3 firmware without touching a device"
+run = "python scripts/phase3_device.py build"
+
+[tasks."phase3:device:flash"]
+description = "Flash the approved Phase 3P firmware after a live checkpoint"
+run = "python scripts/phase3_device.py flash"
+
+[tasks."phase3:device:identity"]
+description = "Run one explicit CoreS3 identity control command"
+run = "python scripts/phase3_device.py identity"
+
+[tasks."phase3:device:provision"]
+description = "Provision one CoreS3 Wi-Fi profile after a live checkpoint"
+run = "python scripts/phase3_device.py provision"
+
+[tasks."phase3:device:run"]
+description = "Start the already configured CoreS3 application"
+run = "python scripts/phase3_device.py run"
+
+[tasks."phase3:device:recover"]
+description = "Erase CoreS3 storage and restore inert firmware after a live checkpoint"
+run = "python scripts/phase3_device.py recover"
 
 [tasks."gate:1a:bootstrap"]
 description = "Prepare the repository-local Gate 1A Zephyr workspace and SDK"

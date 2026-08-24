@@ -28,7 +28,7 @@ use crate::diagnostics::{
     resource_identity_for,
 };
 use crate::presenter::apply_view;
-use crate::protocol_client::ProtocolAdapter;
+use deskkin_protocol_client::ProtocolAdapter;
 
 struct NativeRuntime {
     core: Core,
