@@ -1,5 +1,11 @@
 [workspace]
-members = ["apps/simulator", "crates/application-core"]
+members = [
+  "apps/desktop-host",
+  "apps/simulator",
+  "crates/application-core",
+  "crates/deskkin-protocol",
+  "crates/local-run-recorder",
+]
 # Slint-build enables Fontconfig's dlopen path. Resolver 1 shares that feature
 # with the hosted Slint runtime, avoiding a compile-time fontconfig-devel
 # requirement while retaining runtime discovery on Linux.

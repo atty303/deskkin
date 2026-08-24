@@ -15,7 +15,7 @@ local linters = new Mapping<String, Step> {
   ["mise"] = Builtins.mise
   ["private-key"] = Builtins.detect_private_key
   ["rustfmt"] {
-    glob = List("apps/simulator/**/*.rs", "crates/application-core/**/*.rs")
+    glob = List("apps/**/*.rs", "crates/**/*.rs")
     stage = glob
     check = new CommandSpec {
       command = new Command {

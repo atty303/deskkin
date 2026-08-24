@@ -21,6 +21,11 @@ pub enum Command {
     Start,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AvailabilityInvalidated {
+    SourceUnavailable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct EffectId(u64);
 
@@ -76,6 +81,7 @@ pub enum Input {
     ReadCompleted(ReadCompleted),
     TimerArmCompleted(TimerArmCompleted),
     RefreshDue(RefreshDue),
+    AvailabilityInvalidated(AvailabilityInvalidated),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,6 +162,20 @@ impl Core {
 
     fn apply(&mut self, input: Input) -> Result<Option<Effect>, TransitionError> {
         match (self.state, input) {
+            (State::Stopped, Input::AvailabilityInvalidated(_)) => Ok(None),
+            (State::Reading { effect_id }, Input::AvailabilityInvalidated(_)) => {
+                self.apply(Input::ReadCompleted(ReadCompleted {
+                    effect_id,
+                    result: Err(ReadError::Unavailable),
+                }))
+            }
+            (
+                State::ArmingRefresh { .. } | State::Waiting { .. },
+                Input::AvailabilityInvalidated(_),
+            ) => {
+                self.view = StatusView::Unknown;
+                Ok(None)
+            }
             (State::Stopped, Input::Command(Command::Start)) => {
                 let effect = self.allocate(EffectRequest::ReadAvailability)?;
                 self.state = State::Reading {
@@ -307,6 +327,60 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(core.state(), State::Stopped);
+        assert_eq!(core.view(), StatusView::Unknown);
+    }
+
+    #[test]
+    fn source_loss_completes_active_read_once() {
+        let mut core = Core::new();
+        let _read_effect = start(&mut core);
+        let transition = core
+            .transition(Input::AvailabilityInvalidated(
+                AvailabilityInvalidated::SourceUnavailable,
+            ))
+            .unwrap();
+        assert_eq!(transition.view, StatusView::Unknown);
+        assert_eq!(
+            transition.effect.unwrap().request,
+            EffectRequest::ArmRefreshTimer { delay_ms: 5_000 }
+        );
+        assert_eq!(
+            core.transition(Input::AvailabilityInvalidated(
+                AvailabilityInvalidated::SourceUnavailable,
+            )),
+            Ok(Transition {
+                state: core.state(),
+                view: StatusView::Unknown,
+                effect: None
+            })
+        );
+    }
+
+    #[test]
+    fn source_loss_preserves_waiting_effect_and_stopped_is_ignored() {
+        let mut stopped = Core::new();
+        let before = stopped;
+        stopped
+            .transition(Input::AvailabilityInvalidated(
+                AvailabilityInvalidated::SourceUnavailable,
+            ))
+            .unwrap();
+        assert_eq!(stopped, before);
+
+        let mut core = Core::new();
+        let read_effect = start(&mut core);
+        let timer = read(&mut core, read_effect.id, Ok(Availability::Available));
+        core.transition(Input::TimerArmCompleted(TimerArmCompleted {
+            effect_id: timer.id,
+            result: Ok(()),
+        }))
+        .unwrap();
+        let waiting = core.state();
+        core.transition(Input::AvailabilityInvalidated(
+            AvailabilityInvalidated::SourceUnavailable,
+        ))
+        .unwrap();
+        assert_eq!(core.state(), waiting);
         assert_eq!(core.view(), StatusView::Unknown);
     }
 

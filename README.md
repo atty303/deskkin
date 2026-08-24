@@ -11,20 +11,22 @@ and home automation.
 
 ## Status
 
-Deskkin has completed Phase 0 and all Phase 1 foundation gates. The bounded
-evidence covers Rust and Slint on supported Zephyr QEMU targets, the
-ESP32-S3/Xtensa Rust toolchain, upstream CoreS3 board and driver behavior, and
-the combined CoreS3 Slint touch-to-dirty-display path. The repository still
-contains feasibility applications and tooling rather than the portable product
-application.
+Deskkin has completed Phase 0, all Phase 1 foundation gates, and the Phase 2
+provider-neutral periodic availability surface. The Phase 3 implementation now
+adds an authenticated Linux loopback vertical slice: explicit host and
+simulator identities, Noise XX pairing with a shared six-digit authentication
+string, pinned reconnects, a bounded `no_std` wire codec, exact unpair, and a
+fake-host availability read. The implementation passed the complete local
+verification suite and a fresh independent review with no remaining P0/P1
+finding; live pairing demonstration remains a separate launch checkpoint.
 
-The approved next checkpoint is the Phase 2 provider-neutral periodic
-availability status: a pure portable core and a deterministic Linux simulator
-described in [`docs/phase-2-slice-proposal.md`](docs/phase-2-slice-proposal.md).
-The agreed product boundary, architecture, decisions, evidence, and phased plan remain in
-[`docs/implementation-plan.md`](docs/implementation-plan.md), with the Phase 1
-foundation baseline in
-[`docs/phase-0-feasibility-proposal.md`](docs/phase-0-feasibility-proposal.md).
+The agreed product boundary, architecture, decisions, evidence, and phased plan
+remain in [`docs/implementation-plan.md`](docs/implementation-plan.md). Phase 2
+is specified by
+[`docs/phase-2-slice-proposal.md`](docs/phase-2-slice-proposal.md), and the
+approved Phase 3 contract is in
+[`docs/phase-3-slice-proposal.md`](docs/phase-3-slice-proposal.md) and
+[`ADR-0004`](docs/decisions/0004-paired-host-protocol.md).
 
 ## Architecture
 
@@ -108,11 +110,37 @@ mise run phase2:diagnostics -- unretain RUN-ID
 mise run phase2:diagnostics -- delete RUN-ID
 ```
 
+Phase 3 uses disposable identity roots by default. Initialize both identities,
+start the long-running host and simulator in separate local terminals, then run
+the owner-routed pairing commands in two more terminals. Confirm the matching
+authentication string at both ends; the running simulator reconnects with the
+pinned identity after the pairing operation completes:
+
+```sh
+mise run phase3:host -- identity-init
+mise run phase3:simulator -- identity-init
+mise run phase3:host -- run 127.0.0.1:39032 available
+mise run phase3:simulator -- run 127.0.0.1:39032
+mise run phase3:host -- pairing-window-open
+mise run phase3:simulator -- pair-start 127.0.0.1:39032
+```
+
+Pairing and runtime commands reject non-loopback network scope. The fake host
+also accepts `unavailable` and `read_failed`. Identity mutation is serialized
+through the live process owner; exact unpair requires the peer public-key ID
+reported by `identity-list`. Role-local diagnostics remain private and bounded:
+
+```sh
+mise run phase3:diagnostics -- --root .deskkin/phase3/host list
+mise run phase3:diagnostics -- --root .deskkin/phase3/device-simulator list
+```
+
 ## License
 
-Deskkin source is MIT. Slint-bearing Gate 1B and Phase 2 combined binaries use
-Slint under GPL-3.0-only and are GPLv3 as a whole. Phase 2 authorizes that
-distribution model but adds no release or publication; actual distribution
-requires a separately approved corresponding-source bundle and delivery method.
+Deskkin source is MIT. Slint-bearing Gate 1B, Phase 2, and Phase 3 simulator
+combined binaries use Slint under GPL-3.0-only and are GPLv3 as a whole. The
+accepted phases authorize that distribution model but add no release or
+publication; actual distribution requires a separately approved
+corresponding-source bundle and delivery method.
 See [`docs/licensing.md`](docs/licensing.md) for the exact source and combined
 binary boundary.

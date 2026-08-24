@@ -2,8 +2,8 @@ use std::fmt;
 use std::rc::Rc;
 
 use application_core::{
-    Availability, Command, Core, Effect, EffectRequest, Input, ReadCompleted, ReadError,
-    RefreshDue, StatusView, TimerArmCompleted,
+    Availability, AvailabilityInvalidated, Command, Core, Effect, EffectRequest, Input,
+    ReadCompleted, ReadError, RefreshDue, StatusView, TimerArmCompleted,
 };
 use serde::{Deserialize, Serialize};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
@@ -48,6 +48,7 @@ fn setup_headless() -> Rc<MinimalSoftwareWindow> {
 pub enum ScenarioName {
     PeriodicSuccess,
     PeriodicReadFailure,
+    ProtocolDisconnectRecovery,
 }
 
 impl ScenarioName {
@@ -60,6 +61,7 @@ impl ScenarioName {
         match value {
             "periodic-success" => Ok(Self::PeriodicSuccess),
             "periodic-read-failure" => Ok(Self::PeriodicReadFailure),
+            "protocol-disconnect-recovery" => Ok(Self::ProtocolDisconnectRecovery),
             _ => Err(format!("unknown scenario: {value}")),
         }
     }
@@ -68,6 +70,7 @@ impl ScenarioName {
         match self {
             Self::PeriodicSuccess => "periodic-success",
             Self::PeriodicReadFailure => "periodic-read-failure",
+            Self::ProtocolDisconnectRecovery => "protocol-disconnect-recovery",
         }
     }
 }
@@ -90,6 +93,7 @@ enum TraceKind {
     TimerArmed,
     RefreshDue,
     ViewApplied,
+    SourceUnavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -146,6 +150,9 @@ struct ScenarioResult {
     child_refresh_runs: Vec<Publication>,
     replay_equal: bool,
     recording_health: RecordingHealth,
+    protocol_major: u8,
+    selected_features: [u8; 8],
+    granted_permissions: [u8; 8],
     replay: Replay,
 }
 
@@ -222,6 +229,12 @@ pub fn run_scenario_command(
                 resource: resource_identity(),
                 run_id: run_id.clone(),
                 scenario_run_id: scenario_run_id.clone(),
+                transaction_id: None,
+                session_context_id: None,
+                operation_context_id: None,
+                protocol_major: Some(1),
+                selected_features: Some(deskkin_protocol::AVAILABILITY_READ_V1.0),
+                granted_permissions: Some(deskkin_protocol::AVAILABILITY_READ_PERMISSION.0),
                 outcome: refresh.outcome,
                 completeness: Completeness::Complete,
                 health: RecordingHealth::Healthy,
@@ -239,16 +252,29 @@ pub fn run_scenario_command(
         }
     }
 
+    publish_replay_result(scenario, &scenario_run_id, child_runs, health, first.replay)
+}
+
+fn publish_replay_result(
+    scenario: ScenarioName,
+    scenario_run_id: &str,
+    child_runs: Vec<Publication>,
+    health: RecordingHealth,
+    replay: Replay,
+) -> Result<String, String> {
     let result = ScenarioResult {
         schema_version: 1,
         result: "pass",
         scenario,
-        scenario_run_id: scenario_run_id.clone(),
+        scenario_run_id: scenario_run_id.to_owned(),
         created_unix_ms: now_unix_ms(),
         child_refresh_runs: child_runs,
         replay_equal: true,
         recording_health: health,
-        replay: first.replay,
+        protocol_major: 1,
+        selected_features: deskkin_protocol::AVAILABILITY_READ_V1.0,
+        granted_permissions: deskkin_protocol::AVAILABILITY_READ_PERMISSION.0,
+        replay,
     };
     let bytes = serde_json::to_vec(&result).map_err(|error| error.to_string())?;
     let path =
@@ -322,10 +348,7 @@ fn execute_replay(
         .ok_or("start did not request read")?;
     trace.push(effect_trace(0, first_read));
     on_refresh_started(first_read, 0);
-    let first_result = match scenario {
-        ScenarioName::PeriodicSuccess => Ok(Availability::Available),
-        ScenarioName::PeriodicReadFailure => Err(ReadError::Unavailable),
-    };
+    let (first_result, second_result) = scenario_results(scenario);
     let first_timer = complete_read(
         &mut core,
         &ui,
@@ -347,6 +370,18 @@ fn execute_replay(
         first_result,
     )?);
 
+    if scenario == ScenarioName::ProtocolDisconnectRecovery {
+        apply_source_disconnect(
+            &mut core,
+            &ui,
+            &mut trace,
+            &mut views,
+            &mut times,
+            &mut frames,
+            window,
+        )?;
+    }
+
     trace.push(TraceRecord {
         virtual_time_ms: 5_250,
         kind: TraceKind::RefreshDue,
@@ -362,10 +397,6 @@ fn execute_replay(
         .ok_or("refresh due did not request read")?;
     trace.push(effect_trace(5_250, second_read));
     on_refresh_started(second_read, 5_250);
-    let second_result = match scenario {
-        ScenarioName::PeriodicSuccess => Ok(Availability::Unavailable),
-        ScenarioName::PeriodicReadFailure => Ok(Availability::Available),
-    };
     let second_timer = complete_read(
         &mut core,
         &ui,
@@ -397,6 +428,62 @@ fn execute_replay(
         },
         refreshes,
     })
+}
+
+const fn scenario_results(
+    scenario: ScenarioName,
+) -> (
+    Result<Availability, ReadError>,
+    Result<Availability, ReadError>,
+) {
+    match scenario {
+        ScenarioName::PeriodicSuccess => {
+            (Ok(Availability::Available), Ok(Availability::Unavailable))
+        }
+        ScenarioName::PeriodicReadFailure => {
+            (Err(ReadError::Unavailable), Ok(Availability::Available))
+        }
+        ScenarioName::ProtocolDisconnectRecovery => {
+            (Ok(Availability::Available), Ok(Availability::Available))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_source_disconnect(
+    core: &mut Core,
+    ui: &StatusWindow,
+    trace: &mut Vec<TraceRecord>,
+    views: &mut Vec<ViewName>,
+    times: &mut Vec<u64>,
+    frames: &mut Vec<Vec<u8>>,
+    window: &Rc<MinimalSoftwareWindow>,
+) -> Result<(), String> {
+    trace.push(TraceRecord {
+        virtual_time_ms: 1_000,
+        kind: TraceKind::SourceUnavailable,
+        effect_id: None,
+        view: None,
+    });
+    let transition = core
+        .transition(Input::AvailabilityInvalidated(
+            AvailabilityInvalidated::SourceUnavailable,
+        ))
+        .map_err(|error| format!("source invalidation: {error:?}"))?;
+    if transition.effect.is_some() {
+        return Err("waiting disconnect changed the armed timer".into());
+    }
+    apply_view(ui, transition.view);
+    trace.push(TraceRecord {
+        virtual_time_ms: 1_000,
+        kind: TraceKind::ViewApplied,
+        effect_id: None,
+        view: Some(transition.view.into()),
+    });
+    views.push(transition.view.into());
+    times.push(1_000);
+    frames.push(render(window)?);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -583,11 +670,25 @@ mod tests {
         for scenario in [
             ScenarioName::PeriodicSuccess,
             ScenarioName::PeriodicReadFailure,
+            ScenarioName::ProtocolDisconnectRecovery,
         ] {
             let first = execute_replay(scenario, &window, &mut |_, _| {}).unwrap();
             let second = execute_replay(scenario, &window, &mut |_, _| {}).unwrap();
             assert_eq!(first.replay, second.replay);
-            assert_eq!(first.replay.virtual_timestamps_ms, [0, 250, 5_500]);
+            if scenario == ScenarioName::ProtocolDisconnectRecovery {
+                assert_eq!(first.replay.virtual_timestamps_ms, [0, 250, 1_000, 5_500]);
+                assert_eq!(
+                    first.replay.views,
+                    [
+                        ViewName::Unknown,
+                        ViewName::Available,
+                        ViewName::Unknown,
+                        ViewName::Available
+                    ]
+                );
+            } else {
+                assert_eq!(first.replay.virtual_timestamps_ms, [0, 250, 5_500]);
+            }
             assert!(
                 first
                     .replay
@@ -643,7 +744,7 @@ mod tests {
             .effect
             .unwrap();
         let markers: Vec<(String, Effect, u64)> = vec![("refresh-failed".into(), read, 0)];
-        recorder.publish(in_progress_run(
+        let _ = recorder.publish(in_progress_run(
             markers[0].0.clone(),
             "scenario-failed".into(),
             read.id.get(),

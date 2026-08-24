@@ -42,7 +42,11 @@ fn run(name: &str, root: &Path, recording_off: bool) -> (String, Value) {
 
 #[test]
 fn recording_on_and_off_preserve_semantics_and_frames() {
-    for name in ["periodic-success", "periodic-read-failure"] {
+    for name in [
+        "periodic-success",
+        "periodic-read-failure",
+        "protocol-disconnect-recovery",
+    ] {
         let on_root = temp_root("recording-on");
         let off_root = temp_root("recording-off");
         let (_, on) = run(name, &on_root, false);
@@ -50,6 +54,9 @@ fn recording_on_and_off_preserve_semantics_and_frames() {
         assert_eq!(on["replay"], off["replay"]);
         assert_eq!(on["replay_equal"], Value::Bool(true));
         assert_eq!(off["replay_equal"], Value::Bool(true));
+        assert_eq!(on["protocol_major"], Value::from(1));
+        assert_eq!(on["selected_features"], off["selected_features"]);
+        assert_eq!(on["granted_permissions"], off["granted_permissions"]);
         assert!(on["child_refresh_runs"].as_array().unwrap().len() == 4);
         assert!(off["child_refresh_runs"].as_array().unwrap().len() == 4);
         assert!(

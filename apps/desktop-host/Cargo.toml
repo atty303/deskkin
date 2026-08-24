@@ -1,0 +1,22 @@
+[package]
+name = "deskkin-desktop-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+deskkin-protocol = { path = "../../crates/deskkin-protocol" }
+local-run-recorder = { path = "../../crates/local-run-recorder" }
+serde = { version = "=1.0.229", default-features = false, features = ["derive"] }
+serde_json = "=1.0.151"
+snow = { version = "=0.10.0", default-features = false, features = ["default-resolver", "use-blake2", "use-chacha20poly1305", "use-curve25519", "use-getrandom"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "rt", "sync", "test-util", "time"] }
+
+[lints]
+workspace = true

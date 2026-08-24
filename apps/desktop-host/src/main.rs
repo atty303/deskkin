@@ -2,11 +2,12 @@ use std::io;
 use std::path::PathBuf;
 
 use deskkin_desktop_host::{
-    IdentityActor, IdentityStore, OwnerCommand, OwnerResponse, acquire_owner_lock,
+    IdentityActor, IdentityStore, OwnerCommand, OwnerResponse, acquire_owner_lock, bind_loopback,
     call_owner_control, discover_owner, new_control_id, query_command_result,
+    run_host_runtime_with_recording, run_owner_control, serve_one,
 };
-use deskkin_simulator::{RecordingMode, run_desktop, run_protocol_desktop_with_recording};
-use local_run_recorder::ResourceRole;
+use deskkin_protocol::AvailabilityResult;
+use local_run_recorder::RecordingMode;
 
 fn main() {
     if let Err(error) = run() {
@@ -15,106 +16,132 @@ fn main() {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("identity-init") => {
-            let root = identity_root(args.next());
-            if let Some(response) = owner_mutation(&root, |command_id, owner_generation| {
-                OwnerCommand::IdentityInit {
-                    command_id,
-                    owner_generation,
-                }
-            })? {
-                if response != OwnerResponse::IdentityInitialized {
-                    return Err(format!("owner mutation: {response:?}"));
-                }
-            } else {
-                let _owner = standalone_owner_lock(&root)?;
-                IdentityActor::start(IdentityStore::new_for_role(
-                    root,
-                    ResourceRole::DeviceSimulator,
-                ))
-                .init()
-                .map_err(debug)?;
-            }
-            println!("identity_initialized");
-            Ok(())
+    let command = args.next().ok_or_else(usage)?;
+    match command.as_str() {
+        "identity-init" => {
+            identity_init(identity_root(args.next()))?;
         }
-        Some("identity-list") => {
-            let actor = IdentityActor::start(IdentityStore::new_for_role(
-                identity_root(args.next()),
-                ResourceRole::DeviceSimulator,
-            ));
-            println!("{:?}", actor.peer().map_err(debug)?);
-            Ok(())
-        }
-        Some("unpair") => {
+        "identity-list" => println!(
+            "{:?}",
+            IdentityStore::new(identity_root(args.next()))
+                .peer()
+                .map_err(debug)?
+        ),
+        "unpair" => {
             let peer = args.next().ok_or_else(usage)?;
-            let root = identity_root(args.next());
-            if let Some(response) =
-                owner_mutation(&root, |command_id, owner_generation| OwnerCommand::Unpair {
-                    command_id,
-                    owner_generation,
-                    peer_id: peer.clone(),
-                })?
-            {
-                if response != OwnerResponse::Unpaired {
-                    return Err(format!("owner mutation: {response:?}"));
-                }
-            } else {
-                let _owner = standalone_owner_lock(&root)?;
-                IdentityActor::start(IdentityStore::new_for_role(
-                    root,
-                    ResourceRole::DeviceSimulator,
-                ))
-                .unpair(peer)
-                .map_err(debug)?;
-            }
-            println!("unpaired");
-            Ok(())
+            unpair(identity_root(args.next()), &peer)?;
         }
-        Some("pair-start") => {
-            let address = args.next().ok_or_else(usage)?;
+        "pairing-window-open" => {
             let root = identity_root(args.next());
             let Some(response) = owner_mutation(&root, |command_id, owner_generation| {
-                OwnerCommand::PairStart {
+                OwnerCommand::PairingWindowOpen {
                     command_id,
                     owner_generation,
-                    loopback_address: address,
                 }
             })?
             else {
-                return Err("simulator runtime owner is not running".into());
+                return Err("host runtime owner is not running".into());
             };
             if response != OwnerResponse::Paired {
                 return Err(format!("owner pairing: {response:?}"));
             }
             println!("paired");
-            Ok(())
         }
-        Some("run") => {
+        "serve-once" => {
             let address = args.next().ok_or_else(usage)?.parse().map_err(debug)?;
+            let result = match args.next().as_deref() {
+                Some("available") => AvailabilityResult::Available,
+                Some("unavailable") => AvailabilityResult::Unavailable,
+                Some("read_failed") => AvailabilityResult::ReadFailed,
+                _ => return Err(usage()),
+            };
+            let root = identity_root(args.next());
+            let _owner = standalone_owner_lock(&root)?;
+            let store = IdentityStore::new(root);
+            let listener = bind_loopback(address).map_err(debug)?;
+            println!("listening {}", listener.local_addr().map_err(debug)?);
+            serve_one(&listener, &store, result).map_err(debug)?;
+        }
+        "owner" => {
+            let role_root =
+                PathBuf::from(args.next().unwrap_or_else(|| ".deskkin/phase3/host".into()));
+            let actor = IdentityActor::start(IdentityStore::new(role_root.join("identity")));
+            let generation = new_control_id().map_err(debug)?;
+            run_owner_control(&role_root.join("control"), &actor, &generation).map_err(debug)?;
+        }
+        "run" => {
+            let address = args.next().ok_or_else(usage)?.parse().map_err(debug)?;
+            let result = match args.next().as_deref() {
+                Some("available") => AvailabilityResult::Available,
+                Some("unavailable") => AvailabilityResult::Unavailable,
+                Some("read_failed") => AvailabilityResult::ReadFailed,
+                _ => return Err(usage()),
+            };
             let remaining: Vec<_> = args.collect();
             let recording = if remaining.iter().any(|value| value == "--recording-off") {
                 RecordingMode::Off
             } else {
                 RecordingMode::On
             };
-            let root = remaining
-                .into_iter()
-                .find(|value| value != "--recording-off");
-            run_protocol_desktop_with_recording(address, &identity_root(root), recording)
+            let role_root = PathBuf::from(
+                remaining
+                    .into_iter()
+                    .find(|value| value != "--recording-off")
+                    .unwrap_or_else(|| ".deskkin/phase3/host".into()),
+            );
+            run_host_runtime_with_recording(address, &role_root, result, recording)
+                .map_err(debug)?;
         }
-        Some("--recording-off") => run_desktop(RecordingMode::Off),
-        None => run_desktop(RecordingMode::On),
-        _ => Err(usage()),
+        _ => return Err(usage()),
     }
+    Ok(())
+}
+
+fn identity_init(root: PathBuf) -> Result<(), String> {
+    if let Some(response) = owner_mutation(&root, |command_id, owner_generation| {
+        OwnerCommand::IdentityInit {
+            command_id,
+            owner_generation,
+        }
+    })? {
+        if response != OwnerResponse::IdentityInitialized {
+            return Err(format!("owner mutation: {response:?}"));
+        }
+    } else {
+        let _owner = standalone_owner_lock(&root)?;
+        IdentityActor::start(IdentityStore::new(root))
+            .init()
+            .map_err(debug)?;
+    }
+    println!("identity_initialized");
+    Ok(())
+}
+
+fn unpair(root: PathBuf, peer: &str) -> Result<(), String> {
+    if let Some(response) =
+        owner_mutation(&root, |command_id, owner_generation| OwnerCommand::Unpair {
+            command_id,
+            owner_generation,
+            peer_id: peer.to_owned(),
+        })?
+    {
+        if response != OwnerResponse::Unpaired {
+            return Err(format!("owner mutation: {response:?}"));
+        }
+    } else {
+        let _owner = standalone_owner_lock(&root)?;
+        IdentityActor::start(IdentityStore::new(root))
+            .unpair(peer.to_owned())
+            .map_err(debug)?;
+    }
+    println!("unpaired {peer}");
+    Ok(())
 }
 
 fn identity_root(root: Option<String>) -> PathBuf {
-    PathBuf::from(root.unwrap_or_else(|| ".deskkin/phase3/device-simulator/identity".into()))
+    PathBuf::from(root.unwrap_or_else(|| ".deskkin/phase3/host/identity".into()))
 }
 
 fn control_root(identity_root: &std::path::Path) -> Result<PathBuf, String> {
@@ -246,7 +273,7 @@ fn query_owner_result(
 }
 
 fn usage() -> String {
-    "usage: deskkin-desktop [--recording-off] | identity-init|identity-list [ROOT] | unpair PEER [ROOT] | pair-start ADDRESS [ROOT] | run ADDRESS [ROOT]".into()
+    "usage: deskkin-desktop-host identity-init|identity-list [ROOT] | unpair PEER [ROOT] | pairing-window-open [ROOT] | serve-once ADDRESS available|unavailable|read_failed [ROOT] | owner [ROLE_ROOT] | run ADDRESS available|unavailable|read_failed [ROLE_ROOT]".into()
 }
 
 fn debug(error: impl std::fmt::Debug) -> String {

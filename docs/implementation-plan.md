@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, and Phase 2 complete; Phase 3 approved
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, and Phase 3 complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,9 +11,9 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1E feasibility applications and the Phase 2 simulator
-Application dependencies: approved Gate 1A and Phase 2 sets; exact Phase 3 set approved for the implementation checkpoint
-Next action: implement and locally verify the accepted Phase 3 contract after its documentation commit
+Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, and Phase 3 paired loopback host slice
+Application dependencies: approved Gate 1A, Phase 2, and exact Phase 3 sets resolved in the root lockfile
+Next action: define and approve the Phase 4 Unraid read-only feature checkpoint before adding connector or provider behavior
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -424,6 +424,19 @@ The first slice should negotiate capabilities, publish host availability,
 deliver one read-only status update, and survive a disconnect without
 fabricating state. Mutation and external credentials remain out of this slice.
 
+The implementation passed the complete `mise run test` entrypoint on
+2026-08-24. This covered locked Clippy, all workspace tests, byte-identical
+headless replay, recording equivalence, the protocol disconnect recovery
+scenario, `thumbv7m-none-eabi` checks for both portable crates, and the existing
+89 repository conformance tests. Real loopback tests covered Noise XX pairing,
+pinned reconnect and availability reads, disconnect invalidation, simultaneous
+unknown and pinned peers, exact unpair during an active session, owner-control
+response loss and capacity, identity recovery, and changed-key rejection. The
+fresh independent review found no remaining reachable P0/P1 contract
+violation after its required repairs and full reverification. The Phase 3
+implementation is complete; its live local pairing demonstration remains a
+separate explicit launch checkpoint.
+
 ## Phase 4: Unraid read-only feature
 
 Add an infrastructure-status feature and an Unraid connector. Keep Unraid
@@ -504,9 +517,10 @@ Start a future development session with:
 > `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`,
 > `docs/phase-2-slice-proposal.md`, `docs/phase-3-slice-proposal.md`, and
 > `docs/decisions/0004-paired-host-protocol.md`. Confirm that Phase 2 is
-> complete, Phase 3 was approved on 2026-08-24, and its documentation
-> checkpoint is committed separately. Resume the Phase 3 implementation and
-> local verification without adding provider behavior, device changes,
-> non-loopback exposure, release, push, or publication. Preserve the physical
-> residual-state contract for any later device run and record actual pass/fail
-> evidence only when executing an approved gate or slice.
+> complete, Phase 3 was approved on 2026-08-24, and its documentation and
+> implementation checkpoints are committed separately. Treat Phase 3 as
+> complete. Plan Phase 4 without adding provider behavior, live access, device
+> changes, non-loopback exposure, release, push, or publication before its next
+> explicit approval. Preserve the physical residual-state contract for any
+> later device run and record actual pass/fail evidence only when executing an
+> approved gate or slice.

@@ -1,20 +1,34 @@
 use std::cell::RefCell;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use application_core::{
     Availability, Command, Core, Effect, EffectRequest, Input, ReadCompleted, ReadError,
-    RefreshDue, TimerArmCompleted, TimerArmError,
+    RefreshDue, State, TimerArmCompleted, TimerArmError,
 };
 use slint::{ComponentHandle, Timer, TimerMode};
 
+use deskkin_desktop_host::{
+    ClientSession, IdentityActor, IdentityStore, OwnerCommand, OwnerEvent, OwnerPairingTask,
+    OwnerResponse, SessionError, call_owner_control, new_context_id, new_control_id,
+    pair_initiator_until, run_owner_control_with_events,
+};
+use deskkin_protocol::HelloRejectReason;
+
 use crate::StatusWindow;
 use crate::diagnostics::{
-    ClosedValue, Completeness, DiagnosticRun, Operation, Recorder, RecordingHealth, RecordingMode,
-    RunOutcome, SemanticRecord, finalize_operation_records, in_progress_run, new_run_id,
-    now_unix_ms, resource_identity,
+    ClosedValue, Completeness, DiagnosticRun, ErrorType, Operation, OperationStatus, Publication,
+    Recorder, RecordingHealth, RecordingMode, ResourceRole, RunOutcome, SemanticRecord,
+    finalize_operation_records, in_progress_run, new_run_id, now_unix_ms, resource_identity,
+    resource_identity_for,
 };
 use crate::presenter::apply_view;
+use crate::protocol_client::ProtocolAdapter;
 
 struct NativeRuntime {
     core: Core,
@@ -83,6 +97,1260 @@ pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
         );
     }
     result
+}
+
+struct ProtocolRuntime {
+    core: Core,
+    ui: StatusWindow,
+    refresh_timer: Timer,
+    reconnect_timer: Timer,
+    owner_event_timer: Timer,
+    network_event_timer: Timer,
+    adapter: ProtocolAdapter,
+    connected: bool,
+    connecting: bool,
+    pending_session: Option<[u8; 16]>,
+    network_commands: std::sync::mpsc::SyncSender<NetworkCommand>,
+    network_control: std::sync::mpsc::Sender<NetworkControl>,
+    network_events: std::sync::mpsc::Receiver<NetworkEvent>,
+    network: Option<JoinHandle<()>>,
+    revocation_join_ack: Option<std::sync::mpsc::SyncSender<()>>,
+    shutdown_join_ack: Option<std::sync::mpsc::SyncSender<()>>,
+    control_root: PathBuf,
+    owner: Option<JoinHandle<std::io::Result<()>>>,
+    protocol_diagnostics: Option<std::sync::mpsc::SyncSender<DiagnosticRun>>,
+    diagnostic_join: Option<JoinHandle<()>>,
+    diagnostic_dropped: Arc<AtomicBool>,
+    diagnostic_spans: std::sync::Mutex<std::collections::HashMap<String, ProtocolDiagnosticSpan>>,
+    owner_events: std::sync::mpsc::Receiver<OwnerEvent>,
+    identity: IdentityStore,
+}
+
+struct ProtocolDiagnosticSpan {
+    run_id: String,
+    created_unix_ms: u64,
+    started_at: Instant,
+    operation_kind: Operation,
+    session_context: Option<[u8; 16]>,
+    operation_context: Option<[u8; 16]>,
+}
+
+enum NetworkCommand {
+    Pair {
+        address: SocketAddr,
+        task: OwnerPairingTask,
+    },
+    Connect {
+        session: [u8; 16],
+    },
+    Read {
+        session: [u8; 16],
+        request_id: u32,
+        operation: [u8; 16],
+    },
+}
+
+enum NetworkControl {
+    Close,
+    Revoke,
+    Shutdown,
+}
+
+enum NetworkEvent {
+    Paired {
+        trust_paired: bool,
+        result: Result<(), SessionError>,
+    },
+    Connected {
+        session: [u8; 16],
+        result: Result<(), SessionError>,
+    },
+    ReadCompleted {
+        session: [u8; 16],
+        generation: u64,
+        request_id: u32,
+        operation: [u8; 16],
+        result: Result<deskkin_protocol::AvailabilityResult, SessionError>,
+    },
+    Closed,
+    WorkerStopped,
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_network_worker(
+    address: SocketAddr,
+    identity: &IdentityStore,
+    commands: &std::sync::mpsc::Receiver<NetworkCommand>,
+    control: &std::sync::mpsc::Receiver<NetworkControl>,
+    events: &std::sync::mpsc::Sender<NetworkEvent>,
+) {
+    let mut client: Option<ClientSession> = None;
+    let mut revoked = false;
+    loop {
+        match control.try_recv() {
+            Ok(NetworkControl::Close) => {
+                if let Some(client) = client.take() {
+                    let _ = client.close();
+                }
+                if events.send(NetworkEvent::Closed).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Ok(NetworkControl::Revoke) => {
+                revoked = true;
+                if let Some(client) = client.take() {
+                    let _ = client.close();
+                }
+                drain_revoked_commands(commands, events);
+                if events.send(NetworkEvent::Closed).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Ok(NetworkControl::Shutdown) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                if let Some(client) = client.take() {
+                    let _ = client.close();
+                }
+                break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        let command = match commands.recv_timeout(Duration::from_millis(10)) {
+            Ok(command) => command,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if revoked && !matches!(command, NetworkCommand::Pair { .. }) {
+            reject_revoked_command(command, events);
+            continue;
+        }
+        match command {
+            NetworkCommand::Pair { address, task } => {
+                let session = new_context_id().ok();
+                let event = run_pair_command(identity, address, task, session);
+                if matches!(
+                    &event,
+                    NetworkEvent::Paired {
+                        trust_paired: true,
+                        ..
+                    }
+                ) {
+                    revoked = false;
+                }
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+            NetworkCommand::Connect { session } => {
+                let result =
+                    ClientSession::connect_with_external_diagnostics(address, identity, session);
+                let event_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
+                client = result.ok();
+                if events
+                    .send(NetworkEvent::Connected {
+                        session,
+                        result: event_result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            NetworkCommand::Read {
+                session,
+                request_id,
+                operation,
+            } => {
+                let generation = client.as_ref().map_or(0, ClientSession::generation);
+                let result = client
+                    .as_mut()
+                    .ok_or(SessionError::Io)
+                    .and_then(|client| client.read_availability(operation));
+                if result.is_err() {
+                    client = None;
+                }
+                if events
+                    .send(NetworkEvent::ReadCompleted {
+                        session,
+                        generation,
+                        request_id,
+                        operation,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = events.send(NetworkEvent::WorkerStopped);
+}
+
+fn drain_revoked_commands(
+    commands: &std::sync::mpsc::Receiver<NetworkCommand>,
+    events: &std::sync::mpsc::Sender<NetworkEvent>,
+) {
+    while let Ok(command) = commands.try_recv() {
+        reject_revoked_command(command, events);
+    }
+}
+
+fn reject_revoked_command(command: NetworkCommand, events: &std::sync::mpsc::Sender<NetworkEvent>) {
+    match command {
+        NetworkCommand::Pair { task, .. } => task.finish(false),
+        NetworkCommand::Connect { session } => {
+            let _ = events.send(NetworkEvent::Connected {
+                session,
+                result: Err(SessionError::Identity),
+            });
+        }
+        NetworkCommand::Read {
+            session,
+            request_id,
+            operation,
+        } => {
+            let _ = events.send(NetworkEvent::ReadCompleted {
+                session,
+                generation: 0,
+                request_id,
+                operation,
+                result: Err(SessionError::Identity),
+            });
+        }
+    }
+}
+
+fn run_pair_command(
+    identity: &IdentityStore,
+    address: SocketAddr,
+    task: OwnerPairingTask,
+    session: Option<[u8; 16]>,
+) -> NetworkEvent {
+    let was_unpaired = matches!(
+        identity.peer(),
+        Ok(deskkin_desktop_host::PeerState::Unpaired)
+    );
+    let result = session.ok_or(SessionError::Noise).and_then(|session| {
+        let confirmation = task.clone();
+        let deadline = task.deadline();
+        pair_initiator_until(
+            address,
+            identity,
+            session,
+            move |transaction, sas| confirmation.confirm(transaction, sas),
+            deadline,
+        )
+    });
+    let paired_now = was_unpaired
+        && matches!(
+            identity.peer(),
+            Ok(deskkin_desktop_host::PeerState::Paired { .. })
+        );
+    let success = paired_now;
+    task.finish(paired_now);
+    NetworkEvent::Paired {
+        trust_paired: paired_now,
+        result: match result {
+            Ok(_) if success => Ok(()),
+            Ok(_) => Err(SessionError::Identity),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+/// Runs the shared status UI against an authenticated loopback host.
+///
+/// The portable core remains the sole owner of refresh state. Transport loss
+/// invalidates the current availability immediately, while the existing core
+/// timer determines the next read attempt.
+///
+/// # Errors
+///
+/// Returns an error for a non-loopback address, missing or invalid identity,
+/// owner-control startup, authenticated transport, core, timer, or UI failure.
+pub fn run_protocol_desktop(address: SocketAddr, identity_root: &Path) -> Result<(), String> {
+    run_protocol_desktop_with_recording(address, identity_root, RecordingMode::On)
+}
+
+/// Runs the authenticated loopback UI with explicit diagnostic recording mode.
+///
+/// # Errors
+///
+/// Returns the same startup, transport, core, timer, and UI errors as
+/// [`run_protocol_desktop`].
+#[allow(clippy::too_many_lines)]
+pub fn run_protocol_desktop_with_recording(
+    address: SocketAddr,
+    identity_root: &Path,
+    recording: RecordingMode,
+) -> Result<(), String> {
+    if !address.ip().is_loopback() {
+        return Err("protocol host must be loopback".into());
+    }
+    let ui = StatusWindow::new().map_err(|error| error.to_string())?;
+    let role_root = identity_root
+        .parent()
+        .ok_or("identity root has no role parent")?
+        .to_path_buf();
+    let control_root = role_root.join("control");
+    let identity =
+        IdentityStore::new_for_role(identity_root.to_path_buf(), ResourceRole::DeviceSimulator);
+    let actor = IdentityActor::start(identity.clone());
+    actor
+        .peer()
+        .map_err(|error| format!("identity state: {error:?}"))?;
+    let generation = new_control_id().map_err(|error| format!("owner generation: {error:?}"))?;
+    let owner_actor = actor.clone();
+    let owner_root = control_root.clone();
+    let (owner_event_sender, owner_events) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        run_owner_control_with_events(
+            &owner_root,
+            &owner_actor,
+            &generation,
+            Some(owner_event_sender),
+        )
+    });
+    for _ in 0..200 {
+        if control_root.join("owner.sock").exists() {
+            break;
+        }
+        if owner.is_finished() {
+            return Err("simulator owner control failed to start".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !control_root.join("owner.sock").exists() {
+        return Err("simulator owner control start timed out".into());
+    }
+    apply_view(&ui, application_core::StatusView::Unknown);
+    let (network_commands, network_command_receiver) = std::sync::mpsc::sync_channel(8);
+    let (network_control, network_control_receiver) = std::sync::mpsc::channel();
+    let (network_event_sender, network_events) = std::sync::mpsc::channel();
+    let network_identity = identity.clone();
+    let network = thread::spawn(move || {
+        run_network_worker(
+            address,
+            &network_identity,
+            &network_command_receiver,
+            &network_control_receiver,
+            &network_event_sender,
+        );
+    });
+    let diagnostic_recorder = Recorder::new(role_root, recording, 16 * 1024 * 1024);
+    let (protocol_diagnostics, diagnostic_runs) =
+        std::sync::mpsc::sync_channel::<DiagnosticRun>(32);
+    let diagnostic_dropped = Arc::new(AtomicBool::new(false));
+    let worker_dropped = diagnostic_dropped.clone();
+    let diagnostic_join = thread::spawn(move || {
+        let mut live_runs = std::collections::HashMap::new();
+        while let Ok(run) = diagnostic_runs.recv() {
+            if !run.terminal
+                && let Ok(marker) = diagnostic_recorder.begin_live_run(&run.run_id)
+            {
+                live_runs.insert(run.run_id.clone(), marker);
+            }
+            let terminal_run_id = run.terminal.then(|| run.run_id.clone());
+            let _ = diagnostic_recorder.publish(run);
+            if let Some(run_id) = terminal_run_id
+                && let Some(marker) = live_runs.remove(&run_id)
+            {
+                let _ = diagnostic_recorder.end_live_run(&run_id, marker);
+            }
+            if worker_dropped.swap(false, Ordering::AcqRel) {
+                let _ = diagnostic_recorder.publish_health_best_effort(&Publication {
+                    run_id: "diagnostic-queue-full".into(),
+                    completeness: Completeness::Dropped,
+                    health: RecordingHealth::StorageUnavailable,
+                    stored: false,
+                });
+            }
+        }
+    });
+    let runtime = Rc::new(RefCell::new(ProtocolRuntime {
+        core: Core::new(),
+        ui: ui.clone_strong(),
+        refresh_timer: Timer::default(),
+        reconnect_timer: Timer::default(),
+        owner_event_timer: Timer::default(),
+        network_event_timer: Timer::default(),
+        adapter: ProtocolAdapter::new(),
+        connected: false,
+        connecting: false,
+        pending_session: None,
+        network_commands,
+        network_control,
+        network_events,
+        network: Some(network),
+        revocation_join_ack: None,
+        shutdown_join_ack: None,
+        control_root,
+        owner: Some(owner),
+        protocol_diagnostics: Some(protocol_diagnostics),
+        diagnostic_join: Some(diagnostic_join),
+        diagnostic_dropped,
+        diagnostic_spans: std::sync::Mutex::new(std::collections::HashMap::new()),
+        owner_events,
+        identity,
+    }));
+    let weak = Rc::downgrade(&runtime);
+    runtime.borrow().owner_event_timer.start(
+        TimerMode::Repeated,
+        Duration::from_millis(25),
+        move || handle_owner_events(&weak),
+    );
+    let weak = Rc::downgrade(&runtime);
+    runtime.borrow().network_event_timer.start(
+        TimerMode::Repeated,
+        Duration::from_millis(10),
+        move || handle_network_events(&weak),
+    );
+    attempt_protocol_connect(&runtime)?;
+    let effect = runtime
+        .borrow_mut()
+        .core
+        .transition(Input::Command(Command::Start))
+        .map_err(|error| format!("core start: {error:?}"))?
+        .effect
+        .ok_or("start did not request read")?;
+    dispatch_protocol_effect(&runtime, effect)?;
+    let result = ui.run().map_err(|error| error.to_string());
+    let mut state = runtime.borrow_mut();
+    state.refresh_timer.stop();
+    state.reconnect_timer.stop();
+    state.owner_event_timer.stop();
+    state.network_event_timer.stop();
+    let _ = state.network_control.send(NetworkControl::Shutdown);
+    if let Some(network) = state.network.take() {
+        network
+            .join()
+            .map_err(|_| "simulator network worker panicked".to_owned())?;
+    }
+    let shutdown_response = call_owner_control(&state.control_root, &OwnerCommand::Shutdown)
+        .map_err(|error| format!("simulator owner shutdown: {error}"))?;
+    if shutdown_response != OwnerResponse::ShutdownAccepted {
+        return Err("simulator owner rejected shutdown".into());
+    }
+    loop {
+        match state.owner_events.recv() {
+            Ok(OwnerEvent::RuntimeShutdown { joined }) => {
+                let _ = joined.send(());
+                break;
+            }
+            Ok(OwnerEvent::IdentityRevoked { joined }) => {
+                let _ = joined.send(());
+            }
+            Ok(OwnerEvent::PairStart { task, .. } | OwnerEvent::PairingWindowOpen { task }) => {
+                task.finish(false);
+            }
+            Err(_) => return Err("simulator owner shutdown coordinator was lost".into()),
+        }
+    }
+    if let Some(owner) = state.owner.take() {
+        owner
+            .join()
+            .map_err(|_| "simulator owner control panicked".to_owned())?
+            .map_err(|error| error.to_string())?;
+    }
+    drain_protocol_spans(&state, RunOutcome::Cancel, Some(ErrorType::Cancelled));
+    state.protocol_diagnostics.take();
+    if let Some(diagnostic_join) = state.diagnostic_join.take() {
+        let _ = diagnostic_join.join();
+    }
+    result
+}
+
+fn handle_owner_events(weak: &Weak<RefCell<ProtocolRuntime>>) {
+    let Some(runtime) = weak.upgrade() else {
+        return;
+    };
+    loop {
+        let event = runtime.borrow().owner_events.try_recv();
+        let Ok(event) = event else {
+            break;
+        };
+        match event {
+            OwnerEvent::IdentityRevoked { joined } => {
+                let mut state = runtime.borrow_mut();
+                state.connected = false;
+                state.connecting = false;
+                state.reconnect_timer.stop();
+                state.adapter.stop();
+                let invalidation_effect = state
+                    .core
+                    .transition(Input::AvailabilityInvalidated(
+                        application_core::AvailabilityInvalidated::SourceUnavailable,
+                    ))
+                    .ok()
+                    .and_then(|transition| {
+                        apply_view(&state.ui, transition.view);
+                        transition.effect
+                    });
+                state.revocation_join_ack = Some(joined);
+                let _ = state.network_control.send(NetworkControl::Revoke);
+                drop(state);
+                if let Some(effect) = invalidation_effect {
+                    let _ = dispatch_protocol_effect(&runtime, effect);
+                }
+            }
+            OwnerEvent::PairStart { address, task } => {
+                start_protocol(&runtime.borrow(), Operation::PairingPersist, None, None);
+                if let Err(error) = runtime
+                    .borrow()
+                    .network_commands
+                    .try_send(NetworkCommand::Pair { address, task })
+                {
+                    let command = match error {
+                        std::sync::mpsc::TrySendError::Full(command)
+                        | std::sync::mpsc::TrySendError::Disconnected(command) => command,
+                    };
+                    if let NetworkCommand::Pair { task, .. } = command {
+                        task.finish(false);
+                    }
+                    record_protocol(
+                        &runtime.borrow(),
+                        Operation::PairingPersist,
+                        RunOutcome::Error,
+                        Some(ErrorType::QueueFull),
+                        None,
+                        None,
+                    );
+                }
+            }
+            OwnerEvent::PairingWindowOpen { task } => task.finish(false),
+            OwnerEvent::RuntimeShutdown { joined } => {
+                let mut state = runtime.borrow_mut();
+                if state.network.is_none() {
+                    let _ = joined.send(());
+                } else {
+                    state.shutdown_join_ack = Some(joined);
+                    let _ = state.network_control.send(NetworkControl::Shutdown);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn handle_network_events(weak: &Weak<RefCell<ProtocolRuntime>>) {
+    let Some(runtime) = weak.upgrade() else {
+        return;
+    };
+    loop {
+        let event = runtime.borrow().network_events.try_recv();
+        let Ok(event) = event else {
+            break;
+        };
+        match event {
+            NetworkEvent::Paired {
+                trust_paired,
+                result,
+            } => {
+                record_protocol(
+                    &runtime.borrow(),
+                    Operation::PairingPersist,
+                    if trust_paired {
+                        RunOutcome::Success
+                    } else {
+                        RunOutcome::Error
+                    },
+                    (!trust_paired).then_some(pairing_error_type(result.as_ref().err().copied())),
+                    None,
+                    None,
+                );
+                if trust_paired {
+                    let mut state = runtime.borrow_mut();
+                    state.connected = false;
+                    state.connecting = false;
+                    if !apply_pairing_outcome(&mut state.adapter, result) {
+                        continue;
+                    }
+                    drop(state);
+                    let _ = schedule_protocol_reconnect(&runtime);
+                }
+            }
+            NetworkEvent::Connected { session, result } => {
+                handle_connect_result(&runtime, session, result);
+            }
+            NetworkEvent::ReadCompleted {
+                session,
+                generation,
+                request_id,
+                operation,
+                result,
+            } => handle_read_result(&runtime, session, generation, request_id, operation, result),
+            NetworkEvent::Closed => {
+                drain_protocol_spans(
+                    &runtime.borrow(),
+                    RunOutcome::Cancel,
+                    Some(ErrorType::Cancelled),
+                );
+                let acknowledgement = runtime.borrow_mut().revocation_join_ack.take();
+                if let Some(acknowledgement) = acknowledgement {
+                    let _ = acknowledgement.send(());
+                }
+            }
+            NetworkEvent::WorkerStopped => {
+                drain_protocol_spans(
+                    &runtime.borrow(),
+                    RunOutcome::Cancel,
+                    Some(ErrorType::Cancelled),
+                );
+                let (network, acknowledgement) = {
+                    let mut state = runtime.borrow_mut();
+                    (state.network.take(), state.shutdown_join_ack.take())
+                };
+                if let Some(network) = network {
+                    let _ = network.join();
+                }
+                if let Some(acknowledgement) = acknowledgement {
+                    let _ = acknowledgement.send(());
+                }
+            }
+        }
+    }
+}
+
+fn apply_pairing_outcome(adapter: &mut ProtocolAdapter, result: Result<(), SessionError>) -> bool {
+    adapter.restart_after_pairing();
+    match result {
+        Err(SessionError::Incompatible) => {
+            adapter.hello_rejected(HelloRejectReason::NoCommonVersion);
+        }
+        Err(SessionError::AuthorizationDenied) => {
+            adapter.hello_rejected(HelloRejectReason::PermissionDenied);
+        }
+        _ => {}
+    }
+    adapter.terminal_reason().is_none()
+}
+
+fn pairing_error_type(error: Option<SessionError>) -> ErrorType {
+    match error {
+        Some(SessionError::PairingTimeout) => ErrorType::PairingExpired,
+        Some(SessionError::PairingRejected) => ErrorType::PairingRejected,
+        Some(SessionError::StoreFailed | SessionError::Identity) => ErrorType::StoreFailed,
+        _ => ErrorType::PairingIncomplete,
+    }
+}
+
+fn dispatch_protocol_effect(
+    runtime: &Rc<RefCell<ProtocolRuntime>>,
+    effect: Effect,
+) -> Result<(), String> {
+    match effect.request {
+        EffectRequest::ReadAvailability => perform_protocol_read(runtime),
+        EffectRequest::ArmRefreshTimer { delay_ms } => {
+            arm_protocol_refresh(runtime, effect, delay_ms)
+        }
+    }
+}
+
+fn perform_protocol_read(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
+    if !runtime.borrow().connected {
+        return complete_read_while_disconnected(runtime);
+    }
+
+    let operation = new_context_id().map_err(|error| format!("operation context: {error:?}"))?;
+    let request_id = {
+        let mut state = runtime.borrow_mut();
+        let core = state.core;
+        state
+            .adapter
+            .begin_read(&core, operation)
+            .map_err(|error| format!("begin availability read: {error:?}"))?
+    };
+    let session = runtime
+        .borrow()
+        .adapter
+        .session_context()
+        .ok_or("authenticated session context missing")?;
+    start_protocol(
+        &runtime.borrow(),
+        Operation::AvailabilityRead,
+        Some(session),
+        Some(operation),
+    );
+    let command = NetworkCommand::Read {
+        session,
+        request_id,
+        operation,
+    };
+    match runtime.borrow().network_commands.try_send(command) {
+        Ok(()) => return Ok(()),
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            let _ = runtime.borrow().network_control.send(NetworkControl::Close);
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+    }
+    record_protocol(
+        &runtime.borrow(),
+        Operation::AvailabilityRead,
+        RunOutcome::Error,
+        Some(ErrorType::QueueFull),
+        Some(session),
+        Some(operation),
+    );
+    protocol_disconnected(runtime)
+}
+
+fn complete_read_while_disconnected(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
+    let next = {
+        let mut state = runtime.borrow_mut();
+        let State::Reading { effect_id } = state.core.state() else {
+            return Err("disconnected read missing core effect".into());
+        };
+        let transition = state
+            .core
+            .transition(Input::ReadCompleted(ReadCompleted {
+                effect_id,
+                result: Err(ReadError::Unavailable),
+            }))
+            .map_err(|error| format!("disconnected read completion: {error:?}"))?;
+        apply_view(&state.ui, transition.view);
+        transition.effect
+    };
+    if !runtime.borrow().connecting
+        && runtime.borrow().adapter.terminal_reason().is_none()
+        && !runtime.borrow().reconnect_timer.running()
+    {
+        schedule_protocol_reconnect(runtime)?;
+    }
+    if let Some(effect) = next {
+        dispatch_protocol_effect(runtime, effect)?;
+    }
+    Ok(())
+}
+
+fn handle_read_result(
+    runtime: &Rc<RefCell<ProtocolRuntime>>,
+    session: [u8; 16],
+    generation: u64,
+    request_id: u32,
+    operation: [u8; 16],
+    result: Result<deskkin_protocol::AvailabilityResult, SessionError>,
+) {
+    let Ok(result) = result else {
+        record_protocol(
+            &runtime.borrow(),
+            Operation::AvailabilityRead,
+            RunOutcome::Error,
+            Some(ErrorType::ConnectionLost),
+            Some(session),
+            Some(operation),
+        );
+        let _ = protocol_disconnected(runtime);
+        return;
+    };
+    let identity = runtime.borrow().identity.clone();
+    let next = identity.with_paired_generation(generation, || {
+        let mut state = runtime.borrow_mut();
+        if !state.connected || state.adapter.session_context() != Some(session) {
+            return None;
+        }
+        let mut core = state.core;
+        let Ok(next) = state
+            .adapter
+            .result(&mut core, session, request_id, operation, result)
+        else {
+            return None;
+        };
+        state.core = core;
+        apply_view(&state.ui, state.core.view());
+        record_protocol(
+            &state,
+            Operation::AvailabilityRead,
+            if result == deskkin_protocol::AvailabilityResult::ReadFailed {
+                RunOutcome::Error
+            } else {
+                RunOutcome::Success
+            },
+            (result == deskkin_protocol::AvailabilityResult::ReadFailed)
+                .then_some(ErrorType::ReadUnavailable),
+            Some(session),
+            Some(operation),
+        );
+        next
+    });
+    let Ok(next) = next else {
+        record_protocol(
+            &runtime.borrow(),
+            Operation::AvailabilityRead,
+            RunOutcome::Error,
+            Some(ErrorType::ConnectionLost),
+            Some(session),
+            Some(operation),
+        );
+        let _ = protocol_disconnected(runtime);
+        return;
+    };
+    if next.is_none()
+        && protocol_span_active(
+            &runtime.borrow(),
+            Operation::AvailabilityRead,
+            Some(session),
+            Some(operation),
+        )
+    {
+        record_protocol(
+            &runtime.borrow(),
+            Operation::AvailabilityRead,
+            RunOutcome::Error,
+            Some(ErrorType::ConnectionLost),
+            Some(session),
+            Some(operation),
+        );
+    }
+    if let Some(effect) = next {
+        let _ = dispatch_protocol_effect(runtime, effect);
+    }
+}
+
+fn protocol_disconnected(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
+    let (next, schedule_reconnect) = {
+        let mut state = runtime.borrow_mut();
+        let session = state.adapter.session_context();
+        state.connected = false;
+        state.connecting = false;
+        state.pending_session = None;
+        let mut core = state.core;
+        let next = state
+            .adapter
+            .disconnected(&mut core)
+            .map_err(|error| format!("disconnect invalidation: {error:?}"))?;
+        state.core = core;
+        apply_view(&state.ui, state.core.view());
+        record_protocol(
+            &state,
+            Operation::ProtocolNegotiate,
+            RunOutcome::Error,
+            Some(ErrorType::ConnectionLost),
+            session,
+            None,
+        );
+        (next, !state.reconnect_timer.running())
+    };
+    if schedule_reconnect {
+        schedule_protocol_reconnect(runtime)?;
+    }
+    if let Some(effect) = next {
+        dispatch_protocol_effect(runtime, effect)?;
+    }
+    Ok(())
+}
+
+fn schedule_protocol_reconnect(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
+    let delay_ms = runtime
+        .borrow_mut()
+        .adapter
+        .connection_failed()
+        .map_err(|error| format!("reconnect backoff: {error:?}"))?;
+    let weak = Rc::downgrade(runtime);
+    runtime.borrow().reconnect_timer.start(
+        TimerMode::SingleShot,
+        Duration::from_millis(u64::from(delay_ms)),
+        move || {
+            if let Some(runtime) = weak.upgrade() {
+                let _ = attempt_protocol_connect(&runtime);
+            }
+        },
+    );
+    if runtime.borrow().reconnect_timer.running() {
+        Ok(())
+    } else {
+        Err("Slint reconnect timer did not start".into())
+    }
+}
+
+fn attempt_protocol_connect(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
+    if runtime.borrow().connected || runtime.borrow().connecting {
+        return Ok(());
+    }
+    let session = new_context_id().map_err(|error| format!("session context: {error:?}"))?;
+    {
+        let mut state = runtime.borrow_mut();
+        state.adapter.connecting();
+        state.connecting = true;
+        state.pending_session = Some(session);
+        start_protocol(&state, Operation::ProtocolNegotiate, Some(session), None);
+        if state
+            .network_commands
+            .try_send(NetworkCommand::Connect { session })
+            .is_err()
+        {
+            state.connecting = false;
+            state.pending_session = None;
+            record_protocol(
+                &state,
+                Operation::ProtocolNegotiate,
+                RunOutcome::Error,
+                Some(ErrorType::QueueFull),
+                Some(session),
+                None,
+            );
+            return Err("network command queue unavailable".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn handle_connect_result(
+    runtime: &Rc<RefCell<ProtocolRuntime>>,
+    session: [u8; 16],
+    result: Result<(), SessionError>,
+) {
+    if runtime.borrow().pending_session != Some(session) {
+        return;
+    }
+    {
+        let mut state = runtime.borrow_mut();
+        state.connecting = false;
+        state.pending_session = None;
+    }
+    match result {
+        Ok(()) => {
+            let mut state = runtime.borrow_mut();
+            state.reconnect_timer.stop();
+            state.adapter.authenticated(session);
+            state.connected = true;
+        }
+        Err(SessionError::Incompatible) => {
+            let _ = protocol_terminal(runtime, session, HelloRejectReason::NoCommonVersion);
+        }
+        Err(SessionError::AuthorizationDenied) => {
+            let _ = protocol_terminal(runtime, session, HelloRejectReason::PermissionDenied);
+        }
+        Err(_) => {
+            record_protocol(
+                &runtime.borrow(),
+                Operation::ProtocolNegotiate,
+                RunOutcome::Error,
+                Some(ErrorType::ConnectionLost),
+                Some(session),
+                None,
+            );
+            let _ = schedule_protocol_reconnect(runtime);
+        }
+    }
+}
+
+fn protocol_terminal(
+    runtime: &Rc<RefCell<ProtocolRuntime>>,
+    session: [u8; 16],
+    reason: HelloRejectReason,
+) -> Result<(), String> {
+    let mut state = runtime.borrow_mut();
+    state.connected = false;
+    state.connecting = false;
+    state.pending_session = None;
+    state.reconnect_timer.stop();
+    state.adapter.hello_rejected(reason);
+    let error = match reason {
+        HelloRejectReason::NoCommonVersion | HelloRejectReason::RequiredFeatureUnsupported => {
+            ErrorType::VersionMismatch
+        }
+        HelloRejectReason::PermissionDenied => ErrorType::PermissionDenied,
+        HelloRejectReason::SessionBusy => ErrorType::SessionBusy,
+    };
+    record_protocol(
+        &state,
+        Operation::ProtocolNegotiate,
+        RunOutcome::Error,
+        Some(error),
+        Some(session),
+        None,
+    );
+    let timer = state
+        .core
+        .transition(Input::AvailabilityInvalidated(
+            application_core::AvailabilityInvalidated::SourceUnavailable,
+        ))
+        .map_err(|error| format!("terminal invalidation: {error:?}"))?
+        .effect;
+    if let Some(timer) = timer {
+        state
+            .core
+            .transition(Input::TimerArmCompleted(TimerArmCompleted {
+                effect_id: timer.id,
+                result: Err(TimerArmError::Unavailable),
+            }))
+            .map_err(|error| format!("terminal stop: {error:?}"))?;
+    }
+    apply_view(&state.ui, state.core.view());
+    Ok(())
+}
+
+fn start_protocol(
+    state: &ProtocolRuntime,
+    operation_kind: Operation,
+    session_context: Option<[u8; 16]>,
+    operation_context: Option<[u8; 16]>,
+) {
+    let Some(key) = protocol_diagnostic_key(operation_kind, session_context, operation_context)
+    else {
+        return;
+    };
+    let Ok(run_context) = new_context_id() else {
+        return;
+    };
+    let span = ProtocolDiagnosticSpan {
+        run_id: format!("run-{}", encode_context(run_context)),
+        created_unix_ms: now_unix_ms(),
+        started_at: Instant::now(),
+        operation_kind,
+        session_context,
+        operation_context,
+    };
+    let partial = protocol_run(
+        &span,
+        operation_kind,
+        RunOutcome::Error,
+        None,
+        session_context,
+        operation_context,
+        false,
+    );
+    if let Some(publisher) = &state.protocol_diagnostics {
+        if publisher.try_send(partial).is_err() {
+            state.diagnostic_dropped.store(true, Ordering::Release);
+            return;
+        }
+        if let Ok(mut spans) = state.diagnostic_spans.lock() {
+            spans.insert(key, span);
+        }
+    }
+}
+
+fn record_protocol(
+    state: &ProtocolRuntime,
+    operation_kind: Operation,
+    outcome: RunOutcome,
+    error_type: Option<ErrorType>,
+    session_context: Option<[u8; 16]>,
+    operation_context: Option<[u8; 16]>,
+) {
+    let key = protocol_diagnostic_key(operation_kind, session_context, operation_context);
+    let span = key
+        .as_ref()
+        .and_then(|key| state.diagnostic_spans.lock().ok()?.remove(key));
+    let Some(span) = span else { return };
+    let run = protocol_run(
+        &span,
+        operation_kind,
+        outcome,
+        error_type,
+        session_context,
+        operation_context,
+        true,
+    );
+    if let Some(publisher) = &state.protocol_diagnostics
+        && publisher.try_send(run).is_err()
+    {
+        state.diagnostic_dropped.store(true, Ordering::Release);
+    }
+}
+
+fn drain_protocol_spans(
+    state: &ProtocolRuntime,
+    outcome: RunOutcome,
+    error_type: Option<ErrorType>,
+) {
+    let spans = state
+        .diagnostic_spans
+        .lock()
+        .map(|mut spans| spans.drain().map(|(_, span)| span).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for span in spans {
+        let run = protocol_run(
+            &span,
+            span.operation_kind,
+            outcome,
+            error_type,
+            span.session_context,
+            span.operation_context,
+            true,
+        );
+        if let Some(publisher) = &state.protocol_diagnostics
+            && publisher.try_send(run).is_err()
+        {
+            state.diagnostic_dropped.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn protocol_diagnostic_key(
+    operation_kind: Operation,
+    session: Option<[u8; 16]>,
+    operation: Option<[u8; 16]>,
+) -> Option<String> {
+    operation.or(session).map(encode_context).or_else(|| {
+        (operation_kind == Operation::PairingPersist).then(|| "protocol-pairing".into())
+    })
+}
+
+fn protocol_span_active(
+    state: &ProtocolRuntime,
+    operation_kind: Operation,
+    session: Option<[u8; 16]>,
+    operation: Option<[u8; 16]>,
+) -> bool {
+    protocol_diagnostic_key(operation_kind, session, operation).is_some_and(|key| {
+        state
+            .diagnostic_spans
+            .lock()
+            .is_ok_and(|spans| spans.contains_key(&key))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn protocol_run(
+    span: &ProtocolDiagnosticSpan,
+    operation_kind: Operation,
+    outcome: RunOutcome,
+    error_type: Option<ErrorType>,
+    session_context: Option<[u8; 16]>,
+    operation_context: Option<[u8; 16]>,
+    terminal: bool,
+) -> DiagnosticRun {
+    let terminal_status = match outcome {
+        RunOutcome::Success => OperationStatus::Success,
+        RunOutcome::Error => OperationStatus::Error,
+        RunOutcome::Cancel => OperationStatus::Cancel,
+        RunOutcome::Timeout => OperationStatus::Timeout,
+    };
+    let operations: &[Operation] = match operation_kind {
+        Operation::ProtocolNegotiate => &[
+            Operation::TransportConnect,
+            Operation::NoiseHandshake,
+            Operation::ProtocolNegotiate,
+        ],
+        Operation::AvailabilityRead => {
+            &[Operation::AvailabilityRead, Operation::PresenterApplyView]
+        }
+        _ => std::slice::from_ref(&operation_kind),
+    };
+    let duration =
+        terminal.then(|| u32::try_from(span.started_at.elapsed().as_millis()).unwrap_or(u32::MAX));
+    let records = operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| {
+            let last = index + 1 == operations.len();
+            SemanticRecord {
+                operation: *operation,
+                operation_id: u16::try_from(index + 1).unwrap_or(u16::MAX),
+                parent_operation_id: (index != 0).then_some(1),
+                status: if terminal {
+                    if last {
+                        terminal_status
+                    } else {
+                        OperationStatus::Success
+                    }
+                } else {
+                    OperationStatus::InProgress
+                },
+                error_type: (terminal && last).then_some(error_type).flatten(),
+                effect_id: None,
+                virtual_time_ms: 0,
+                end_virtual_time_ms: duration.map_or(0, u64::from),
+                duration_ms: duration,
+                render_width: None,
+                render_height: None,
+                value: None,
+            }
+        })
+        .collect();
+    let session_context_id = session_context.map(encode_context);
+    let operation_context_id = operation_context.map(encode_context);
+    DiagnosticRun {
+        schema_version: 1,
+        resource: resource_identity_for(
+            "deskkin-simulator",
+            env!("CARGO_PKG_VERSION"),
+            ResourceRole::DeviceSimulator,
+        ),
+        run_id: span.run_id.clone(),
+        scenario_run_id: operation_context_id
+            .clone()
+            .or_else(|| session_context_id.clone())
+            .unwrap_or_else(|| span.run_id.clone()),
+        transaction_id: None,
+        session_context_id,
+        operation_context_id,
+        protocol_major: Some(1),
+        selected_features: Some(deskkin_protocol::AVAILABILITY_READ_V1.0),
+        granted_permissions: Some(deskkin_protocol::AVAILABILITY_READ_PERMISSION.0),
+        outcome,
+        completeness: if terminal {
+            Completeness::Complete
+        } else {
+            Completeness::Partial
+        },
+        health: RecordingHealth::Healthy,
+        terminal,
+        missing_reason: None,
+        owner: None,
+        retained: false,
+        created_unix_ms: span.created_unix_ms,
+        records,
+    }
+}
+
+fn encode_context(value: [u8; 16]) -> String {
+    let mut encoded = String::with_capacity(32);
+    for byte in value {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn arm_protocol_refresh(
+    runtime: &Rc<RefCell<ProtocolRuntime>>,
+    effect: Effect,
+    delay_ms: u32,
+) -> Result<(), String> {
+    let weak = Rc::downgrade(runtime);
+    runtime.borrow().refresh_timer.start(
+        TimerMode::SingleShot,
+        Duration::from_millis(u64::from(delay_ms)),
+        move || protocol_refresh_due(&weak, effect),
+    );
+    let running = runtime.borrow().refresh_timer.running();
+    let result = if running {
+        Ok(())
+    } else {
+        Err(TimerArmError::Unavailable)
+    };
+    let mut state = runtime.borrow_mut();
+    let transition = state
+        .core
+        .transition(Input::TimerArmCompleted(TimerArmCompleted {
+            effect_id: effect.id,
+            result,
+        }))
+        .map_err(|error| format!("timer arm completion: {error:?}"))?;
+    apply_view(&state.ui, transition.view);
+    Ok(())
+}
+
+fn protocol_refresh_due(weak: &Weak<RefCell<ProtocolRuntime>>, timer: Effect) {
+    let Some(runtime) = weak.upgrade() else {
+        return;
+    };
+    let next = runtime
+        .borrow_mut()
+        .core
+        .transition(Input::RefreshDue(RefreshDue {
+            effect_id: timer.id,
+        }))
+        .ok()
+        .and_then(|transition| transition.effect);
+    if let Some(effect) = next {
+        let _ = dispatch_protocol_effect(&runtime, effect);
+    }
 }
 
 fn dispatch_effect(runtime: &Rc<RefCell<NativeRuntime>>, effect: Effect) -> Result<(), String> {
@@ -296,6 +1564,12 @@ fn publish_native_refresh(
         resource: resource_identity(),
         run_id: active.run_id.clone(),
         scenario_run_id: state.session_run_id.clone(),
+        transaction_id: None,
+        session_context_id: None,
+        operation_context_id: None,
+        protocol_major: None,
+        selected_features: None,
+        granted_permissions: None,
         outcome,
         completeness: Completeness::Complete,
         health: RecordingHealth::Healthy,
@@ -432,6 +1706,12 @@ fn publish_interrupted_refresh(
         resource: resource_identity(),
         run_id: active.run_id,
         scenario_run_id: session_run_id.into(),
+        transaction_id: None,
+        session_context_id: None,
+        operation_context_id: None,
+        protocol_major: None,
+        selected_features: None,
+        granted_permissions: None,
         outcome,
         completeness: Completeness::Complete,
         health: RecordingHealth::Healthy,
@@ -502,10 +1782,112 @@ fn native_record(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 
     use application_core::{Command, Core, Input, ReadCompleted};
 
     use super::*;
+
+    #[test]
+    fn durable_pairing_with_terminal_hello_reject_does_not_reconnect() {
+        let mut adapter = ProtocolAdapter::new();
+        assert!(!apply_pairing_outcome(
+            &mut adapter,
+            Err(SessionError::Incompatible),
+        ));
+        assert!(adapter.terminal_reason().is_some());
+
+        let mut adapter = ProtocolAdapter::new();
+        assert!(!apply_pairing_outcome(
+            &mut adapter,
+            Err(SessionError::AuthorizationDenied),
+        ));
+        assert!(adapter.terminal_reason().is_some());
+    }
+
+    #[test]
+    fn network_worker_serializes_authenticated_connect_read_and_close() {
+        let base = std::env::temp_dir().join(new_run_id("network-worker"));
+        let host = IdentityStore::new_for_role(base.join("host/identity"), ResourceRole::Host);
+        let simulator = IdentityStore::new_for_role(
+            base.join("simulator/identity"),
+            ResourceRole::DeviceSimulator,
+        );
+        host.init().unwrap();
+        simulator.init().unwrap();
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let host_store = host.clone();
+        let host_thread = thread::spawn(move || {
+            deskkin_desktop_host::pair_responder(&listener, &host_store, |_, _| true).unwrap();
+            deskkin_desktop_host::serve_one(
+                &listener,
+                &host_store,
+                deskkin_protocol::AvailabilityResult::Available,
+            )
+            .unwrap();
+        });
+        deskkin_desktop_host::pair_initiator(address, &simulator, [1; 16], |_, _| true).unwrap();
+
+        let (commands, command_receiver) = std::sync::mpsc::sync_channel(8);
+        let (control, control_receiver) = std::sync::mpsc::channel();
+        let (event_sender, events) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_network_worker(
+                address,
+                &simulator,
+                &command_receiver,
+                &control_receiver,
+                &event_sender,
+            );
+        });
+        commands
+            .send(NetworkCommand::Connect { session: [2; 16] })
+            .unwrap();
+        let NetworkEvent::Connected { session, result } =
+            events.recv_timeout(Duration::from_secs(3)).unwrap()
+        else {
+            panic!("expected connected event");
+        };
+        assert_eq!(session, [2; 16]);
+        assert!(result.is_ok());
+        commands
+            .send(NetworkCommand::Read {
+                session: [2; 16],
+                request_id: 1,
+                operation: [3; 16],
+            })
+            .unwrap();
+        let NetworkEvent::ReadCompleted {
+            session,
+            request_id,
+            operation,
+            result,
+            ..
+        } = events.recv_timeout(Duration::from_secs(3)).unwrap()
+        else {
+            panic!("expected read event");
+        };
+        assert_eq!(session, [2; 16]);
+        assert_eq!(request_id, 1);
+        assert_eq!(operation, [3; 16]);
+        assert_eq!(
+            result.unwrap(),
+            deskkin_protocol::AvailabilityResult::Available
+        );
+        control.send(NetworkControl::Close).unwrap();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(3)).unwrap(),
+            NetworkEvent::Closed
+        ));
+        control.send(NetworkControl::Shutdown).unwrap();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(3)).unwrap(),
+            NetworkEvent::WorkerStopped
+        ));
+        worker.join().unwrap();
+        host_thread.join().unwrap();
+    }
 
     fn effects() -> (Effect, Effect) {
         let mut core = Core::new();

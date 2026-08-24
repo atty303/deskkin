@@ -53,7 +53,9 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo run --locked --quiet --bin deskkin-scenario -- periodic-success --recording-off
 cargo run --locked --quiet --bin deskkin-scenario -- periodic-read-failure --recording-off
+cargo run --locked --quiet --bin deskkin-scenario -- protocol-disconnect-recovery --recording-off
 cargo check --locked -p application-core --target thumbv7m-none-eabi
+cargo check --locked -p deskkin-protocol --target thumbv7m-none-eabi
 python -m unittest discover -s tests
 '''
 
@@ -68,6 +70,18 @@ run = "cargo run --locked --quiet --bin deskkin-scenario --"
 [tasks."phase2:diagnostics"]
 description = "Administer bounded local Phase 2 diagnostic runs"
 run = "cargo run --locked --quiet --bin deskkin-diagnostics --"
+
+[tasks."phase3:host"]
+description = "Run one explicit Phase 3 desktop-host command"
+run = "cargo run --locked --quiet -p deskkin-desktop-host --"
+
+[tasks."phase3:simulator"]
+description = "Run one explicit Phase 3 device-simulator command"
+run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-desktop --"
+
+[tasks."phase3:diagnostics"]
+description = "Administer one exact Phase 3 role diagnostic store"
+run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-diagnostics --"
 
 [tasks."gate:1a:bootstrap"]
 description = "Prepare the repository-local Gate 1A Zephyr workspace and SDK"
