@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, and Phase 3 complete
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, and Phase 3 complete; Phase 3P approved
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,9 +11,9 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, and Phase 3 paired loopback host slice
+Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, Phase 3 paired loopback host slice, and approved Phase 3P work
 Application dependencies: approved Gate 1A, Phase 2, and exact Phase 3 sets resolved in the root lockfile
-Next action: define and approve the Phase 4 Unraid read-only feature checkpoint before adding connector or provider behavior
+Next action: implement and qualify Phase 3P before planning Phase 4
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -437,6 +437,28 @@ violation after its required repairs and full reverification. The Phase 3
 implementation is complete; its live local pairing demonstration remains a
 separate explicit launch checkpoint.
 
+## Phase 3P: CoreS3 paired availability demo
+
+The accepted contract and 2026-08-24 approval are in
+[`phase-3p-physical-slice-proposal.md`](phase-3p-physical-slice-proposal.md) and
+[ADR-0005](decisions/0005-core-s3-paired-availability.md). Commit that contract
+checkpoint before adding code, dependencies, device state, or LAN exposure.
+Then implement the shared `no_std` client state machine, exact private-LAN host
+mode, independent CoreS3 Zephyr application, fail-closed NVS stores, bounded
+USB control, encrypted experimental profile tooling, and reproducible tests as
+a separate local checkpoint.
+
+Phase 3P keeps Phase 3 protocol bytes and pairing semantics unchanged. It
+proves the same availability slice on the current CoreS3 before any provider
+connector. Reproducible build and fake-boundary verification do not authorize
+live device mutation. Flashing, real provisioning, identity initialization,
+pairing, and power cycling require an immediate qualification approval after
+showing the exact targets and retained plaintext-NVS state.
+
+After approved physical qualification, record evidence in a third documentation
+commit. The selected residual state retains demo firmware, Wi-Fi credentials,
+and Noise identity in device flash; cleanup is never implicit.
+
 ## Phase 4: Unraid read-only feature
 
 Add an infrastructure-status feature and an Unraid connector. Keep Unraid
@@ -487,14 +509,13 @@ physical hardware, real provider accounts, host mutation, or secret material.
 The following are deliberately unresolved:
 
 - production Rust wrapper ownership beyond the approved Phase 1 gates;
-- production Embassy executor and thread topology beyond Gate 1A's single
-  executor;
-- desktop runtime and support beyond the approved Linux loopback host and
-  simulator;
-- protocol transport beyond Linux loopback TCP and compatibility beyond
+- production Embassy executor and thread topology beyond Phase 3P's UI owner
+  and service worker;
+- desktop runtime and support beyond the approved Linux loopback, exact
+  RFC1918 physical host mode, and simulator;
+- protocol transport beyond those exact TCP modes and compatibility beyond
   protocol major 1 and bootstrap schema 1;
-- physical-device identity storage and a constrained-device implementation of
-  the accepted Noise protocol;
+- physical-device identity storage beyond the approved CoreS3 NVS schema;
 - host process and connector isolation;
 - UI navigation and shared feature-surface contracts;
 - application behavior beyond availability invalidation and bounded reconnect
@@ -516,11 +537,12 @@ Start a future development session with:
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
 > `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`,
 > `docs/phase-2-slice-proposal.md`, `docs/phase-3-slice-proposal.md`, and
-> `docs/decisions/0004-paired-host-protocol.md`. Confirm that Phase 2 is
-> complete, Phase 3 was approved on 2026-08-24, and its documentation and
-> implementation checkpoints are committed separately. Treat Phase 3 as
-> complete. Plan Phase 4 without adding provider behavior, live access, device
-> changes, non-loopback exposure, release, push, or publication before its next
-> explicit approval. Preserve the physical residual-state contract for any
-> later device run and record actual pass/fail evidence only when executing an
-> approved gate or slice.
+> `docs/phase-3p-physical-slice-proposal.md`,
+> `docs/decisions/0004-paired-host-protocol.md`, and
+> `docs/decisions/0005-core-s3-paired-availability.md`. Confirm that Phase 3 is
+> complete and Phase 3P was approved on 2026-08-24 with separate documentation,
+> implementation, and physical-evidence checkpoints. Finish Phase 3P before
+> planning Phase 4. Do not flash, provision, mutate device state, power-cycle,
+> access a provider, release, push, or publish without the corresponding
+> explicit approval. Preserve and report the selected plaintext-NVS residual
+> state after any approved device run.

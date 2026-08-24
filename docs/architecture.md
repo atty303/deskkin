@@ -37,8 +37,10 @@ platform dependency.
 
 The desktop host is the external-authority boundary. Provider credentials,
 desktop sessions, durable connector state, authorization policy, and broad
-network access remain there. A companion device holds only its paired identity
-and the capabilities needed for its current session.
+network access remain there. A companion device holds only its paired identity,
+the minimum transport configuration needed to reach its host, and the
+capabilities needed for its current session. Provider credentials remain on
+the host; the transport configuration may include a Wi-Fi credential.
 
 ## Dependency direction
 
@@ -117,9 +119,12 @@ The desktop host owns paired device sessions, connector lifecycle, provider
 credentials, persistent integration state, authorization, confirmation policy,
 and translation from provider-specific data into Deskkin semantics.
 
-The initial host is Linux-only and accepts one authenticated device session on
-an explicitly selected IPv4 or IPv6 loopback address. It refuses non-loopback
-binds. A single session writer owns encrypted framing and TCP writes; bounded
+The host is Linux-only and accepts one authenticated device session. Its
+default command binds an explicitly selected IPv4 or IPv6 loopback address. A
+separate physical-slice command binds one exact assigned RFC1918 IPv4 address
+on fixed port `39042`; it refuses wildcard, public, link-local, IPv6, and
+unassigned addresses and never changes firewall or interface configuration. A
+single session writer owns encrypted framing and TCP writes; bounded
 application and reserved control queues make overload and shutdown explicit.
 Identity filesystem work is isolated in a blocking store actor. Mutations while
 the runtime is alive pass through a private, generation-bound Unix owner
@@ -163,12 +168,15 @@ details. Its conceptual families are:
 - proposed actions and explicit confirmations;
 - device health and bounded diagnostic summaries.
 
-Protocol major 1 uses Linux loopback-only TCP, a fixed prelude, Noise XX with
+Protocol major 1 uses a fixed prelude, Noise XX with
 X25519, ChaChaPoly, and BLAKE2s, and encrypted bootstrap schema 1. A portable
 `no_std` codec owns canonical closed messages and two-byte big-endian bounded
 framing without owning sockets, authentication state, persistence, runtime, or
 application types. The exact protocol-major-1 wire contract is fixed by
 [ADR-0004](decisions/0004-paired-host-protocol.md).
+The original loopback-only transport consequence is superseded only for the
+exact RFC1918 physical mode by
+[ADR-0005](decisions/0005-core-s3-paired-availability.md).
 
 Bootstrap negotiates supported protocol majors, required and optional feature
 bits, requested peer permission bits, selected features, and granted
@@ -199,8 +207,15 @@ Each peer has an explicitly initialized X25519 static identity. Noise XX
 pairing derives the same six-digit local authentication string on both peers;
 the string is never accepted from the remote peer or persisted. Only the
 durable `paired` state permits an application session. Pairing publication and
-exact unpair use generation-bound, crash-recoverable state machines, private
-filesystem modes, atomic replacement, and fail-closed validation.
+exact unpair use generation-bound, crash-recoverable state machines and
+fail-closed validation. Hosted peers use private filesystem modes and atomic
+replacement. The CoreS3 uses separate two-slot NVS records with publication
+sequence, CRC, write/readback verification, and conflict rejection.
+
+The CoreS3 physical slice stores its pairing identity and one Wi-Fi profile in
+separate two-slot Zephyr NVS namespaces. This state is intentionally plaintext:
+the slice does not enable flash encryption, secure boot, or eFuse mutation.
+Provider credentials and provider authority still never enter the device.
 
 Disconnect invalidates current availability to `Unknown`; it never fabricates
 `Unavailable`. Terminal version, required-feature, and authorization failures
@@ -222,6 +237,13 @@ They exclude authentication strings, raw keys, addresses, wire data, payloads,
 paths, machine/user/process identity, environment, and provider data. Host and
 simulator stores are separately locked and capped at 16 MiB each, with no
 remote exporter.
+
+For the CoreS3 slice, a USB-connected host runner consumes only allowlisted
+device records and uses the same opaque correlations. Device and host roots are
+independently capped at 16 MiB. Wi-Fi credentials, pairing authentication
+strings, keys, LAN addresses, serial payloads, and NVS contents are never
+diagnostic fields; absence or failure of the runner cannot alter device
+behavior.
 
 ## Expected workspace shape
 
@@ -268,6 +290,8 @@ slice needs them. The final source layout may become smaller than this map.
   feature model
 - [ADR-0004](decisions/0004-paired-host-protocol.md): Paired loopback host
   protocol
+- [ADR-0005](decisions/0005-core-s3-paired-availability.md): Exact private-LAN
+  CoreS3 transport, runtime, and persistent state
 
 The current implementation checkpoint and unresolved questions are maintained
 in [`implementation-plan.md`](implementation-plan.md).
