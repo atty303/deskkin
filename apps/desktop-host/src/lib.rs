@@ -2579,6 +2579,7 @@ async fn host_accept_loop(
             }
             if pairing_state.2 {
                 active_pairing_task.take();
+                *pairing_state = (false, false, false);
             }
             if !pairing_state.0
                 && pairing_window
@@ -4226,6 +4227,18 @@ mod tests {
             simulator_store.peer().unwrap(),
             PeerState::Paired { .. }
         ));
+        let mut pinned_session = (0..200)
+            .find_map(|_| {
+                ClientSession::connect(address, &simulator_store, [42; 16])
+                    .inspect_err(|_| thread::sleep(Duration::from_millis(10)))
+                    .ok()
+            })
+            .expect("paired identity did not establish a pinned session");
+        assert_eq!(
+            pinned_session.read_availability([43; 16]).unwrap(),
+            AvailabilityResult::Available
+        );
+        pinned_session.close().unwrap();
         for role in [&host_role, &simulator_role] {
             for entry in fs::read_dir(role.join("diagnostics")).unwrap() {
                 let bytes = fs::read(entry.unwrap().path()).unwrap();
