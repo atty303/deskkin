@@ -117,6 +117,14 @@ The desktop host owns paired device sessions, connector lifecycle, provider
 credentials, persistent integration state, authorization, confirmation policy,
 and translation from provider-specific data into Deskkin semantics.
 
+The initial host is Linux-only and accepts one authenticated device session on
+an explicitly selected IPv4 or IPv6 loopback address. It refuses non-loopback
+binds. A single session writer owns encrypted framing and TCP writes; bounded
+application and reserved control queues make overload and shutdown explicit.
+Identity filesystem work is isolated in a blocking store actor. Mutations while
+the runtime is alive pass through a private, generation-bound Unix owner
+control socket rather than racing a second standalone store writer.
+
 Connectors do not send provider payloads to a device. For example, an Unraid
 connector converts an Unraid response into infrastructure status and declared
 actions. A future conversational connector converts provider streaming output
@@ -155,9 +163,19 @@ details. Its conceptual families are:
 - proposed actions and explicit confirmations;
 - device health and bounded diagnostic summaries.
 
-Transport, serialization, framing, authentication, schema evolution, and
-reconnection semantics are intentionally undecided. They require a dedicated
-protocol design and dependency approval before implementation.
+Protocol major 1 uses Linux loopback-only TCP, a fixed prelude, Noise XX with
+X25519, ChaChaPoly, and BLAKE2s, and encrypted bootstrap schema 1. A portable
+`no_std` codec owns canonical closed messages and two-byte big-endian bounded
+framing without owning sockets, authentication state, persistence, runtime, or
+application types. The exact protocol-major-1 wire contract is fixed by
+[ADR-0004](decisions/0004-paired-host-protocol.md).
+
+Bootstrap negotiates supported protocol majors, required and optional feature
+bits, requested peer permission bits, selected features, and granted
+permissions independently. The first feature is `availability.read.v1`; its
+permission is `availability.read`. Session and operation context identities
+correlate requests and diagnostics without making a closed session's late
+result valid.
 
 Hardware capability, application capability, protocol capability, and granted
 permission are distinct:
@@ -177,10 +195,33 @@ must carry an action identity and the policy-required confirmation result; the
 desktop host remains responsible for final authorization immediately before
 calling a connector.
 
-Transport security and pairing are not selected yet. Their later design must
-bind messages to a peer and session, prevent replay of mutations, fail closed
-on ambiguous authorization, and expose enough state to diagnose rejection
-without disclosing credentials.
+Each peer has an explicitly initialized X25519 static identity. Noise XX
+pairing derives the same six-digit local authentication string on both peers;
+the string is never accepted from the remote peer or persisted. Only the
+durable `paired` state permits an application session. Pairing publication and
+exact unpair use generation-bound, crash-recoverable state machines, private
+filesystem modes, atomic replacement, and fail-closed validation.
+
+Disconnect invalidates current availability to `Unknown`; it never fabricates
+`Unavailable`. Terminal version, required-feature, and authorization failures
+require an explicit new connect, while transient busy or transport failures
+use the bounded reconnect policy. Provider mutations and replay protection for
+them remain future decisions.
+
+## Observation boundary
+
+Hosted external and asynchronous paths expose separate result, owner-control,
+and local diagnostic surfaces. The reusable recorder publishes bounded atomic
+runs and never changes semantic results when disabled, full, or unhealthy.
+Phase 3 correlates pairing, session, availability read, and identity control by
+opaque transaction, session, and operation identities.
+
+Diagnostics contain only the accepted closed operation, outcome, error,
+duration, protocol/feature/permission, queue, completeness, and health fields.
+They exclude authentication strings, raw keys, addresses, wire data, payloads,
+paths, machine/user/process identity, environment, and provider data. Host and
+simulator stores are separately locked and capped at 16 MiB each, with no
+remote exporter.
 
 ## Expected workspace shape
 
@@ -225,6 +266,8 @@ slice needs them. The final source layout may become smaller than this map.
   boundary
 - [ADR-0003](decisions/0003-portable-application.md): Portable application and
   feature model
+- [ADR-0004](decisions/0004-paired-host-protocol.md): Paired loopback host
+  protocol
 
 The current implementation checkpoint and unresolved questions are maintained
 in [`implementation-plan.md`](implementation-plan.md).

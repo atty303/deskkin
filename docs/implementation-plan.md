@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, and Phase 2 complete
+Status: Phase 0, Phase 1 Gates 1A-1E, and Phase 2 complete; Phase 3 approved
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -12,8 +12,8 @@ Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: bounded Gate 1A through Gate 1E feasibility applications and the Phase 2 simulator
-Application dependencies: approved Gate 1A set plus exact hosted Phase 2 set
-Next action: review and approve the proposed Phase 3 host and protocol contract
+Application dependencies: approved Gate 1A and Phase 2 sets; exact Phase 3 set approved for the implementation checkpoint
+Next action: implement and locally verify the accepted Phase 3 contract after its documentation commit
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -407,22 +407,18 @@ device adapter, package, release, or published artifact was added.
 
 ## Phase 3: host and protocol vertical slice
 
-The proposed contract is in
-[`phase-3-slice-proposal.md`](phase-3-slice-proposal.md). It is not approved.
-Do not add its workspace members, dependencies, protocol code, identity state,
-listener, or host runtime before explicit approval of its five requested
-decision groups.
+The accepted contract and 2026-08-24 approval record are in
+[`phase-3-slice-proposal.md`](phase-3-slice-proposal.md) and
+[ADR-0004](decisions/0004-paired-host-protocol.md). The approved documentation
+checkpoint must be committed separately before adding its workspace members,
+dependencies, protocol code, identity state, listener, or host runtime. After
+that commit, implement the exact loopback protocol, identity lifecycle, hosted
+adapters, observation surfaces, and acceptance suite without expanding scope.
 
-After approval, first record the accepted transport, wire, authentication,
-pairing, persistence, compatibility, and observation contract in a new ADR;
-synchronize the proposal approval record, architecture, this checkpoint, and
-open decisions; and commit that documentation checkpoint separately. Only then
-may the approved implementation and dependencies be added.
-
-Design the smallest semantic protocol slice for one paired desktop host and one
-simulated device. Before dependencies, approve transport, serialization,
-framing, identity, pairing, authentication, versioning, reconnection,
-backpressure, and observation contracts together.
+Implement the smallest semantic protocol slice for one paired desktop host and
+one simulated device. Transport, serialization, framing, identity, pairing,
+authentication, versioning, reconnection, backpressure, and observation are
+fixed together by ADR-0004 and the approved proposal.
 
 The first slice should negotiate capabilities, publish host availability,
 deliver one read-only status update, and survive a disconnect without
@@ -480,12 +476,16 @@ The following are deliberately unresolved:
 - production Rust wrapper ownership beyond the approved Phase 1 gates;
 - production Embassy executor and thread topology beyond Gate 1A's single
   executor;
-- desktop runtime and support beyond the approved Linux simulator;
-- protocol transport, schema language, serialization, and compatibility rule;
-- pairing, device identity storage, and transport security;
+- desktop runtime and support beyond the approved Linux loopback host and
+  simulator;
+- protocol transport beyond Linux loopback TCP and compatibility beyond
+  protocol major 1 and bootstrap schema 1;
+- physical-device identity storage and a constrained-device implementation of
+  the accepted Noise protocol;
 - host process and connector isolation;
 - UI navigation and shared feature-surface contracts;
-- local behavior while the host is disconnected;
+- application behavior beyond availability invalidation and bounded reconnect
+  while the host is disconnected;
 - OTA, rollback, and firmware compatibility policy;
 - packaging, repository split, and release strategy.
 
@@ -501,12 +501,12 @@ cross-cutting decision as a new ADR.
 Start a future development session with:
 
 > Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
-> `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`, and
-> `docs/phase-2-slice-proposal.md`, and `docs/phase-3-slice-proposal.md`. Confirm
-> that the repository is at the completed Phase 2 checkpoint and that the
-> Phase 3 proposal is not yet approved. Review and revise only that proposal.
-> Do not add protocol code, dependencies, connector behavior, device changes,
-> provider access, release, or publication before its five decision groups are
-> explicitly approved. Preserve the physical
+> `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`,
+> `docs/phase-2-slice-proposal.md`, `docs/phase-3-slice-proposal.md`, and
+> `docs/decisions/0004-paired-host-protocol.md`. Confirm that Phase 2 is
+> complete, Phase 3 was approved on 2026-08-24, and its documentation
+> checkpoint is committed separately. Resume the Phase 3 implementation and
+> local verification without adding provider behavior, device changes,
+> non-loopback exposure, release, push, or publication. Preserve the physical
 > residual-state contract for any later device run and record actual pass/fail
 > evidence only when executing an approved gate or slice.

@@ -1,7 +1,16 @@
 # Phase 3 proposal: paired host protocol vertical slice
 
-Status: Proposed; implementation and dependencies are not approved  
+Status: Approved  
 Date: 2026-08-23
+
+Approved on 2026-08-24. The user approved all five decision groups and the
+ordered two-checkpoint execution: documentation and ADR first, followed by
+implementation and local verification. The approved Snow direct dependency is
+`snow = 0.10.0`; the `1.0.0` version in the conversational implementation
+summary was corrected before dependency adoption because that release does not
+exist. This approval does not authorize a live demonstration, provider access,
+physical-device operation, non-loopback exposure, distribution, push, or
+release.
 
 ## Goal and observable result
 
@@ -867,9 +876,9 @@ Any live local pairing demonstration is a separate explicit launch checkpoint.
 It must use disposable Phase 3 state and must not replace the reproducible
 acceptance suite.
 
-## Approval requested
+## Approval record
 
-Implementation remains blocked until the user explicitly approves all of:
+On 2026-08-24 the user explicitly approved all of:
 
 1. the loopback-only TCP, bounded framing, protocol-v1, request/reply, timeout,
    retry, and backpressure contract;
@@ -882,7 +891,7 @@ Implementation remains blocked until the user explicitly approves all of:
 5. the explicit exclusion of protocol LAN exposure, physical-device support,
    Unraid, mutation, packaging, release, and publication.
 
-Approval authorizes the ADR/documentation checkpoint and, only after that
+The approval authorizes the ADR/documentation checkpoint and, only after that
 separate local commit is complete, source implementation and local reproducible
 verification. It does not authorize a live provider, non-loopback listener,
 physical device operation, system installation, push, release, or artifact
