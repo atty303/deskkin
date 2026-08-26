@@ -24,6 +24,7 @@ PORT = 39042
 FRAME_MAX = 188
 DEFAULT_PROFILE = Path(".deskkin/phase3-device/wifi.age")
 DEFAULT_IDENTITY = Path("~/.config/chezmoi/age/identity.txt")
+BOOT_COMPLETE_STAGE = 9
 COMMANDS = {
     "identity-init": 1,
     "identity-list": 2,
@@ -36,9 +37,56 @@ COMMANDS = {
     "shutdown": 9,
 }
 
+BOOT_ERRORS = {
+    1: "boot_devices_unavailable",
+    2: "boot_noise_resolver",
+    3: "boot_service_worker",
+    4: "boot_ui_platform",
+    5: "boot_ui_component",
+    6: "boot_framebuffer",
+    7: "boot_display_transfer",
+    8: "boot_display_enable",
+}
+
+OPERATION_STAGES = (
+    "idle",
+    "wifi_association",
+    "dhcp",
+    "tcp_connect",
+    "noise",
+    "bootstrap",
+    "availability_read",
+    "view_application",
+    "display_transfer",
+)
+
+OPERATION_ERRORS = {
+    0: None,
+    1: "identity_store",
+    2: "wifi_association",
+    3: "dhcp_timeout",
+    5: "noise",
+    6: "noise",
+    7: "pairing_rejected",
+    8: "pairing_busy",
+    9: "pairing_expired",
+    10: "protocol_incompatible",
+    11: "authorization_denied",
+}
+
 
 class DeviceError(Exception):
     pass
+
+
+def ensure_private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise DeviceError("profile_directory_not_private")
+    os.chmod(path, 0o700)
+    if stat.S_IMODE(path.stat().st_mode) != 0o700:
+        raise DeviceError("profile_directory_not_private")
 
 
 def zeroize(value: bytearray) -> None:
@@ -93,9 +141,7 @@ def age_recipient(identity: Path) -> str:
 
 
 def create_profile(profile: Path, identity: Path, value: dict[str, object] | None = None) -> None:
-    profile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if stat.S_IMODE(profile.parent.stat().st_mode) & 0o077:
-        raise DeviceError("profile_directory_not_private")
+    ensure_private_directory(profile.parent)
     data = bytearray(json.dumps(validate_profile(value or prompt_profile()), separators=(",", ":")).encode())
     temporary = profile.with_name(f".{profile.name}.{secrets.token_hex(8)}.tmp")
     descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -255,45 +301,159 @@ def read_exact(descriptor: int, length: int, timeout: float) -> bytes:
     return bytes(value)
 
 
-def exchange(device: Path, frame: bytearray) -> bytes:
+def read_control_response(descriptor: int, frame: bytearray, timeout: float) -> bytes:
+    deadline = time.monotonic() + timeout
+    buffered = bytearray()
+    while len(buffered) <= 4096:
+        candidate_start: int | None = None
+        for start in range(max(0, len(buffered) - 1)):
+            length = int.from_bytes(buffered[start : start + 2], "big")
+            if not 18 <= length <= 80 or start + 3 > len(buffered):
+                continue
+            if buffered[start + 2] != SCHEMA:
+                continue
+            available_id = min(16, max(0, len(buffered) - (start + 4)))
+            if buffered[start + 4 : start + 4 + available_id] != frame[4 : 4 + available_id]:
+                continue
+            candidate_start = start
+            if available_id < 16 or len(buffered) < start + length + 2:
+                break
+            result = bytes(buffered[start + 2 : start + length + 2])
+            if result[2:18] == frame[4:20]:
+                return result
+        if candidate_start is not None:
+            if candidate_start > 0:
+                del buffered[:candidate_start]
+        elif len(buffered) > 19:
+            del buffered[:-19]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
+            raise DeviceError("control_timeout")
+        try:
+            chunk = os.read(descriptor, min(512, 4097 - len(buffered)))
+        except BlockingIOError:
+            continue
+        if not chunk:
+            raise DeviceError("control_timeout")
+        buffered.extend(chunk)
+    raise DeviceError("control_response_length")
+
+
+def exchange_once(device: Path, frame: bytearray, startup_delay: float, response_timeout: float) -> bytes:
     descriptor = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
         attributes = termios.tcgetattr(descriptor)
         attributes[0] = attributes[1] = attributes[3] = 0
         attributes[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        attributes[4] = termios.B115200
+        attributes[5] = termios.B115200
+        attributes[6][termios.VMIN] = 0
+        attributes[6][termios.VTIME] = 0
         termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
-        termios.tcflush(descriptor, termios.TCIFLUSH)
-
+        time.sleep(startup_delay)
+        termios.tcflush(descriptor, termios.TCIOFLUSH)
         write_all(descriptor, frame, 2.0)
-        prefix = read_exact(descriptor, 2, 2.0)
-        length = int.from_bytes(prefix, "big")
-        if not 18 <= length <= 80:
-            raise DeviceError("control_invalid")
-        result = read_exact(descriptor, length, 2.0)
-        if result[0] != SCHEMA:
-            raise DeviceError("control_invalid")
-        if result[2:18] != frame[4:20]:
-            raise DeviceError("control_invalid")
-        return result
+        return read_control_response(descriptor, frame, response_timeout)
     finally:
+        # USB Serial/JTAG can retain unsent host output when device RX is not
+        # draining.  Discard it so closing a diagnostic/control attempt cannot
+        # block behind the tty driver's drain timeout.
+        try:
+            termios.tcflush(descriptor, termios.TCIOFLUSH)
+        except termios.error:
+            pass
         os.close(descriptor)
 
 
-def run_control(command: str, device_arg: str | None, payload: bytearray | bytes = b"") -> bytes:
+def exchange(device: Path, frame: bytearray, recover_status_transport: bool = True) -> bytes:
+    if frame[3] == COMMANDS["status"] and not recover_status_transport:
+        return exchange_once(device, frame, 0.0, 2.0)
+    if frame[3] != COMMANDS["status"]:
+        return exchange_once(device, frame, 0.25, 2.0)
+    # A flash/reset can leave USB Serial/JTAG visible before its device-side RX
+    # service is ready.  Send immediately first, then reopen the tty for a
+    # bounded recovery.  Continuous monitoring disables this recovery so its
+    # 250 ms sampling cadence is not hidden behind readiness sleeps.
+    startup_delays = (0.25, 3.0, 5.0, 5.0)
+    for attempt, startup_delay in enumerate(startup_delays):
+        try:
+            return exchange_once(device, frame, startup_delay, 5.0 if attempt else 2.0)
+        except DeviceError as error:
+            if attempt == len(startup_delays) - 1 or str(error) != "control_timeout":
+                raise
+    raise DeviceError("control_timeout")
+
+
+def status_boot_error(status: bytes) -> str | None:
+    if len(status) < 80 or status[79] == 0:
+        return None
+    return BOOT_ERRORS.get(status[79], "boot_unknown")
+
+
+def report_status(status: bytes) -> None:
+    if len(status) < 80:
+        raise DeviceError("control_invalid")
+    print(
+        json.dumps(
+            {
+                "shell_state": status[26] & 0x7F,
+                "availability": min(status[27], 2),
+                "last_stage": OPERATION_STAGES[min(status[76], len(OPERATION_STAGES) - 1)],
+                "last_error": operation_error(status[76], status[77]),
+                "boot_stage": status[78],
+                "boot_error": status_boot_error(status),
+            },
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+    )
+
+
+def await_boot_complete(status: bytes, device_arg: str | None, timeout: float = 15.0) -> bytes:
+    deadline = time.monotonic() + timeout
+    while True:
+        if len(status) != 80:
+            raise DeviceError("control_invalid")
+        if status_boot_error(status) is not None or status[78] == BOOT_COMPLETE_STAGE:
+            return status
+        if status[78] > BOOT_COMPLETE_STAGE:
+            raise DeviceError("boot_unknown")
+        if time.monotonic() >= deadline:
+            raise DeviceError("boot_not_ready")
+        time.sleep(0.25)
+        status = run_control("status", device_arg, recover_status_transport=False)
+
+
+def operation_error(stage: int, error: int) -> str | None:
+    if error == 4:
+        return "tcp_connect" if stage <= 3 else "availability_timeout"
+    return OPERATION_ERRORS.get(error, "noise")
+
+
+def run_control(
+    command: str,
+    device_arg: str | None,
+    payload: bytearray | bytes = b"",
+    recover_status_transport: bool = True,
+) -> bytes:
     device = discover_device(device_arg)
     generation = 0
-    if command in {"identity-unpair", "wifi-provision", "wifi-clear"}:
+    if command in {"identity-init", "identity-unpair", "wifi-provision", "wifi-clear", "run", "shutdown"}:
         status_frame = control_frame("status", 0)
         try:
-            status = exchange(device, status_frame)
+            status = exchange(device, status_frame, recover_status_transport)
+            if len(status) != 80:
+                raise DeviceError("control_invalid")
             if status[1] != 0:
                 raise DeviceError("device_rejected")
+            if error := status_boot_error(status):
+                raise DeviceError(error)
             generation = int.from_bytes(status[18:26], "big")
         finally:
             zeroize(status_frame)
     frame = control_frame(command, generation, payload)
     try:
-        result = exchange(device, frame)
+        result = exchange(device, frame, recover_status_transport)
         if result[1] != 0:
             raise DeviceError("device_rejected")
         if command == "identity-list":
@@ -328,7 +488,9 @@ def device_environment(root: Path) -> tuple[Path, dict[str, str]]:
 
 def build(root: Path) -> None:
     state, environment = device_environment(root)
-    build_dir = state / "phase3-device/build"
+    device_state = state / "phase3-device"
+    ensure_private_directory(device_state)
+    build_dir = device_state / "build"
     west = state / "venv/bin/west"
     subprocess.run(
         [
@@ -356,7 +518,7 @@ def build(root: Path) -> None:
             "--board",
             "m5stack_cores3/esp32s3/procpu",
             "--build-dir",
-            str(state / "phase3-device/inert-build"),
+            str(device_state / "inert-build"),
             str(root / "apps/core-s3-inert"),
         ],
         check=True,
@@ -373,7 +535,20 @@ def flash(root: Path, device_arg: str | None) -> None:
     if not (build_dir / "zephyr/zephyr.elf").is_file():
         raise DeviceError("firmware_build_required")
     subprocess.run(
-        [str(state / "venv/bin/west"), "flash", "--skip-rebuild", "--build-dir", str(build_dir), "--runner", "esp32", "--", "--esp-device", str(device)],
+        [
+            str(state / "venv/bin/west"),
+            "flash",
+            "--no-rebuild",
+            "--build-dir",
+            str(build_dir),
+            "--runner",
+            "esp32",
+            "--",
+            "--esp-device",
+            str(device),
+            "--esp-baud-rate",
+            "460800",
+        ],
         check=True,
         cwd=state / "west",
         env=environment,
@@ -411,8 +586,18 @@ def recover(root: Path, device_arg: str | None) -> None:
             pass
     subprocess.run(
         [
-            str(state / "venv/bin/west"), "flash", "--skip-rebuild", "--build-dir",
-            str(build_dir), "--runner", "esp32", "--", "--esp-device", str(device),
+            str(state / "venv/bin/west"),
+            "flash",
+            "--no-rebuild",
+            "--build-dir",
+            str(build_dir),
+            "--runner",
+            "esp32",
+            "--",
+            "--esp-device",
+            str(device),
+            "--esp-baud-rate",
+            "460800",
         ],
         check=True,
         cwd=state / "west",
@@ -524,7 +709,7 @@ def monitor_device(device_arg: str | None, duration_seconds: float, expected_att
     previous: tuple[int, int, int, bytes, bytes, bool, int, int, int, int, int] | None = None
     try:
         while duration_seconds <= 0 or time.monotonic() - started < duration_seconds:
-            result = run_control("status", device_arg)
+            result = run_control("status", device_arg, recover_status_transport=False)
             if len(result) < 78:
                 raise DeviceError("control_invalid")
             shell_and_valid = result[26]
@@ -543,21 +728,8 @@ def monitor_device(device_arg: str | None, duration_seconds: float, expected_att
             )
             if value != previous:
                 elapsed = int((time.monotonic() - started) * 1000)
-                stage = ("idle", "wifi_association", "dhcp", "tcp_connect", "noise", "bootstrap", "availability_read", "view_application", "display_transfer")[min(value[9], 8)]
-                error_type = {
-                    0: None,
-                    1: "identity_store",
-                    2: "wifi_association",
-                    3: "dhcp_timeout",
-                    4: "tcp_connect" if value[9] <= 3 else "availability_timeout",
-                    5: "noise",
-                    6: "noise",
-                    7: "pairing_rejected",
-                    8: "pairing_busy",
-                    9: "pairing_expired",
-                    10: "protocol_incompatible",
-                    11: "authorization_denied",
-                }.get(value[10], "noise")
+                stage = OPERATION_STAGES[min(value[9], len(OPERATION_STAGES) - 1)]
+                error_type = operation_error(value[9], value[10])
                 records.append(
                     {
                         "operation": stage,
@@ -613,6 +785,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
         "flash": "device_ui",
         "identity": "identity_init",
         "provision": "nvs_publication",
+        "status": "device_ui",
         "run": "device_ui",
         "recover": "nvs_publication",
     }[action]
@@ -634,7 +807,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "run", "recover"))
+    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "run", "recover"))
     parser.add_argument("identity_action", nargs="?")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--age-identity", type=Path)
@@ -652,6 +825,7 @@ def main() -> int:
     exit_code = 2
     records: list[dict[str, object]] = []
     error_type: str | None = None
+    diagnostic_allowed = True
     try:
         if args.action == "profile":
             create_profile(profile, identity)
@@ -692,6 +866,12 @@ def main() -> int:
                 zeroize(payload)
                 if plaintext is not None:
                     zeroize(plaintext)
+        elif args.action == "status":
+            status = run_control("status", args.device)
+            status = await_boot_complete(status, args.device)
+            report_status(status)
+            if error := status_boot_error(status):
+                raise DeviceError(error)
         elif args.action == "run":
             accepted = run_control("run", args.device)
             if len(accepted) < 30:
@@ -704,6 +884,9 @@ def main() -> int:
         exit_code = 0
     except (DeviceError, OSError, subprocess.SubprocessError, UnicodeError, ValueError) as error:
         message = str(error) if isinstance(error, DeviceError) else "device_operation_failed"
+        boot_failure = message in {*BOOT_ERRORS.values(), "boot_unknown", "boot_not_ready"}
+        control_failure = message in {"control_invalid", "control_timeout", "control_response_length"}
+        diagnostic_allowed = not (boot_failure or control_failure)
         error_type = message if message in {
             "profile_decrypt_failed",
             "profile_schema_invalid",
@@ -712,11 +895,11 @@ def main() -> int:
             "tcp_connect",
             "noise",
             "availability_timeout",
-        } else "store_failed"
+        } else None if boot_failure else "store_failed"
         print(message, file=sys.stderr)
     if not records:
         records = [action_record(args.action, "success" if exit_code == 0 else "error", error_type)]
-    if args.recording == "on":
+    if args.recording == "on" and diagnostic_allowed:
         try:
             publish_diagnostic(root, run_id, "success" if exit_code == 0 else "error", records)
         except OSError:

@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -50,6 +51,200 @@ class Phase3DeviceTests(unittest.TestCase):
             device.write_all(7, b"abcdef", 1)
             self.assertEqual(b"".join(writes), b"abcdef")
             self.assertEqual(device.read_exact(7, 4, 1), b"abcd")
+
+    def test_control_response_framing_failures_are_distinct(self):
+        frame = device.control_frame("status", 0)
+        response = bytearray(18)
+        response[0] = 1
+        response[2:18] = frame[4:20]
+        stream = bytearray(b"deskkin.boot stage=3 error=0\n")
+        stream.extend(len(response).to_bytes(2, "big"))
+        stream.extend(response)
+        def consume(_descriptor, length):
+            value = bytes(stream[:length])
+            del stream[:length]
+            return value
+
+        with mock.patch.object(
+            device.select,
+            "select",
+            side_effect=lambda reads, writes, errors, timeout: (reads, writes, errors),
+        ), mock.patch.object(device.os, "read", side_effect=consume):
+            self.assertEqual(device.read_control_response(7, frame, 1), bytes(response))
+
+    def test_status_retries_but_mutation_does_not(self):
+        attributes = [0, 0, 0, 0, 0, 0, [0] * 32]
+        response = bytes([1, 0]) + bytes(16)
+        common = mock.patch.multiple(
+            device.os,
+            open=mock.DEFAULT,
+            close=mock.DEFAULT,
+        )
+        with common as patched, mock.patch.object(device.time, "sleep"), mock.patch.object(
+            device.termios, "tcgetattr", return_value=attributes
+        ), mock.patch.object(device.termios, "tcsetattr"), mock.patch.object(
+            device.termios, "tcflush"
+        ), mock.patch.object(device, "write_all") as write, mock.patch.object(
+            device,
+            "read_control_response",
+            side_effect=[device.DeviceError("control_timeout"), response],
+        ):
+            patched["open"].return_value = 7
+            self.assertEqual(device.exchange(Path("/dev/fake"), device.control_frame("status", 0)), response)
+            self.assertEqual(write.call_count, 2)
+            self.assertEqual(patched["open"].call_count, 2)
+            self.assertEqual(patched["close"].call_count, 2)
+
+        with common as patched, mock.patch.object(device.time, "sleep"), mock.patch.object(
+            device.termios, "tcgetattr", return_value=attributes
+        ), mock.patch.object(device.termios, "tcsetattr"), mock.patch.object(
+            device.termios, "tcflush"
+        ), mock.patch.object(device, "write_all") as write, mock.patch.object(
+            device,
+            "read_control_response",
+            side_effect=device.DeviceError("control_timeout"),
+        ):
+            patched["open"].return_value = 7
+            with self.assertRaisesRegex(device.DeviceError, "control_timeout"):
+                device.exchange(Path("/dev/fake"), device.control_frame("run", 0))
+            self.assertEqual(write.call_count, 1)
+
+    def test_monitor_status_does_not_wait_for_transport_recovery(self):
+        status = bytearray(80)
+        attributes = [0, 0, 0, 0, 0, 0, [0] * 32]
+        with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
+            device.os, "open", return_value=7
+        ), mock.patch.object(device.os, "close"), mock.patch.object(
+            device.termios, "tcgetattr", return_value=attributes
+        ), mock.patch.object(device.termios, "tcsetattr"), mock.patch.object(
+            device.termios, "tcflush"
+        ), mock.patch.object(device.time, "sleep") as sleep, mock.patch.object(
+            device, "write_all"
+        ), mock.patch.object(device, "read_control_response", return_value=bytes(status)):
+            device.run_control("status", "/dev/fake", recover_status_transport=False)
+        sleep.assert_called_once_with(0.0)
+
+    def test_mutation_stops_at_closed_boot_failure(self):
+        status = bytearray(80)
+        status[0] = 1
+        status[79] = 2
+        with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
+            device, "exchange", return_value=bytes(status)
+        ) as exchange:
+            with self.assertRaisesRegex(device.DeviceError, "boot_noise_resolver"):
+                device.run_control("wifi-provision", "/dev/fake", b"payload")
+        self.assertEqual(exchange.call_count, 1)
+
+    def test_mutation_rejects_short_status_preflight(self):
+        status = bytes([1, 0]) + bytes(16)
+        with mock.patch.object(
+            device, "discover_device", return_value=Path("/dev/fake")
+        ), mock.patch.object(device, "exchange", return_value=status) as exchange:
+            with self.assertRaisesRegex(device.DeviceError, "control_invalid"):
+                device.run_control("wifi-provision", "/dev/fake", b"payload")
+        self.assertEqual(exchange.call_count, 1)
+
+    def test_unknown_boot_failure_remains_closed(self):
+        status = bytearray(80)
+        status[79] = 255
+        self.assertEqual(device.status_boot_error(bytes(status)), "boot_unknown")
+
+    def test_status_waits_until_boot_is_complete(self):
+        starting = bytearray(80)
+        starting[78] = 8
+        complete = bytearray(starting)
+        complete[78] = device.BOOT_COMPLETE_STAGE
+        with mock.patch.object(device, "run_control", return_value=bytes(complete)) as run_control, mock.patch.object(
+            device.time, "sleep"
+        ) as sleep:
+            result = device.await_boot_complete(bytes(starting), "/dev/fake")
+        self.assertEqual(result, bytes(complete))
+        sleep.assert_called_once_with(0.25)
+        run_control.assert_called_once_with("status", "/dev/fake", recover_status_transport=False)
+
+    def test_status_boot_wait_is_bounded(self):
+        starting = bytearray(80)
+        starting[78] = 8
+        with mock.patch.object(device.time, "monotonic", side_effect=[0.0, 15.0]):
+            with self.assertRaisesRegex(device.DeviceError, "boot_not_ready"):
+                device.await_boot_complete(bytes(starting), "/dev/fake")
+
+    def test_status_rejects_unknown_completed_boot_stage(self):
+        status = bytearray(80)
+        status[78] = 255
+        with self.assertRaisesRegex(device.DeviceError, "boot_unknown"):
+            device.await_boot_complete(bytes(status), "/dev/fake")
+
+    def test_boot_failure_is_not_persisted_as_a_complete_diagnostic(self):
+        status = bytearray(80)
+        status[79] = 2
+        with mock.patch.object(device.sys, "argv", ["phase3_device.py", "status"]), mock.patch.object(
+            device, "run_control", return_value=bytes(status)
+        ), mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
+            device, "publish_result", return_value=Path("/tmp/status.json")
+        ), mock.patch.object(device.sys, "stdout", io.StringIO()), mock.patch.object(
+            device.sys, "stderr", io.StringIO()
+        ):
+            self.assertEqual(device.main(), 2)
+        publish_diagnostic.assert_not_called()
+
+    def test_control_failure_is_not_persisted_outside_closed_error_set(self):
+        with mock.patch.object(device.sys, "argv", ["phase3_device.py", "status"]), mock.patch.object(
+            device, "run_control", side_effect=device.DeviceError("control_timeout")
+        ), mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
+            device, "publish_result", return_value=Path("/tmp/status.json")
+        ), mock.patch.object(device.sys, "stdout", io.StringIO()), mock.patch.object(
+            device.sys, "stderr", io.StringIO()
+        ):
+            self.assertEqual(device.main(), 2)
+        publish_diagnostic.assert_not_called()
+
+    def test_successful_status_publishes_diagnostic(self):
+        status = bytearray(80)
+        status[78] = 9
+        with mock.patch.object(device.sys, "argv", ["phase3_device.py", "status"]), mock.patch.object(
+            device, "run_control", return_value=bytes(status)
+        ), mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
+            device, "publish_result", return_value=Path("/tmp/status.json")
+        ), mock.patch.object(device.sys, "stdout", io.StringIO()), mock.patch.object(
+            device.sys, "stderr", io.StringIO()
+        ):
+            self.assertEqual(device.main(), 0)
+        publish_diagnostic.assert_called_once()
+
+    def test_status_report_is_bounded_and_contains_no_payload(self):
+        status = bytearray(80)
+        status[26] = 4
+        status[27] = 1
+        status[78] = 7
+        with mock.patch.object(device.sys, "stderr") as stderr:
+            device.report_status(bytes(status))
+        reported = json.loads("".join(call.args[0] for call in stderr.write.call_args_list))
+        self.assertEqual(
+            reported,
+            {
+                "shell_state": 4,
+                "availability": 1,
+                "last_stage": "idle",
+                "last_error": None,
+                "boot_stage": 7,
+                "boot_error": None,
+            },
+        )
+
+    def test_device_state_directory_is_hardened_without_following_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "phase3-device"
+            state.mkdir(mode=0o755)
+            device.ensure_private_directory(state)
+            self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+            target = root / "target"
+            target.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+            with self.assertRaises(device.DeviceError):
+                device.ensure_private_directory(linked)
 
     def test_run_success_requires_valid_result_and_rendered_correlations(self):
         record = {

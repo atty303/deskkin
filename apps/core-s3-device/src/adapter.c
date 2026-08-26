@@ -14,6 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/multi_heap/shared_multi_heap.h>
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/dhcpv4.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/random/random.h>
@@ -38,7 +39,7 @@ struct bounded_completion {
 K_MSGQ_DEFINE(application_commands, sizeof(struct bounded_frame), 4, 4);
 K_MSGQ_DEFINE(reserved_control, sizeof(struct bounded_frame), 1, 4);
 K_MSGQ_DEFINE(worker_completions, sizeof(struct bounded_completion), 8, 4);
-K_THREAD_STACK_DEFINE(service_stack, 12288);
+K_THREAD_STACK_DEFINE(service_stack, 24576);
 static struct k_thread service_thread;
 K_THREAD_STACK_DEFINE(control_stack, 4096);
 static struct k_thread control_thread;
@@ -53,11 +54,81 @@ static int32_t touch_x;
 static int32_t touch_y;
 static uint32_t touch_generation;
 static uint32_t consumed_touch_generation;
+static uint16_t *framebuffer;
+static uint16_t *staging;
 
 extern void rust_main(void);
 extern void deskkin_rust_service_worker(void);
+extern void deskkin_rust_set_boot_status(uint8_t stage, uint8_t error);
 extern size_t deskkin_rust_control_snapshot(const uint8_t *input, size_t input_length,
-					   uint8_t *output);
+						   uint8_t *output);
+uint16_t *deskkin_framebuffer_alloc(void);
+static void display_boot_stage(uint8_t stage, uint8_t error);
+
+static void publish_boot_status(uint8_t stage, uint8_t error)
+{
+	deskkin_rust_set_boot_status(stage, error);
+}
+
+void deskkin_boot_trace(uint8_t stage, uint8_t error)
+{
+	display_boot_stage(stage, error);
+}
+
+static void display_boot_color(uint16_t color)
+{
+	if (!device_is_ready(display)) {
+		return;
+	}
+	uint16_t *pixels = deskkin_framebuffer_alloc();
+	if (pixels == NULL) {
+		return;
+	}
+	for (size_t index = 0; index < 320U * 240U; ++index) {
+		pixels[index] = color;
+	}
+	const struct display_buffer_descriptor descriptor = {
+		.buf_size = FRAMEBUFFER_BYTES,
+		.width = 320,
+		.height = 240,
+		.pitch = 320,
+	};
+	if (display_write(display, 0, 0, &descriptor, pixels) != 0) {
+		return;
+	}
+	(void)display_blanking_off(display);
+}
+
+static void display_boot_stage(uint8_t stage, uint8_t error)
+{
+	if (error != 0U) {
+		display_boot_color(0xF800);
+		return;
+	}
+	if (stage < 4U || stage > 8U || !device_is_ready(display)) {
+		return;
+	}
+	uint16_t *pixels = deskkin_framebuffer_alloc();
+	if (pixels == NULL) {
+		return;
+	}
+	for (size_t y = 0; y < 240U; ++y) {
+		for (size_t x = 0; x < 320U; ++x) {
+			const size_t block = x / 32U;
+			const bool filled = block < stage;
+			const bool separator = x % 32U >= 28U;
+			pixels[y * 320U + x] = filled && !separator ? 0xFFFF : 0x0000;
+		}
+	}
+	const struct display_buffer_descriptor descriptor = {
+		.buf_size = FRAMEBUFFER_BYTES,
+		.width = 320,
+		.height = 240,
+		.pitch = 320,
+	};
+	(void)display_write(display, 0, 0, &descriptor, pixels);
+	(void)display_blanking_off(display);
+}
 
 static void touch_callback(struct input_event *event, void *user_data)
 {
@@ -76,17 +147,23 @@ INPUT_CALLBACK_DEFINE(touch, touch_callback, NULL);
 
 uint16_t *deskkin_framebuffer_alloc(void)
 {
-	uint16_t *buffer = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32,
-							FRAMEBUFFER_BYTES);
-	if (buffer != NULL) {
-		memset(buffer, 0, FRAMEBUFFER_BYTES);
+	if (framebuffer == NULL) {
+		framebuffer = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32,
+							      FRAMEBUFFER_BYTES);
+		if (framebuffer != NULL) {
+			memset(framebuffer, 0, FRAMEBUFFER_BYTES);
+		}
 	}
-	return buffer;
+	return framebuffer;
 }
 
 uint16_t *deskkin_staging_alloc(void)
 {
-	return shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32, FRAMEBUFFER_BYTES);
+	if (staging == NULL) {
+		staging = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32,
+							  FRAMEBUFFER_BYTES);
+	}
+	return staging;
 }
 
 int deskkin_display_write(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
@@ -227,11 +304,42 @@ static int uart_write_completion(const struct bounded_completion *completion)
 	return 0;
 }
 
-static void uart_flush_input(void)
+static int uart_read_frame(struct bounded_frame *frame)
 {
-	uint8_t ignored;
-	while (uart_poll_in(console, &ignored) == 0) {
+	uint8_t prefix[3] = {0};
+	size_t prefix_length = 0;
+	const int64_t prefix_deadline = k_uptime_get() + 2000;
+	while (k_uptime_get() < prefix_deadline) {
+		uint8_t byte;
+		if (uart_read_byte(&byte, prefix_deadline) != 0) {
+			return -ETIMEDOUT;
+		}
+		if (prefix_length < sizeof(prefix)) {
+			prefix[prefix_length++] = byte;
+		} else {
+			prefix[0] = prefix[1];
+			prefix[1] = prefix[2];
+			prefix[2] = byte;
+		}
+		if (prefix_length < sizeof(prefix)) {
+			continue;
+		}
+		const size_t length = ((size_t)prefix[0] << 8) | prefix[1];
+		if (length < 28 || length > CONTROL_FRAME_MAX || prefix[2] != 1U) {
+			continue;
+		}
+		frame->length = length;
+		frame->bytes[0] = prefix[2];
+		const int64_t payload_deadline = k_uptime_get() + 2000;
+		for (size_t index = 1; index < length; ++index) {
+			if (uart_read_byte(&frame->bytes[index], payload_deadline) != 0) {
+				memset(frame, 0, sizeof(*frame));
+				return -ETIMEDOUT;
+			}
+		}
+		return 0;
 	}
+	return -ETIMEDOUT;
 }
 
 static void uart_write_closed_error(const struct bounded_frame *frame, uint8_t status)
@@ -243,34 +351,32 @@ static void uart_write_closed_error(const struct bounded_frame *frame, uint8_t s
 	(void)uart_write_completion(&completion);
 }
 
+static int take_matching_completion(const struct bounded_frame *frame,
+				    struct bounded_completion *completion)
+{
+	const int64_t deadline = k_uptime_get() + 5000;
+	while (k_uptime_get() < deadline) {
+		const int64_t remaining = deadline - k_uptime_get();
+		if (k_msgq_get(&worker_completions, completion, K_MSEC(remaining)) != 0) {
+			return -ETIMEDOUT;
+		}
+		if (completion->length >= 18 &&
+		    memcmp(&completion->bytes[2], &frame->bytes[2], 16) == 0) {
+			return 0;
+		}
+		memset(completion, 0, sizeof(*completion));
+	}
+	return -ETIMEDOUT;
+}
+
 static void control_entry(void *first, void *second, void *third)
 {
 	ARG_UNUSED(first);
 	ARG_UNUSED(second);
 	ARG_UNUSED(third);
 	for (;;) {
-		uint8_t prefix[2];
-		const int64_t prefix_deadline = k_uptime_get() + 2000;
-		if (uart_read_byte(&prefix[0], prefix_deadline) != 0 ||
-		    uart_read_byte(&prefix[1], prefix_deadline) != 0) {
-			continue;
-		}
-		const size_t length = ((size_t)prefix[0] << 8) | prefix[1];
-		if (length < 28 || length > CONTROL_FRAME_MAX) {
-			uart_flush_input();
-			continue;
-		}
-		struct bounded_frame frame = {.length = length};
-		const int64_t payload_deadline = k_uptime_get() + 2000;
-		for (size_t index = 0; index < length; ++index) {
-			if (uart_read_byte(&frame.bytes[index], payload_deadline) != 0) {
-				frame.length = 0;
-				break;
-			}
-		}
-		if (frame.length == 0) {
-			memset(&frame, 0, sizeof(frame));
-			uart_flush_input();
+		struct bounded_frame frame = {0};
+		if (uart_read_frame(&frame) != 0) {
 			continue;
 		}
 		struct k_msgq *queue = frame.bytes[1] == 9 ? &reserved_control : &application_commands;
@@ -292,7 +398,7 @@ static void control_entry(void *first, void *second, void *third)
 			continue;
 		}
 		struct bounded_completion completion;
-		if (k_msgq_get(&worker_completions, &completion, K_MSEC(5000)) != 0) {
+		if (take_matching_completion(&frame, &completion) != 0) {
 			k_msgq_purge(queue);
 			uart_write_closed_error(&frame, 8);
 			memset(&frame, 0, sizeof(frame));
@@ -373,6 +479,22 @@ int deskkin_nvs_delete(uint16_t record_id)
 	return result == 0 ? nvs_delete(&storage, record_id) : result;
 }
 
+static int wifi_connection_state(struct net_if *iface)
+{
+	struct wifi_iface_status status = {0};
+	const int result =
+		net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status, sizeof(status));
+	return result == 0 ? status.state : result;
+}
+
+int deskkin_wifi_disconnect(void)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	net_dhcpv4_stop(iface);
+	const int result = net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
+	return result == -EALREADY ? 0 : result;
+}
+
 int deskkin_wifi_associate(const uint8_t *ssid, uint8_t ssid_length, const uint8_t *psk,
 			   uint8_t psk_length)
 {
@@ -381,6 +503,26 @@ int deskkin_wifi_associate(const uint8_t *ssid, uint8_t ssid_length, const uint8
 		return -EINVAL;
 	}
 	struct net_if *iface = net_if_get_wifi_sta();
+	const int64_t deadline = k_uptime_get() + WIFI_ASSOCIATION_TIMEOUT_MS;
+	if (wifi_connection_state(iface) == WIFI_STATE_COMPLETED) {
+		const int result = deskkin_wifi_disconnect();
+		if (result != 0) {
+			return result;
+		}
+		while (k_uptime_get() < deadline) {
+			const int state = wifi_connection_state(iface);
+			if (state < 0) {
+				return state;
+			}
+			if (state <= WIFI_STATE_INACTIVE) {
+				break;
+			}
+			k_msleep(50);
+		}
+		if (wifi_connection_state(iface) > WIFI_STATE_INACTIVE) {
+			return -ETIMEDOUT;
+		}
+	}
 	struct wifi_connect_req_params parameters = {
 		.ssid = ssid,
 		.ssid_length = ssid_length,
@@ -392,19 +534,55 @@ int deskkin_wifi_associate(const uint8_t *ssid, uint8_t ssid_length, const uint8
 		.mfp = WIFI_MFP_OPTIONAL,
 		.timeout = WIFI_ASSOCIATION_TIMEOUT_MS,
 	};
-	return net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &parameters, sizeof(parameters));
+	bool connect_requested = false;
+	while (k_uptime_get() < deadline) {
+		if (k_msgq_num_used_get(&reserved_control) > 0 ||
+		    k_msgq_num_used_get(&application_commands) > 0) {
+			return -EINTR;
+		}
+		const int state = wifi_connection_state(iface);
+		if (connect_requested && state == WIFI_STATE_COMPLETED) {
+			return 0;
+		}
+		if (state < 0) {
+			return state;
+		}
+		if (connect_requested && state < WIFI_STATE_SCANNING) {
+			connect_requested = false;
+		}
+		if (!connect_requested && state >= WIFI_STATE_SCANNING) {
+			(void)deskkin_wifi_disconnect();
+			k_msleep(50);
+			continue;
+		}
+		if (!connect_requested && state < WIFI_STATE_SCANNING) {
+			const int result = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &parameters,
+						   sizeof(parameters));
+			if (result == 0 || result == -EALREADY) {
+				connect_requested = true;
+			} else if (result != -EAGAIN && result != -EIO && result != -EBUSY) {
+				return result;
+			}
+		}
+		k_msleep(50);
+	}
+	return -ETIMEDOUT;
 }
 
 int deskkin_wait_dhcp(void)
 {
 	struct net_if *iface = net_if_get_wifi_sta();
+	if (iface->config.dhcpv4.state != NET_DHCPV4_BOUND) {
+		net_dhcpv4_start(iface);
+	}
 	const int64_t deadline = k_uptime_get() + DHCP_TIMEOUT_MS;
 	while (k_uptime_get() < deadline) {
 		if (k_msgq_num_used_get(&reserved_control) > 0 ||
 		    k_msgq_num_used_get(&application_commands) > 0) {
 			return -EINTR;
 		}
-		if (net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != NULL) {
+		if (iface->config.dhcpv4.state == NET_DHCPV4_BOUND &&
+		    net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != NULL) {
 			return 0;
 		}
 		k_msleep(50);
@@ -427,9 +605,8 @@ int deskkin_tcp_connect(const uint8_t host[4], uint16_t port)
 	struct sockaddr_in address = {
 		.sin_family = AF_INET,
 		.sin_port = htons(port),
-		.sin_addr = {.s_addr = htonl(((uint32_t)host[0] << 24) | ((uint32_t)host[1] << 16) |
-						 ((uint32_t)host[2] << 8) | host[3])},
 	};
+	memcpy(&address.sin_addr.s_addr, host, sizeof(address.sin_addr.s_addr));
 	if (zsock_connect(descriptor, (struct sockaddr *)&address, sizeof(address)) != 0) {
 		const int error = -errno;
 		(void)zsock_close(descriptor);
@@ -484,13 +661,26 @@ bool deskkin_devices_ready(void)
 
 int main(void)
 {
-	if (!deskkin_devices_ready()) {
+	if (!device_is_ready(console)) {
+		display_boot_color(0xF800); /* red: USB control unavailable */
 		return 1;
 	}
 	if (k_thread_create(&control_thread, control_stack, K_THREAD_STACK_SIZEOF(control_stack),
-			    control_entry, NULL, NULL, NULL, 4, 0, K_NO_WAIT) == NULL) {
+			    control_entry, NULL, NULL, NULL, -1, 0, K_NO_WAIT) == NULL) {
+		display_boot_color(0xF800);
 		return 1;
 	}
+	publish_boot_status(2, 0);
+	display_boot_color(0xFD20); /* orange: USB control thread started */
+	if (!deskkin_devices_ready()) {
+		display_boot_color(0xF800);
+		publish_boot_status(2, 1);
+		for (;;) {
+			k_sleep(K_FOREVER);
+		}
+	}
+	publish_boot_status(3, 0);
+	display_boot_color(0x001F); /* blue: platform devices ready */
 	rust_main();
 	return 0;
 }

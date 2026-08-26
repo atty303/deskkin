@@ -132,7 +132,8 @@ bounded serial transfer.
 
 The task surface is `phase3:device:profile`, `phase3:device:build`,
 `phase3:device:flash`, `phase3:device:identity`,
-`phase3:device:provision`, `phase3:device:run`, and
+`phase3:device:provision`, the read-only `phase3:device:status`,
+`phase3:device:run`, and
 `phase3:device:recover -- --erase-storage`.
 
 ## Diagnostics and licensing

@@ -37,6 +37,8 @@ static RESULT_ATTEMPT: AtomicU32 = AtomicU32::new(0);
 static FRAME_ATTEMPT: AtomicU32 = AtomicU32::new(0);
 static LAST_STAGE: AtomicU8 = AtomicU8::new(0);
 static LAST_ERROR: AtomicU8 = AtomicU8::new(0);
+static BOOT_STAGE: AtomicU8 = AtomicU8::new(BootStage::Starting as u8);
+static BOOT_ERROR: AtomicU8 = AtomicU8::new(BootError::None as u8);
 static SESSION_CONTEXT: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 static OPERATION_CONTEXT: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 static OWNER_GENERATION_HIGH: AtomicU32 = AtomicU32::new(0);
@@ -48,6 +50,7 @@ const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
 
 unsafe extern "C" {
+    fn deskkin_boot_trace(stage: u8, error: u8);
     fn deskkin_csrand(output: *mut u8, length: usize) -> c_int;
     fn deskkin_start_service_worker() -> c_int;
     fn deskkin_service_take_command(output: *mut u8, capacity: usize) -> c_int;
@@ -67,6 +70,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_take_touch(x: *mut i32, y: *mut i32) -> bool;
+    fn deskkin_wifi_disconnect() -> c_int;
     fn deskkin_wifi_associate(
         ssid: *const u8,
         ssid_length: u8,
@@ -99,6 +103,41 @@ enum ServiceStatus {
     StoreFailed = 4,
     PeerMismatch = 5,
     Busy = 6,
+}
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum BootStage {
+    Starting = 1,
+    NoiseResolverReady = 4,
+    ServiceWorkerReady = 5,
+    UiPlatformReady = 6,
+    UiComponentReady = 7,
+    FramebufferReady = 8,
+    FirstFrameReady = 9,
+}
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum BootError {
+    None = 0,
+    NoiseResolver = 2,
+    ServiceWorker = 3,
+    UiPlatform = 4,
+    UiComponent = 5,
+    Framebuffer = 6,
+    DisplayTransfer = 7,
+    DisplayEnable = 8,
+}
+
+fn set_boot_stage(stage: BootStage) {
+    BOOT_STAGE.store(stage as u8, Ordering::Release);
+    unsafe { deskkin_boot_trace(stage as u8, BootError::None as u8) };
+}
+
+fn fail_boot(error: BootError) {
+    BOOT_ERROR.store(error as u8, Ordering::Release);
+    unsafe { deskkin_boot_trace(BOOT_STAGE.load(Ordering::Acquire), error as u8) };
 }
 
 struct ZephyrRandom;
@@ -278,16 +317,15 @@ impl Platform for DevicePlatform {
     }
 }
 
-fn prove_noise_resolver() {
-    let parameters = NOISE_PATTERN
-        .parse()
-        .expect("approved Noise pattern must parse");
+fn prove_noise_resolver() -> Result<(), ()> {
+    let parameters = NOISE_PATTERN.parse().map_err(|_| ())?;
     let resolver = Box::new(ZephyrResolver::new());
     let keypair = snow::Builder::with_resolver(parameters, resolver)
         .generate_keypair()
-        .expect("Zephyr CSPRNG and approved primitives must generate a keypair");
+        .map_err(|_| ())?;
     let mut private = zeroize::Zeroizing::new(keypair.private);
     private.zeroize();
+    Ok(())
 }
 
 fn read_slot(record_id: u16, output: &mut [u8]) -> Result<Option<usize>, ServiceStatus> {
@@ -438,6 +476,7 @@ fn wifi_provision(payload: &[u8]) -> ServiceStatus {
     .map_or_else(|error| error, |()| ServiceStatus::Success);
     if matches!(result, ServiceStatus::Success) {
         CONFIG_PRESENT.store(1, Ordering::Release);
+        let _ = unsafe { deskkin_wifi_disconnect() };
     }
     result
 }
@@ -464,6 +503,7 @@ fn clear_config() -> ServiceStatus {
     .map_or_else(|error| error, |()| ServiceStatus::Success);
     if matches!(result, ServiceStatus::Success) {
         CONFIG_PRESENT.store(0, Ordering::Release);
+        let _ = unsafe { deskkin_wifi_disconnect() };
     }
     result
 }
@@ -1396,6 +1436,12 @@ fn connect_once(pair_requested: bool) -> Result<(), SessionFailure> {
 }
 
 #[no_mangle]
+extern "C" fn deskkin_rust_set_boot_status(stage: u8, error: u8) {
+    BOOT_STAGE.store(stage, Ordering::Release);
+    BOOT_ERROR.store(error, Ordering::Release);
+}
+
+#[no_mangle]
 unsafe extern "C" fn deskkin_rust_control_snapshot(
     input: *const u8,
     input_length: usize,
@@ -1448,7 +1494,9 @@ unsafe extern "C" fn deskkin_rust_control_snapshot(
     output[72..76].copy_from_slice(&FRAME_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
     output[76] = LAST_STAGE.load(Ordering::Acquire);
     output[77] = LAST_ERROR.load(Ordering::Acquire);
-    78
+    output[78] = BOOT_STAGE.load(Ordering::Acquire);
+    output[79] = BOOT_ERROR.load(Ordering::Acquire);
+    80
 }
 
 fn handle_control(frame: deskkin_core_s3::ControlFrame<'_>) -> ServiceStatus {
@@ -1541,7 +1589,9 @@ fn publish_control_completion(
                 .copy_from_slice(&FRAME_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
             completion[76] = LAST_STAGE.load(Ordering::Acquire);
             completion[77] = LAST_ERROR.load(Ordering::Acquire);
-            completion_length = 78;
+            completion[78] = BOOT_STAGE.load(Ordering::Acquire);
+            completion[79] = BOOT_ERROR.load(Ordering::Acquire);
+            completion_length = 80;
         } else if control.command == deskkin_core_s3::ControlCommand::Run {
             completion[26..30].copy_from_slice(&RUN_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
             completion_length = 30;
@@ -1624,11 +1674,25 @@ fn finish_active_control(active: ActiveControl) {
 
 #[no_mangle]
 extern "C" fn rust_main() {
-    prove_noise_resolver();
-    assert_eq!(unsafe { deskkin_start_service_worker() }, 0);
+    if prove_noise_resolver().is_err() {
+        fail_boot(BootError::NoiseResolver);
+        loop {
+            unsafe { deskkin_sleep_ms(1_000) };
+        }
+    }
+    set_boot_stage(BootStage::NoiseResolverReady);
+    if unsafe { deskkin_start_service_worker() } != 0 {
+        fail_boot(BootError::ServiceWorker);
+        loop {
+            unsafe { deskkin_sleep_ms(1_000) };
+        }
+    }
+    set_boot_stage(BootStage::ServiceWorkerReady);
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
-        spawner.spawn(run_ui()).expect("the UI owner must fit");
+        if spawner.spawn(run_ui()).is_err() {
+            fail_boot(BootError::UiPlatform);
+        }
     });
 }
 
@@ -1667,6 +1731,7 @@ extern "C" fn deskkin_rust_service_worker() {
         let pair_requested = action == 1;
         if pair_requested {
             connection.restart_after_pairing();
+            next_attempt_ms = 0;
         }
         let now = Instant::now().as_millis();
         let paired = load_identity()
@@ -1701,23 +1766,21 @@ extern "C" fn deskkin_rust_service_worker() {
                     next_attempt_ms = Instant::now().as_millis().saturating_add(u64::from(delay));
                 }
                 Err(error) => {
-                    LAST_ERROR.store(
-                        match error {
-                            SessionFailure::Store => 1,
-                            SessionFailure::Wifi => 2,
-                            SessionFailure::Dhcp => 3,
-                            SessionFailure::Tcp => 4,
-                            SessionFailure::Noise => 5,
-                            SessionFailure::Protocol => 6,
-                            SessionFailure::Rejected => 7,
-                            SessionFailure::Cancelled => 9,
-                            SessionFailure::Control(_) => 0,
-                            SessionFailure::Incompatible
-                            | SessionFailure::AuthorizationDenied
-                            | SessionFailure::SessionBusy => 6,
-                        },
-                        Ordering::Release,
-                    );
+                    let error_code = match error {
+                        SessionFailure::Store => 1,
+                        SessionFailure::Wifi => 2,
+                        SessionFailure::Dhcp => 3,
+                        SessionFailure::Tcp => 4,
+                        SessionFailure::Noise => 5,
+                        SessionFailure::Protocol => 6,
+                        SessionFailure::Rejected => 7,
+                        SessionFailure::Cancelled => 9,
+                        SessionFailure::Control(_) => 0,
+                        SessionFailure::Incompatible
+                        | SessionFailure::AuthorizationDenied
+                        | SessionFailure::SessionBusy => 6,
+                    };
+                    LAST_ERROR.store(error_code, Ordering::Release);
                     let delay = connection.connection_failed().unwrap_or(5_000);
                     next_attempt_ms = Instant::now().as_millis().saturating_add(u64::from(delay));
                 }
@@ -1729,20 +1792,39 @@ extern "C" fn deskkin_rust_service_worker() {
 #[embassy_executor::task]
 async fn run_ui() {
     let state = Rc::new(RefCell::new(None));
-    slint::platform::set_platform(Box::new(DevicePlatform {
+    if slint::platform::set_platform(Box::new(DevicePlatform {
         window: state.clone(),
     }))
-    .expect("the device platform installs once");
-    let component = DeviceWindow::new().expect("the device UI instantiates");
-    let window = state.borrow().clone().expect("Slint requests one window");
+    .is_err()
+    {
+        fail_boot(BootError::UiPlatform);
+        return;
+    }
+    set_boot_stage(BootStage::UiPlatformReady);
+    let Ok(component) = DeviceWindow::new() else {
+        fail_boot(BootError::UiComponent);
+        return;
+    };
+    let Some(window) = state.borrow().clone() else {
+        fail_boot(BootError::UiComponent);
+        return;
+    };
     window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
     component.set_shell_state("SetupRequired".into());
     component.set_status_text("Unknown".into());
     component.on_pair(|| UI_ACTION.store(1, Ordering::Release));
     component.on_confirm(|| UI_ACTION.store(2, Ordering::Release));
     component.on_cancel(|| UI_ACTION.store(3, Ordering::Release));
-    component.show().expect("the device UI shows");
-    let framebuffer = Framebuffer::new().expect("external display buffers must allocate");
+    if component.show().is_err() {
+        fail_boot(BootError::UiComponent);
+        return;
+    }
+    set_boot_stage(BootStage::UiComponentReady);
+    let Some(framebuffer) = Framebuffer::new() else {
+        fail_boot(BootError::Framebuffer);
+        return;
+    };
+    set_boot_stage(BootStage::FramebufferReady);
     let mut first_frame = true;
     loop {
         slint::platform::update_timers_and_animations();
@@ -1808,7 +1890,10 @@ async fn run_ui() {
             });
         });
         let changed = ranges.iter().any(|range| range.start != range.end);
-        transfer_dirty(&framebuffer, &ranges).expect("display transfer must succeed");
+        if transfer_dirty(&framebuffer, &ranges).is_err() {
+            fail_boot(BootError::DisplayTransfer);
+            return;
+        }
         if changed {
             UI_FRAME_DIGEST.store(framebuffer.digest(), Ordering::Release);
             if VALID_RESULT.load(Ordering::Acquire) == 1 {
@@ -1817,8 +1902,12 @@ async fn run_ui() {
             }
         }
         if first_frame {
-            assert_eq!(unsafe { deskkin_display_enable() }, 0);
+            if unsafe { deskkin_display_enable() } != 0 {
+                fail_boot(BootError::DisplayEnable);
+                return;
+            }
             first_frame = false;
+            set_boot_stage(BootStage::FirstFrameReady);
         }
         embassy_time::Timer::after_millis(10).await;
     }

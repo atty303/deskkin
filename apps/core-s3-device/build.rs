@@ -2,5 +2,9 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=../../ui/status-surface.slint");
-    slint_build::compile("ui/device.slint").expect("the Phase 3P CoreS3 UI must compile");
+    let configuration = slint_build::CompilerConfiguration::new()
+        .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer)
+        .with_scale_factor(1.0);
+    slint_build::compile_with_config("ui/device.slint", configuration)
+        .expect("the Phase 3P CoreS3 UI must compile");
 }

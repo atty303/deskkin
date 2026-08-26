@@ -79,7 +79,7 @@ run = "cargo run --locked --quiet --bin deskkin-diagnostics --"
 
 [tasks."phase3:host"]
 description = "Run one explicit Phase 3 desktop-host command"
-run = "cargo run --locked --quiet -p deskkin-desktop-host --"
+run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host --"
 
 [tasks."phase3:simulator"]
 description = "Run one explicit Phase 3 device-simulator command"
@@ -108,6 +108,10 @@ run = "python scripts/phase3_device.py identity"
 [tasks."phase3:device:provision"]
 description = "Provision one CoreS3 Wi-Fi profile after a live checkpoint"
 run = "python scripts/phase3_device.py provision"
+
+[tasks."phase3:device:status"]
+description = "Read the CoreS3 boot and application status without mutation"
+run = "python scripts/phase3_device.py status"
 
 [tasks."phase3:device:run"]
 description = "Start the already configured CoreS3 application"
