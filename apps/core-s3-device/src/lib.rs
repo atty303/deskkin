@@ -191,6 +191,18 @@ struct DirtyRange {
 
 impl DirtyRange {
     const EMPTY: Self = Self { start: 0, end: 0 };
+
+    fn include(&mut self, range: Range<usize>) {
+        let start = range.start as u16;
+        let end = range.end as u16;
+        if self.start == self.end {
+            self.start = start;
+            self.end = end;
+        } else {
+            self.start = self.start.min(start);
+            self.end = self.end.max(end);
+        }
+    }
 }
 
 struct Framebuffer {
@@ -250,10 +262,7 @@ impl LineBufferProvider for &mut Capture<'_> {
                 destination.len(),
             );
         }
-        self.ranges[line] = DirtyRange {
-            start: range.start as u16,
-            end: range.end as u16,
-        };
+        self.ranges[line].include(range);
     }
 }
 

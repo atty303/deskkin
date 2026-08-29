@@ -581,8 +581,7 @@ int deskkin_wait_dhcp(void)
 		    k_msgq_num_used_get(&application_commands) > 0) {
 			return -EINTR;
 		}
-		if (iface->config.dhcpv4.state == NET_DHCPV4_BOUND &&
-		    net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != NULL) {
+		if (net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != NULL) {
 			return 0;
 		}
 		k_msleep(50);
