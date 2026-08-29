@@ -12,7 +12,7 @@ toolchain_name=deskkin-esp
 xtensa_archive=toolchain_gnu_linux-x86_64_xtensa-espressif_esp32s3_zephyr-elf.tar.xz
 xtensa_digest=904d42b75e4d819c58b0db640783911e508b9ee2a627eb5daffb907465a34be1
 
-"$repo_root/scripts/bootstrap_gate1a.sh"
+DESKKIN_GATE1A_REQUIRE_QEMU=0 "$repo_root/scripts/bootstrap_gate1a.sh"
 "$state_dir/venv/bin/python" -m pip install --disable-pip-version-check --require-hashes -r "$repo_root/requirements/gate1c.lock"
 
 download="$downloads_dir/$xtensa_archive"

@@ -13,6 +13,12 @@ release_url="https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${s
 minimal_name="zephyr-sdk-${sdk_version}_linux-x86_64_minimal.tar.xz"
 arm_name="toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz"
 riscv_name="toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz"
+require_qemu=${DESKKIN_GATE1A_REQUIRE_QEMU:-1}
+
+if [[ "$require_qemu" != 0 && "$require_qemu" != 1 ]]; then
+  printf 'DESKKIN_GATE1A_REQUIRE_QEMU must be 0 or 1\n' >&2
+  exit 2
+fi
 
 mkdir -p "$state_dir" "$downloads_dir"
 chmod 700 "$state_dir" "$downloads_dir"
@@ -73,7 +79,7 @@ download_verified "$minimal_name" ca9bc0ff66fafca1dac9d592a36d953cf16d096a9d09b1
 download_verified "$arm_name" 21b85981cb5a1818d9bc53d82af80f208946ec038b982ff1907287572ed3a634
 download_verified "$riscv_name" 01750834c471fbdb335c1b8b8aee17010a1968938957db85640c366235771a38
 
-if [[ ! -x "$sdk_dir/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc" || ! -x "$sdk_dir/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gcc" || ! -x "$sdk_dir/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-arm" || ! -x "$sdk_dir/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-riscv32" ]]; then
+if [[ ! -x "$sdk_dir/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc" || ! -x "$sdk_dir/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gcc" || ( "$require_qemu" == 1 && ( ! -x "$sdk_dir/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-arm" || ! -x "$sdk_dir/sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-riscv32" ) ) ]]; then
   stage=$(mktemp -d "$state_dir/sdk-stage.XXXXXX")
   trap 'rm -rf -- "$stage"' EXIT
   tar -xJf "$downloads_dir/$minimal_name" -C "$stage"
@@ -82,7 +88,7 @@ if [[ ! -x "$sdk_dir/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc" || ! -x "$sdk_
   tar -xJf "$downloads_dir/$arm_name" -C "$stage/sdk/gnu"
   tar -xJf "$downloads_dir/$riscv_name" -C "$stage/sdk/gnu"
   "$stage/sdk/hosttools/zephyr-sdk-x86_64-hosttools-standalone-0.10.sh" -y -d "$stage/sdk"
-  "$venv_dir/bin/python" - "$stage/sdk" "$repo_root/requirements/gate1a-sdk.json" <<'PY'
+  "$venv_dir/bin/python" - "$stage/sdk" "$repo_root/requirements/gate1a-sdk.json" "$require_qemu" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -90,7 +96,10 @@ import sys
 
 sdk = pathlib.Path(sys.argv[1])
 manifest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+require_qemu = sys.argv[3] == "1"
 for relative, expected in manifest["files"].items():
+    if not require_qemu and pathlib.PurePosixPath(relative).name.startswith("qemu-system-"):
+        continue
     path = sdk / relative
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
         raise SystemExit(f"staged Gate 1A SDK validation failed: {relative}")
@@ -106,7 +115,7 @@ PY
   fi
 fi
 
-"$venv_dir/bin/python" - "$sdk_dir" "$repo_root/requirements/gate1a-sdk.json" <<'PY'
+"$venv_dir/bin/python" - "$sdk_dir" "$repo_root/requirements/gate1a-sdk.json" "$require_qemu" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -114,7 +123,10 @@ import sys
 
 sdk = pathlib.Path(sys.argv[1])
 manifest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+require_qemu = sys.argv[3] == "1"
 for relative, expected in manifest["files"].items():
+    if not require_qemu and pathlib.PurePosixPath(relative).name.startswith("qemu-system-"):
+        continue
     path = sdk / relative
     if not path.is_file():
         raise SystemExit(f"Gate 1A SDK file missing: {relative}")
