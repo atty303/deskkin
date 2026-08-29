@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, and Phase 3 complete; Phase 3P implementation complete, physical qualification pending
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, and Phase 3P complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 First connector: Unraid
@@ -11,9 +11,9 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, Phase 3 paired loopback host slice, and the Phase 3P host/device/tooling slice
+Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, Phase 3 paired loopback host slice, and the physically qualified Phase 3P host/device/tooling slice
 Application dependencies: approved Gate 1A, Phase 2, Phase 3, and exact Phase 3P sets resolved in the root and device lockfiles
-Next action: obtain live authority and physically qualify Phase 3P before planning Phase 4
+Next action: prepare a separately approved Phase 4 planning checkpoint; do not access an Unraid provider yet
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -455,9 +455,13 @@ live device mutation. Flashing, real provisioning, identity initialization,
 pairing, and power cycling require an immediate qualification approval after
 showing the exact targets and retained plaintext-NVS state.
 
-After approved physical qualification, record evidence in a third documentation
-commit. The selected residual state retains demo firmware, Wi-Fi credentials,
-and Noise identity in device flash; cleanup is never implicit.
+The approved physical qualification completed on 2026-08-29. Its observed
+pairing, cancellation, availability mapping, disconnect recovery, pinned
+reconnect, power-cycle recovery, repairs, verification limits, and retained
+plaintext-NVS state are recorded in
+[`phase-3p-physical-qualification.md`](phase-3p-physical-qualification.md).
+The selected residual state retains demo firmware, Wi-Fi credentials, and Noise
+identity in device flash; cleanup is never implicit.
 
 ## Phase 4: Unraid read-only feature
 
