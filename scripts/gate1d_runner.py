@@ -35,7 +35,7 @@ INPUTS = (
     "west.yml",
     "mise.toml",
     "mise.lock",
-    "requirements/gate1c.lock",
+    "requirements/core-s3.lock",
     "scripts/bootstrap_gate1c.sh",
     "scripts/gate_runner.py",
     "scripts/gate1c_runner.py",

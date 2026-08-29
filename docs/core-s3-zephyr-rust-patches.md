@@ -1,16 +1,15 @@
-# Gate 1C local patch series
+# CoreS3 Zephyr Rust patch series
 
-Gate 1C keeps an ordered local patch series against `zephyr-lang-rust` commit
+Deskkin keeps an ordered local patch series against `zephyr-lang-rust` commit
 `dd73abc242e995784da62352fe8c70d9a6c7ac2e`. It does not create a remote fork
 or change another maintained module. The repository bootstrap verifies that
-each patch applies, or is already applied, before the gate runs.
+each patch applies, or is already applied, before the CoreS3 build runs.
 
 No upstream issue or pull request has been created. Opening either is a remote
-state change and requires separate approval. Gate 1C passed on hardware; the
-upstream strategy remains to split the series by concern, add the smallest
-maintainer-accepted ESP32-S3 build test, and obtain issue or pull-request URLs
-before these patches are considered for use beyond this local feasibility
-spike.
+state change and requires separate approval. The patches were promoted from
+the completed Gate 1C evidence into the current CoreS3 product build. The
+upstream strategy remains to split the series by concern and add the smallest
+maintainer-accepted ESP32-S3 build test before removing the local copies.
 
 ## Retained patches
 
@@ -36,19 +35,15 @@ spike.
 
 The first three patches establish the compiler target and build path. The last
 two are narrowly demonstrated binding-generation fixes discovered by the
-CoreS3 build. The Gate 1C sample and runner are the local proof: they compile a
-Rust `no_std` image, link bidirectional C ABI calls, exercise the selected
-critical-section implementation, and build normal and deliberate-panic
-firmware. Physical diagnostic run
-`015a39fd-7191-45ef-8ca5-4ea5681d8514` supplied the final serial oracle for
-boot, bidirectional ABI values, nested critical-section and interrupt-state
-restoration, allocation/free, deliberate panic, and normal inert-idle cleanup.
+CoreS3 build. Gate 1C physical diagnostic run
+`015a39fd-7191-45ef-8ca5-4ea5681d8514` supplied the original serial oracle.
+The maintained proof is now the clean `apps/core-s3-device` build plus the
+physical Phase 3P qualification recorded in
+[`phase-3p-physical-qualification.md`](phase-3p-physical-qualification.md).
 
-## Stop boundary
+## Maintenance boundary
 
-Discard this series, the Gate 1C sample, `espup`, and the repository-local ESP
-toolchain if the physical gate fails and cannot be repaired within the approved
-target mapping, compiler/link arguments, cfg/atomic/binding, or
-compiler-builtins boundary. Any required scheduler, calling-convention, Rust
-compiler, driver-subsystem, Slint, or second maintained-module change stops the
-gate for a new architecture decision.
+Remove a patch when the pinned or an approved later `zephyr-lang-rust` revision
+provides the equivalent behavior and the clean CoreS3 build passes without it.
+Any required scheduler, calling-convention, Rust compiler, driver-subsystem,
+Slint, or second maintained-module change remains a new architecture decision.

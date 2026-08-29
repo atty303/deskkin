@@ -93,6 +93,10 @@ run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-diagnostics
 description = "Create the ignored age-encrypted Phase 3P Wi-Fi profile"
 run = "python scripts/phase3_device.py profile"
 
+[tasks."phase3:device:bootstrap"]
+description = "Prepare the repository-local CoreS3 Zephyr and Rust toolchains"
+run = "./scripts/bootstrap_core_s3.sh"
+
 [tasks."phase3:device:build"]
 description = "Build the Phase 3P CoreS3 firmware without touching a device"
 run = "python scripts/phase3_device.py build"

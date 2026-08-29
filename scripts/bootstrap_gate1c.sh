@@ -13,7 +13,7 @@ xtensa_archive=toolchain_gnu_linux-x86_64_xtensa-espressif_esp32s3_zephyr-elf.ta
 xtensa_digest=904d42b75e4d819c58b0db640783911e508b9ee2a627eb5daffb907465a34be1
 
 DESKKIN_GATE1A_REQUIRE_QEMU=0 "$repo_root/scripts/bootstrap_gate1a.sh"
-"$state_dir/venv/bin/python" -m pip install --disable-pip-version-check --require-hashes -r "$repo_root/requirements/gate1c.lock"
+"$state_dir/venv/bin/python" -m pip install --disable-pip-version-check --require-hashes -r "$repo_root/requirements/core-s3.lock"
 
 download="$downloads_dir/$xtensa_archive"
 if [[ ! -f "$download" ]] || ! printf '%s  %s\n' "$xtensa_digest" "$download" | sha256sum --check --status; then
@@ -64,7 +64,7 @@ if [[ ! -x "$rustup_dir/toolchains/$toolchain_name/bin/rustc" ]]; then
 fi
 
 module="$state_dir/west/modules/lang/rust"
-for patch_file in "$repo_root"/patches/gate1c-zephyr-lang-rust/*.patch; do
+for patch_file in "$repo_root"/patches/zephyr-lang-rust-core-s3/*.patch; do
   if ! git -C "$module" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
     git -C "$module" apply --check "$patch_file"
     git -C "$module" apply "$patch_file"

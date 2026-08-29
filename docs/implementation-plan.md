@@ -269,7 +269,7 @@ Gate 1C passed on a physical CoreS3. Local diagnostic run
   `cleanup_status=success`, and `device_state=test_firmware_idle`.
 
 The retained local patch scope, upstream strategy, and removal conditions are
-recorded in [`gate-1c-patch-series.md`](gate-1c-patch-series.md). The runner
+recorded in [`core-s3-zephyr-rust-patches.md`](core-s3-zephyr-rust-patches.md). The runner
 enforces recognized-firmware preflight, a run-bound serial protocol, the
 explicit `device:recover` surface, and fail/timeout/cancel cleanup. Gate 1D may
 now start as its own checkpoint; this Gate 1C evidence does not establish any

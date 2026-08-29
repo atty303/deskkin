@@ -62,6 +62,14 @@ mise install --yes
 If Codex was already running, restart it after the first install so the
 project-local hk MCP server can start.
 
+Prepare the pinned CoreS3 Zephyr SDK, Xtensa compiler, Rust toolchain, and west
+workspace before the first firmware build:
+
+```sh
+mise run phase3:device:bootstrap
+mise run phase3:device:build
+```
+
 ## Development
 
 ```sh

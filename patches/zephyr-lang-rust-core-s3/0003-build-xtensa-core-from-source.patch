@@ -1,4 +1,4 @@
-From: Deskkin Gate 1C <noreply@example.invalid>
+From: Deskkin CoreS3 <noreply@example.invalid>
 Subject: [PATCH] cmake: build Rust core and alloc for Xtensa
 
 The pinned ESP Rust Tier 3 toolchain does not ship precompiled target

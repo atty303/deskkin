@@ -1,4 +1,4 @@
-From: Deskkin Gate 1C <noreply@example.invalid>
+From: Deskkin CoreS3 <noreply@example.invalid>
 Subject: [PATCH] cmake: map ESP32-S3 to the Rust Xtensa target
 
 This bounded feasibility patch adds only the Zephyr-to-Rust target mapping

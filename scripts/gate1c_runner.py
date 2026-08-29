@@ -39,7 +39,7 @@ WEST_REVISIONS = {
     "mbedtls": "a3e190fe44c78d1ba67f55979e1257328cc7d0d8",
     "tf-psa-crypto": "dc575a2ddcc8cb16275d24c42a52eaf79ebe2231",
 }
-PATCHES = tuple(f"patches/gate1c-zephyr-lang-rust/{name}" for name in (
+PATCHES = tuple(f"patches/zephyr-lang-rust-core-s3/{name}" for name in (
     "0001-map-esp32s3-xtensa-target.patch",
     "0002-enable-esp32s3-xtensa-kconfig.patch",
     "0003-build-xtensa-core-from-source.patch",
@@ -47,8 +47,8 @@ PATCHES = tuple(f"patches/gate1c-zephyr-lang-rust/{name}" for name in (
     "0005-use-fixed-width-kconfig-integers.patch",
 ))
 INPUTS = (
-    "west.yml", "mise.toml", "mise.lock", "requirements/gate1c.in",
-    "requirements/gate1c.lock", "scripts/bootstrap_gate1c.sh",
+    "west.yml", "mise.toml", "mise.lock", "requirements/core-s3.in",
+    "requirements/core-s3.lock", "scripts/bootstrap_gate1c.sh",
     "scripts/gate1c_runner.py", "gates/gate1c/CMakeLists.txt",
     "gates/gate1c/Cargo.toml", "gates/gate1c/Cargo.lock",
     "gates/gate1c/Kconfig", "gates/gate1c/prj.conf",

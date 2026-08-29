@@ -1,4 +1,4 @@
-From: Deskkin Gate 1C <noreply@example.invalid>
+From: Deskkin CoreS3 <noreply@example.invalid>
 Subject: [PATCH] kconfig: enable Rust for ESP32-S3 Xtensa
 
 This bounded feasibility patch enables only the target paired with Gate 1C's

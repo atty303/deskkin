@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "sdk_version": "1.0.1",
+  "files": {
+    "sdk_version": "44e161e4495cac2cf7858043e9e6418e9579f0ddcfae826f9a372622968ce066",
+    "gnu/xtensa-espressif_esp32s3_zephyr-elf/bin/xtensa-espressif_esp32s3_zephyr-elf-gcc": "6c37a821e8f20d8d53c536460e5c2f292f22d923ae29655bc9c054278e352a84"
+  },
+  "host_tools": {
+    "sysroots/x86_64-pokysdk-linux/usr/bin/dtc": "DTC v1.7.0+"
+  }
+}

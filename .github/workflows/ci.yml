@@ -36,7 +36,7 @@ jobs:
 
       - name: Bootstrap CoreS3 toolchain
         run: |
-          mise run gate:1c:bootstrap
+          mise run phase3:device:bootstrap
           df -h /
 
       - name: Test

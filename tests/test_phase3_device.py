@@ -19,6 +19,19 @@ class Phase3DeviceTests(unittest.TestCase):
     def profile(self):
         return {"schema_version": 1, "ssid": "fixture", "password": "fake-password", "host_ipv4": "192.168.10.2"}
 
+    def test_build_verifies_the_same_state_directory_it_uses(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.dict(os.environ, {"DESKKIN_STATE_DIR": "/tmp/unverified-state"}), mock.patch.object(
+                device.subprocess, "run"
+            ) as run:
+                device.build(root)
+
+        self.assertEqual(run.call_count, 3)
+        expected_state = str(root / ".deskkin")
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["env"]["DESKKIN_STATE_DIR"], expected_state)
+
     def test_profile_schema_is_exact_and_rfc1918(self):
         self.assertEqual(device.validate_profile(self.profile()), self.profile())
         for change in ({"extra": 1}, {"host_ipv4": "8.8.8.8"}, {"password": "short"}, {"schema_version": 2}):

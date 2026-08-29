@@ -488,6 +488,14 @@ def device_environment(root: Path) -> tuple[Path, dict[str, str]]:
 
 def build(root: Path) -> None:
     state, environment = device_environment(root)
+    environment["DESKKIN_STATE_DIR"] = str(state)
+    subprocess.run(
+        [str(root / "scripts/bootstrap_core_s3.sh"), "--verify-only"],
+        check=True,
+        cwd=root,
+        env=environment,
+        stdout=sys.stderr,
+    )
     device_state = state / "phase3-device"
     ensure_private_directory(device_state)
     build_dir = device_state / "build"
