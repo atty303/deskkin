@@ -26,6 +26,43 @@ class Phase3DeviceTests(unittest.TestCase):
             with self.assertRaises(device.DeviceError):
                 device.validate_profile(value)
 
+    def test_dhcp_wait_decision_covers_ready_timeout_and_cancel(self):
+        source = r'''
+#include <assert.h>
+#include "dhcp_wait.h"
+
+int main(void) {
+    assert(deskkin_dhcp_wait_decide(false, true, false) == DESKKIN_DHCP_WAIT_READY);
+    assert(deskkin_dhcp_wait_decide(false, true, true) == DESKKIN_DHCP_WAIT_READY);
+    assert(deskkin_dhcp_wait_decide(false, false, false) == DESKKIN_DHCP_WAIT_CONTINUE);
+    assert(deskkin_dhcp_wait_decide(false, false, true) == DESKKIN_DHCP_WAIT_TIMED_OUT);
+    assert(deskkin_dhcp_wait_decide(true, false, false) == DESKKIN_DHCP_WAIT_CANCELLED);
+    assert(deskkin_dhcp_wait_decide(true, true, true) == DESKKIN_DHCP_WAIT_CANCELLED);
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness = root / "dhcp_wait_test.c"
+            executable = root / "dhcp_wait_test"
+            harness.write_text(source, encoding="utf-8")
+            subprocess.run(
+                [
+                    "clang",
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(ROOT / "apps/core-s3-device/src"),
+                    str(harness),
+                    "-o",
+                    str(executable),
+                ],
+                check=True,
+            )
+            subprocess.run([str(executable)], check=True)
+
     def test_control_frame_is_bounded_and_canonical(self):
         payload = device.wifi_payload(self.profile())
         frame = device.control_frame("wifi-provision", 7, payload)

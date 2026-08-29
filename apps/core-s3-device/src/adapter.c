@@ -20,6 +20,8 @@
 #include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
 
+#include "dhcp_wait.h"
+
 #define CONTROL_FRAME_MAX 188
 #define COMPLETION_FRAME_MAX 80
 #define WIFI_ASSOCIATION_TIMEOUT_MS 15000
@@ -576,17 +578,24 @@ int deskkin_wait_dhcp(void)
 		net_dhcpv4_start(iface);
 	}
 	const int64_t deadline = k_uptime_get() + DHCP_TIMEOUT_MS;
-	while (k_uptime_get() < deadline) {
-		if (k_msgq_num_used_get(&reserved_control) > 0 ||
-		    k_msgq_num_used_get(&application_commands) > 0) {
+	for (;;) {
+		const enum deskkin_dhcp_wait_decision decision =
+			deskkin_dhcp_wait_decide(
+				k_msgq_num_used_get(&reserved_control) > 0 ||
+					k_msgq_num_used_get(&application_commands) > 0,
+				net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != NULL,
+				k_uptime_get() >= deadline);
+		if (decision == DESKKIN_DHCP_WAIT_CANCELLED) {
 			return -EINTR;
 		}
-		if (net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) != NULL) {
+		if (decision == DESKKIN_DHCP_WAIT_READY) {
 			return 0;
+		}
+		if (decision == DESKKIN_DHCP_WAIT_TIMED_OUT) {
+			return -ETIMEDOUT;
 		}
 		k_msleep(50);
 	}
-	return -ETIMEDOUT;
 }
 
 int deskkin_tcp_connect(const uint8_t host[4], uint16_t port)

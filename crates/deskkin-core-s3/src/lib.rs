@@ -12,6 +12,26 @@ pub const COMPLETION_QUEUE_CAPACITY: usize = 8;
 pub const HOST_PORT: u16 = 39_042;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirtyRange {
+    pub start: u16,
+    pub end: u16,
+}
+
+impl DirtyRange {
+    pub const EMPTY: Self = Self { start: 0, end: 0 };
+
+    pub fn include(&mut self, start: u16, end: u16) {
+        if self.start == self.end {
+            self.start = start;
+            self.end = end;
+        } else {
+            self.start = self.start.min(start);
+            self.end = self.end.max(end);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum PeerState {
     Unpaired = 0,
@@ -426,5 +446,25 @@ mod tests {
         );
         frame[1] = 99;
         assert_eq!(decode_control(&frame), Err(DecodeError::UnknownCommand));
+    }
+
+    #[test]
+    fn dirty_range_unions_every_callback_order() {
+        let mut separated = DirtyRange::EMPTY;
+        separated.include(10, 20);
+        separated.include(30, 40);
+        assert_eq!(separated, DirtyRange { start: 10, end: 40 });
+
+        let mut reversed = DirtyRange::EMPTY;
+        reversed.include(30, 40);
+        reversed.include(10, 20);
+        assert_eq!(reversed, separated);
+
+        let mut overlapping = DirtyRange::EMPTY;
+        overlapping.include(10, 30);
+        overlapping.include(20, 40);
+        assert_eq!(overlapping, separated);
+
+        assert_eq!(DirtyRange::EMPTY, DirtyRange { start: 0, end: 0 });
     }
 }

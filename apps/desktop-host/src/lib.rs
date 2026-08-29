@@ -3692,42 +3692,54 @@ mod tests {
         drop(probe);
         assert!(ClientSession::connect(address, &store, [91; 16]).is_err());
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !role.join("diagnostics").exists() && std::time::Instant::now() < deadline {
+        let run = loop {
+            let found = role.join("diagnostics").exists().then(|| {
+                fs::read_dir(role.join("diagnostics"))
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .is_some_and(|value| value == "json")
+                    })
+                    .filter_map(|entry| fs::read(entry.path()).ok())
+                    .filter_map(|bytes| serde_json::from_slice::<DiagnosticRun>(&bytes).ok())
+                    .find(|run| {
+                        run.terminal
+                            && run.records.iter().any(|record| {
+                                record.operation == Operation::ProtocolNegotiate
+                                    && record.status == OperationStatus::Error
+                                    && record.error_type
+                                        == Some(local_run_recorder::ErrorType::ConnectionLost)
+                            })
+                    })
+            });
+            if let Some(Some(run)) = found {
+                break run;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal failed-session diagnostic was not published"
+            );
             thread::sleep(Duration::from_millis(10));
-        }
-        thread::sleep(Duration::from_millis(50));
-        let mut found = false;
-        for entry in fs::read_dir(role.join("diagnostics")).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|extension| extension != "json") {
-                continue;
-            }
-            let run: DiagnosticRun = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-            if run.records.iter().any(|record| {
-                record.operation == Operation::ProtocolNegotiate
-                    && record.status == OperationStatus::Error
-                    && record.error_type == Some(local_run_recorder::ErrorType::ConnectionLost)
-            }) {
-                found = true;
-                assert_eq!(run.completeness, Completeness::Complete);
-                assert!(run.terminal);
-                assert_eq!(run.records[0].operation, Operation::TransportAccept);
-                assert_eq!(run.records[0].parent_operation_id, None);
-                assert!(run.records[0].duration_ms.is_some());
-                assert!(
-                    run.records[1..]
-                        .iter()
-                        .all(|record| record.parent_operation_id == Some(1))
-                );
-                let encoded = serde_json::to_string(&run).unwrap();
-                assert!(!encoded.contains("authentication"));
-                assert!(!encoded.contains("local_private_key"));
-                assert!(!encoded.contains(&address.to_string()));
-                assert!(!encoded.contains("\"pid\""));
-                assert!(!encoded.contains("start_ticks"));
-            }
-        }
-        assert!(found);
+        };
+        assert_eq!(run.completeness, Completeness::Complete);
+        assert!(run.terminal);
+        assert_eq!(run.records[0].operation, Operation::TransportAccept);
+        assert_eq!(run.records[0].parent_operation_id, None);
+        assert!(run.records[0].duration_ms.is_some());
+        assert!(
+            run.records[1..]
+                .iter()
+                .all(|record| record.parent_operation_id == Some(1))
+        );
+        let encoded = serde_json::to_string(&run).unwrap();
+        assert!(!encoded.contains("authentication"));
+        assert!(!encoded.contains("local_private_key"));
+        assert!(!encoded.contains(&address.to_string()));
+        assert!(!encoded.contains("\"pid\""));
+        assert!(!encoded.contains("start_ticks"));
     }
     #[test]
     fn diagnostic_span_is_durable_before_terminal_completion() {

@@ -183,28 +183,6 @@ struct DevicePlatform {
     window: Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>,
 }
 
-#[derive(Clone, Copy)]
-struct DirtyRange {
-    start: u16,
-    end: u16,
-}
-
-impl DirtyRange {
-    const EMPTY: Self = Self { start: 0, end: 0 };
-
-    fn include(&mut self, range: Range<usize>) {
-        let start = range.start as u16;
-        let end = range.end as u16;
-        if self.start == self.end {
-            self.start = start;
-            self.end = end;
-        } else {
-            self.start = self.start.min(start);
-            self.end = self.end.max(end);
-        }
-    }
-}
-
 struct Framebuffer {
     pixels: NonNull<u16>,
     staging: NonNull<u16>,
@@ -237,7 +215,7 @@ impl Framebuffer {
 
 struct Capture<'a> {
     line: [Rgb565Pixel; WIDTH],
-    ranges: &'a mut [DirtyRange; HEIGHT],
+    ranges: &'a mut [deskkin_core_s3::DirtyRange; HEIGHT],
     framebuffer: &'a Framebuffer,
 }
 
@@ -262,11 +240,14 @@ impl LineBufferProvider for &mut Capture<'_> {
                 destination.len(),
             );
         }
-        self.ranges[line].include(range);
+        self.ranges[line].include(range.start as u16, range.end as u16);
     }
 }
 
-fn transfer_dirty(framebuffer: &Framebuffer, ranges: &[DirtyRange; HEIGHT]) -> Result<(), ()> {
+fn transfer_dirty(
+    framebuffer: &Framebuffer,
+    ranges: &[deskkin_core_s3::DirtyRange; HEIGHT],
+) -> Result<(), ()> {
     let mut line = 0;
     while line < HEIGHT {
         let range = ranges[line];
@@ -1890,7 +1871,7 @@ async fn run_ui() {
                 button: PointerEventButton::Left,
             });
         }
-        let mut ranges = [DirtyRange::EMPTY; HEIGHT];
+        let mut ranges = [deskkin_core_s3::DirtyRange::EMPTY; HEIGHT];
         window.draw_if_needed(|renderer| {
             renderer.render_by_line(&mut Capture {
                 line: [Rgb565Pixel(0); WIDTH],
