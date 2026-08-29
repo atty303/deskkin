@@ -4,21 +4,19 @@ Deskkin is a modular platform for embodied desktop companions. It connects a
 portable device application and Slint user interface to desktop-hosted
 integrations through a capability-oriented protocol.
 
-The first device target is StackChan on M5Stack CoreS3. Unraid control is the
-first planned integration, not a special part of the platform. Future
-integrations may include desktop notifications, conversational AI, calendars,
-and home automation.
+The first device target is StackChan on M5Stack CoreS3. Provider connectors are
+deliberately deferred while the shared application, protocol, device, and
+development foundations mature. Future candidates include Unraid, desktop
+notifications, conversational AI, calendars, and home automation.
 
 ## Status
 
-Deskkin has completed Phase 0, all Phase 1 foundation gates, and the Phase 2
-provider-neutral periodic availability surface. The Phase 3 implementation now
-adds an authenticated Linux loopback vertical slice: explicit host and
-simulator identities, Noise XX pairing with a shared six-digit authentication
-string, pinned reconnects, a bounded `no_std` wire codec, exact unpair, and a
-fake-host availability read. The implementation passed the complete local
-verification suite and a fresh independent review with no remaining P0/P1
-finding; live pairing demonstration remains a separate launch checkpoint.
+Deskkin has completed its foundation gates, provider-neutral availability
+surface, authenticated host protocol, and the physically qualified CoreS3
+paired-availability slice. The maintained product paths now include portable
+`no_std` application and protocol crates, the Linux host and simulator, and the
+CoreS3 firmware. Completed feasibility harnesses are no longer part of the
+active development surface; their contracts and evidence remain in `docs/`.
 
 The agreed product boundary, architecture, decisions, evidence, and phased plan
 remain in [`docs/implementation-plan.md`](docs/implementation-plan.md). Phase 2
@@ -82,24 +80,12 @@ mise run test
 
 Pass selected files after `--`, for example `mise run check -- README.md`.
 
-Prepare and run the completed Gate 1A and Gate 1B evidence paths with:
+Run the Linux simulator and deterministic scenarios with:
 
 ```sh
-mise run gate:1a:bootstrap
-mise run gate:1a
-mise run gate:1b
-mise run diagnostics:list
-```
-
-Gate state, SDKs, fetched sources, builds, results, and bounded local
-diagnostics remain under the ignored `.deskkin/` directory.
-
-Run the Phase 2 Linux simulator and deterministic scenarios with:
-
-```sh
-mise run phase2:desktop
-mise run phase2:scenario -- periodic-success
-mise run phase2:scenario -- periodic-read-failure
+mise run simulator:desktop
+mise run simulator:scenario -- periodic-success
+mise run simulator:scenario -- periodic-read-failure
 ```
 
 The native fake repeats `Available`, `Unavailable`, and read failure after an
@@ -112,10 +98,10 @@ the next store access recovers a marker left by a crash as a partial run.
 Diagnostic administration accepts only an exact operation and run ID:
 
 ```sh
-mise run phase2:diagnostics -- list
-mise run phase2:diagnostics -- retain RUN-ID
-mise run phase2:diagnostics -- unretain RUN-ID
-mise run phase2:diagnostics -- delete RUN-ID
+mise run simulator:diagnostics -- list
+mise run simulator:diagnostics -- retain RUN-ID
+mise run simulator:diagnostics -- unretain RUN-ID
+mise run simulator:diagnostics -- delete RUN-ID
 ```
 
 Phase 3 uses disposable identity roots by default. Initialize both identities,
@@ -143,12 +129,25 @@ mise run phase3:diagnostics -- --root .deskkin/phase3/host list
 mise run phase3:diagnostics -- --root .deskkin/phase3/device-simulator list
 ```
 
+CoreS3 development uses explicit, separate bootstrap, build, device-mutation,
+and read-only status tasks. Mutation tasks do not run as part of tests:
+
+```sh
+mise run phase3:device:bootstrap
+mise run phase3:device:build
+mise run phase3:device:status
+```
+
+See [`docs/phase-3p-physical-slice-proposal.md`](docs/phase-3p-physical-slice-proposal.md)
+for the separately authorized profile, flash, identity, provisioning, run, and
+recovery operations and their retained-state constraints.
+
 ## License
 
-Deskkin source is MIT. Slint-bearing Gate 1B, Phase 2, and Phase 3 simulator
-combined binaries use Slint under GPL-3.0-only and are GPLv3 as a whole. The
-accepted phases authorize that distribution model but add no release or
-publication; actual distribution requires a separately approved
-corresponding-source bundle and delivery method.
+Deskkin source is MIT. Slint-bearing simulator binaries and CoreS3 firmware use
+Slint under GPL-3.0-only and are GPLv3 as a whole. The accepted phases authorize
+that distribution model but add no release or publication; actual distribution
+requires a separately approved corresponding-source bundle and delivery
+method.
 See [`docs/licensing.md`](docs/licensing.md) for the exact source and combined
 binary boundary.

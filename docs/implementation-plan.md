@@ -6,14 +6,14 @@
 Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, and Phase 3P complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
-First connector: Unraid
+Current provider connector: none
 Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, Phase 3 paired loopback host slice, and the physically qualified Phase 3P host/device/tooling slice
-Application dependencies: approved Gate 1A, Phase 2, Phase 3, and exact Phase 3P sets resolved in the root and device lockfiles
-Next action: review and approve or revise the proposed Phase 4 read-only contract; do not add dependencies or access an Unraid provider yet
+Implementation: portable application/protocol crates, Linux host and simulator, and the physically qualified CoreS3 firmware/tooling slice
+Application dependencies: approved product dependencies resolved in the root and device lockfiles
+Next action: define a development-foundation checkpoint that shortens feedback loops and supports later character behavior; provider connectors, including the existing Unraid proposal, remain deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -32,10 +32,11 @@ Deskkin is a modular platform for embodied desktop companions. The first
 physical companion is StackChan on CoreS3. The platform is expected to support
 other companion devices without changing portable application behavior.
 
-A desktop host integrates external services. Unraid status and control are the
-first feature slice. Future candidates include desktop notifications,
-conversational AI, calendars, music, home automation, and system status. These
-are connectors and features, not dependencies of the device platform.
+A desktop host integrates external services. Future connector candidates
+include Unraid, desktop notifications, conversational AI, calendars, music,
+home automation, and system status. No provider connector is the current
+checkpoint; connectors and features are not dependencies of the device
+platform.
 
 ## Required properties
 
@@ -52,7 +53,15 @@ are connectors and features, not dependencies of the device platform.
 - External and asynchronous paths are observable without placing diagnostics
   in public protocol results or UI models.
 
-## Explicit non-goals for Gate 1A
+## Historical foundation record
+
+The remaining Phase 0 and Phase 1 sections preserve the approved contracts and
+physical evidence that selected the current product foundation. Their
+applications, runners, bootstrap scripts, and conformance tests have been
+removed from the active repository surface. Current development uses the
+product bootstrap and verification entrypoints documented in `README.md`.
+
+### Explicit non-goals for Gate 1A
 
 - product application features, UI, connectors, or the product simulator;
 - Slint source files, Slint dependencies, or generated bindings;
@@ -66,7 +75,7 @@ are connectors and features, not dependencies of the device platform.
 - host daemon configuration, autostart, or deployment;
 - release, remote repository creation, push, or publication.
 
-## Known upstream state
+### Known upstream state
 
 These observations were checked while defining the scaffold on 2026-08-22.
 They are starting evidence, not permanent compatibility guarantees.
@@ -117,7 +126,7 @@ References:
 - <https://zephyrproject-rtos.github.io/zephyr-lang-rust/nostd/zephyr/>
 - <https://zephyrproject-rtos.github.io/zephyr-lang-rust/nostd/zephyr/embassy/>
 
-## Phase 0: freeze the first feasibility matrix
+### Phase 0: freeze the first feasibility matrix
 
 Before adding any dependency or implementation, produce one proposal that
 contains:
@@ -145,11 +154,11 @@ baseline.
 Phase 0 completed on 2026-08-22 when all four approval items in that proposal
 were accepted.
 
-## Phase 1: prove the foundation in independent vertical spikes
+### Phase 1: prove the foundation in independent vertical spikes
 
 Keep the following uncertainties separate so failure identifies one boundary.
 
-### Gate 1A: Rust application on supported Zephyr targets
+#### Gate 1A: Rust application on supported Zephyr targets
 
 Build and run the smallest official-style Rust application through
 `zephyr-lang-rust` on one emulator and one supported physical architecture when
@@ -186,7 +195,7 @@ The gate remains a feasibility boundary. These results do not establish Slint,
 Xtensa, CoreS3 board support, display behavior, or product application
 architecture.
 
-### Gate 1B: Slint Rust software renderer on Zephyr
+#### Gate 1B: Slint Rust software renderer on Zephyr
 
 Add Slint as a dependency of the Rust Zephyr application on an already
 supported target. Implement only the platform functions needed to render a
@@ -230,7 +239,7 @@ touch support, physical-device performance, or a distribution license for
 embedded Slint firmware. The result remains a local, non-distributed
 GPL-3.0-only feasibility spike.
 
-### Gate 1C: ESP32-S3/Xtensa Zephyr Rust toolchain
+#### Gate 1C: ESP32-S3/Xtensa Zephyr Rust toolchain
 
 Prove that a minimal `zephyr-lang-rust` application can compile, link, boot,
 log, and panic predictably on an ESP32-S3 Zephyr target. Treat compiler target,
@@ -275,7 +284,7 @@ explicit `device:recover` surface, and fail/timeout/cancel cleanup. Gate 1D may
 now start as its own checkpoint; this Gate 1C evidence does not establish any
 display, touch, power, memory, or bus behavior.
 
-### Gate 1D: CoreS3 Zephyr board and drivers
+#### Gate 1D: CoreS3 Zephyr board and drivers
 
 Start with Zephyr 4.4.1's existing CoreS3 board and independently prove power
 sequencing, GPIO expansion, display, touch, memory, and required buses through
@@ -338,7 +347,7 @@ This evidence proves the independent board/driver boundary only. It does not
 establish Slint on CoreS3, dirty-render integration, animation performance, or
 the Gate 1E combined path.
 
-### Gate 1E: combined CoreS3 Slint slice
+#### Gate 1E: combined CoreS3 Slint slice
 
 Only after Gates 1B, 1C, and 1D pass, combine them into one vertical slice:
 
@@ -463,13 +472,14 @@ plaintext-NVS state are recorded in
 The selected residual state retains demo firmware, Wi-Fi credentials, and Noise
 identity in device flash; cleanup is never implicit.
 
-## Phase 4: Unraid read-only feature
+## Deferred connector example: Unraid read-only feature
 
-The proposed contract is
+The unapproved example contract is
 [`phase-4-unraid-read-only-proposal.md`](phase-4-unraid-read-only-proposal.md).
-It is not yet approved. Do not add an ADR, source, dependencies, credentials,
-or provider access until its domain mapping, TLS trust, credential storage,
-protocol additions, bounds, and exact dependencies are reviewed and accepted.
+It is retained as a possible future connector, not the next checkpoint. Do not
+add an ADR, source, dependencies, credentials, or provider access until its
+domain mapping, TLS trust, credential storage, protocol additions, bounds, and
+exact dependencies are reviewed and accepted.
 
 After approval, add an infrastructure-status feature and an Unraid connector.
 Keep Unraid payloads and credentials in the host. Normalize only the semantics
@@ -479,7 +489,7 @@ test boundary before any live system access.
 Live Unraid inspection and control require a separate explicit authorization.
 Do not broaden credentials or mutation permissions after an access denial.
 
-## Phase 5: confirmed Unraid actions
+## Deferred connector extension: confirmed Unraid actions
 
 Introduce action identity, expiration, confirmation, authorization, replay
 protection, completion, and failure as one end-to-end contract. Read and
@@ -544,19 +554,13 @@ cross-cutting decision as a new ADR.
 
 Start a future development session with:
 
-> Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs,
-> `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`,
-> `docs/phase-2-slice-proposal.md`, `docs/phase-3-slice-proposal.md`, and
-> `docs/phase-3p-physical-slice-proposal.md`,
-> `docs/phase-4-unraid-read-only-proposal.md`,
-> `docs/decisions/0004-paired-host-protocol.md`, and
-> `docs/decisions/0005-core-s3-paired-availability.md`. Confirm that Phase 3 is
-> complete and Phase 3P was approved on 2026-08-24 with separate documentation,
-> implementation, and physical-evidence checkpoints. The implementation
-> checkpoint and physical qualification are complete. Phase 4 now has a
-> proposed but unapproved read-only
-> contract. Review that proposal before adding an ADR, code, dependencies, or
-> credentials. Do not flash, provision, mutate device state, power-cycle,
-> access a provider, release, push, or publish without the corresponding
-> explicit approval. Preserve and report the selected plaintext-NVS residual
-> state after any approved device run.
+> Read `AGENTS.md`, `docs/architecture.md`, the accepted ADRs, and the current
+> checkpoint in `docs/implementation-plan.md`. The maintained implementation is
+> the portable core/protocol, Linux host and simulator, and physically
+> qualified CoreS3 slice; completed Gate harnesses were removed while their
+> contracts and evidence remain in `docs/`. Define and approve the next
+> development-foundation slice before adding code or dependencies. Treat
+> Unraid as a deferred example, not the next action. Do not flash, provision,
+> mutate device state, power-cycle, access a provider, release, push, or publish
+> without the corresponding explicit approval. Preserve and report the
+> selected plaintext-NVS residual state after any approved device run.

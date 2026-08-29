@@ -65,16 +65,16 @@ cargo tree --locked -p application-core --edges normal
 cargo tree --locked -p deskkin-protocol --edges normal
 '''
 
-[tasks."phase2:desktop"]
+[tasks."simulator:desktop"]
 description = "Run the native Linux periodic status simulator"
 run = "cargo run --locked --bin deskkin-desktop"
 
-[tasks."phase2:scenario"]
-description = "Run a deterministic Phase 2 headless scenario"
+[tasks."simulator:scenario"]
+description = "Run a deterministic headless simulator scenario"
 run = "cargo run --locked --quiet --bin deskkin-scenario --"
 
-[tasks."phase2:diagnostics"]
-description = "Administer bounded local Phase 2 diagnostic runs"
+[tasks."simulator:diagnostics"]
+description = "Administer bounded local simulator diagnostic runs"
 run = "cargo run --locked --quiet --bin deskkin-diagnostics --"
 
 [tasks."phase3:host"]
@@ -124,43 +124,3 @@ run = "python scripts/phase3_device.py run"
 [tasks."phase3:device:recover"]
 description = "Erase CoreS3 storage and restore inert firmware after a live checkpoint"
 run = "python scripts/phase3_device.py recover"
-
-[tasks."gate:1a:bootstrap"]
-description = "Prepare the repository-local Gate 1A Zephyr workspace and SDK"
-run = "./scripts/bootstrap_gate1a.sh"
-
-[tasks."gate:1a"]
-description = "Run the Rust, Zephyr, and Embassy feasibility gate on supported QEMU targets"
-run = "python scripts/gate_runner.py run"
-
-[tasks."gate:1b"]
-description = "Run the Slint software-renderer feasibility gate on QEMU and the host"
-run = "python scripts/gate1b_runner.py"
-
-[tasks."gate:1c:bootstrap"]
-description = "Prepare the repository-local Gate 1C Xtensa toolchains and modules"
-run = "./scripts/bootstrap_gate1c.sh"
-
-[tasks."gate:1c"]
-description = "Run the ESP32-S3/Xtensa Rust feasibility gate"
-run = ".deskkin/venv/bin/python scripts/gate1c_runner.py run"
-
-[tasks."gate:1d"]
-description = "Run the existing CoreS3 Zephyr board-support feasibility gate"
-run = ".deskkin/venv/bin/python scripts/gate1d_runner.py run"
-
-[tasks."gate:1e"]
-description = "Run the combined CoreS3 Slint feasibility gate"
-run = ".deskkin/venv/bin/python scripts/gate1e_runner.py"
-
-[tasks."device:recover"]
-description = "Recover a CoreS3 into a recognized inert gate test firmware"
-run = ".deskkin/venv/bin/python scripts/device_recover.py"
-
-[tasks."diagnostics:list"]
-description = "List bounded local gate diagnostic runs"
-run = "python scripts/gate_runner.py list"
-
-[tasks."diagnostics:delete"]
-description = "Delete exactly one resolved local gate diagnostic run"
-run = "python scripts/gate_runner.py delete"

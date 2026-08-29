@@ -3,6 +3,5 @@
 .deskkin/
 target/
 .west/
-gates/gate1b/target/
 __pycache__/
 *.pyc

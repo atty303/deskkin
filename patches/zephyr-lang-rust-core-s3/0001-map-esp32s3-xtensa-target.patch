@@ -1,9 +1,9 @@
 From: Deskkin CoreS3 <noreply@example.invalid>
 Subject: [PATCH] cmake: map ESP32-S3 to the Rust Xtensa target
 
-This bounded feasibility patch adds only the Zephyr-to-Rust target mapping
-needed by Gate 1C. Remove it when the pinned zephyr-lang-rust revision (or its
-approved successor) supplies an equivalent mapping upstream.
+This bounded product patch adds only the Zephyr-to-Rust target mapping needed
+by the CoreS3 firmware. Remove it when the pinned zephyr-lang-rust revision (or
+its approved successor) supplies an equivalent mapping upstream.
 ---
  CMakeLists.txt | 2 ++
  1 file changed, 2 insertions(+)

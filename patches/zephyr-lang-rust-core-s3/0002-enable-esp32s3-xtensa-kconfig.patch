@@ -1,7 +1,7 @@
 From: Deskkin CoreS3 <noreply@example.invalid>
 Subject: [PATCH] kconfig: enable Rust for ESP32-S3 Xtensa
 
-This bounded feasibility patch enables only the target paired with Gate 1C's
+This bounded product patch enables only the target paired with Deskkin's
 explicit CMake mapping. Remove it with that mapping when upstream support is
 available.
 ---

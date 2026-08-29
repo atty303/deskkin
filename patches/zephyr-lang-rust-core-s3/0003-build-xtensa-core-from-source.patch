@@ -3,7 +3,7 @@ Subject: [PATCH] cmake: build Rust core and alloc for Xtensa
 
 The pinned ESP Rust Tier 3 toolchain does not ship precompiled target
 libraries. Limit source-built libraries to core and alloc and only enable the
-argument for the Gate 1C target.
+argument for the CoreS3 Xtensa target.
 ---
  CMakeLists.txt | 6 ++++++
  1 file changed, 6 insertions(+)
