@@ -288,6 +288,18 @@ class Runner(common.Runner):
             for relative, digest in self.verified_resources["sdk_file_digests"].items():
                 if common.sha256(sdk / relative) != digest:
                     raise common.GateInconclusive("input_changed")
+            for relative, identity in self.verified_resources["sdk_host_tools"].items():
+                output = subprocess.run(
+                    [str(sdk / relative), "--version"],
+                    cwd=self.state,
+                    env=self.env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=min(10, self.remaining()),
+                ).stdout.strip().splitlines()
+                if not output or output[0] != identity:
+                    raise common.GateInconclusive("input_changed")
         except (KeyError, OSError, subprocess.SubprocessError) as error:
             raise common.GateInconclusive("input_changed") from error
 

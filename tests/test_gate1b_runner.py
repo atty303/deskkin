@@ -121,6 +121,24 @@ class Gate1BRunnerTests(unittest.TestCase):
             with self.assertRaises(gate.common.GateInconclusive):
                 runner.target(gate.TARGET)
 
+    def test_verify_inputs_rejects_changed_host_tool_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = gate.Runner(Path(directory), False, str(uuid.uuid4()))
+            runner.verified_resources.update(
+                {
+                    "input_digests": {},
+                    "sdk_file_digests": {},
+                    "sdk_host_tools": {"host-tool": "expected version"},
+                }
+            )
+            completed = subprocess.CompletedProcess([], 0, stdout="changed version\n", stderr="")
+            with (
+                mock.patch.object(gate.common, "WEST_REVISIONS", {}),
+                mock.patch.object(gate.subprocess, "run", return_value=completed),
+                self.assertRaisesRegex(gate.common.GateInconclusive, "input_changed"),
+            ):
+                runner.verify_inputs()
+
     def test_concurrent_lock_reports_owner_without_changing_it(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / ".deskkin"

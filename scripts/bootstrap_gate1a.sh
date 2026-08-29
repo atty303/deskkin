@@ -96,6 +96,7 @@ validate_installed_sdk() {
 import hashlib
 import json
 import pathlib
+import subprocess
 import sys
 
 sdk = pathlib.Path(sys.argv[1])
@@ -110,12 +111,26 @@ for relative, expected in manifest["files"].items():
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual != expected:
         raise SystemExit(f"Gate 1A SDK file digest mismatch: {relative}")
+for relative, expected in manifest["host_tools"].items():
+    if not require_qemu and pathlib.PurePosixPath(relative).name.startswith("qemu-system-"):
+        continue
+    path = sdk / relative
+    if not path.is_file():
+        raise SystemExit(f"Gate 1A SDK host tool missing: {relative}")
+    try:
+        result = subprocess.run(
+            [path, "--version"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SystemExit(f"Gate 1A SDK host tool failed: {relative}: {type(error).__name__}") from error
+    if expected not in result.stdout:
+        raise SystemExit(f"Gate 1A SDK host tool version mismatch: {relative}")
 PY
-  "$dtc" --version >/dev/null || return 1
-  if [[ "$require_qemu" == 1 ]]; then
-    "$qemu_arm" --version >/dev/null || return 1
-    "$qemu_riscv" --version >/dev/null || return 1
-  fi
 }
 
 if [[ ! -x "$sdk_dir/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc" || ! -x "$sdk_dir/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gcc" || "$hosttools_ready" == 0 || ( "$require_qemu" == 1 && "$qemu_ready" == 0 ) ]]; then

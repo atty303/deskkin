@@ -4,9 +4,11 @@
   "files": {
     "sdk_version": "44e161e4495cac2cf7858043e9e6418e9579f0ddcfae826f9a372622968ce066",
     "gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc": "c669e99869a4e778a99ad473e7b4dd79ec80e22248e6e08bfcee6752c279ed98",
-    "gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gcc": "f77edf828c62e918060b540bd90ab9be9aaeef2ae158fbdd3265be8d7d5a27fe",
-    "sysroots/x86_64-pokysdk-linux/usr/bin/dtc": "cbec0dbed63ff4f9ecb835f1bdc52adaf1ffdddf99769966274c1b5a0392e8c2",
-    "sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-arm": "7c1eb14009b5abae3a17d1f0c22e9dcc1b3585edd6b0badba17ecc28c9e7d317",
-    "sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-riscv32": "bb7774c2b497ff00b8ae107ed04ddc6d7bad35cca2ae74e981f90faa430458ba"
+    "gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gcc": "f77edf828c62e918060b540bd90ab9be9aaeef2ae158fbdd3265be8d7d5a27fe"
+  },
+  "host_tools": {
+    "sysroots/x86_64-pokysdk-linux/usr/bin/dtc": "DTC v1.7.0+",
+    "sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-arm": "QEMU emulator version 10.0.2",
+    "sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-riscv32": "QEMU emulator version 10.0.2"
   }
 }

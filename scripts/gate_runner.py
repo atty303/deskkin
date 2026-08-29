@@ -154,8 +154,8 @@ def record_schema_safe(value: dict[str, object]) -> bool:
     record_type = value.get("type")
     common = {"schema_version", "type"}
     allowed = {
-        "resource": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "rf_blob_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
-        "resource_verified": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "rf_blob_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
+        "resource": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "sdk_host_tools", "rf_blob_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
+        "resource_verified": common | {"run_id", "gate", "mode", "target", "west_revisions", "sdk_file_digests", "sdk_host_tools", "rf_blob_digests", "sdk_version", "tool_identities", "input_digests", "application_version", "build_type", "deskkin_revision", "deskkin_dirty"},
         "operation": common | {"run_id", "operation", "status", "duration_ms", "error_type", "target"},
         "completeness": common | {"status", "reason", "result", "reason_code"},
         "result_published": common | {"run_id", "result"},
@@ -203,6 +203,14 @@ def record_schema_safe(value: dict[str, object]) -> bool:
         ):
             return False
         if not isinstance(value.get("tool_identities"), dict) or not all(isinstance(name, str) and isinstance(identity, str) for name, identity in value["tool_identities"].items()):
+            return False
+        if "sdk_host_tools" in value and not (
+            isinstance(value["sdk_host_tools"], dict)
+            and all(
+                isinstance(name, str) and isinstance(identity, str)
+                for name, identity in value["sdk_host_tools"].items()
+            )
+        ):
             return False
         if not all(isinstance(value.get(key), str) for key in ("sdk_version", "application_version", "build_type", "deskkin_revision")) or type(value.get("deskkin_dirty")) is not bool:
             return False
@@ -661,6 +669,13 @@ class Runner:
                 if actual != expected:
                     raise GateInconclusive("sdk_digest_mismatch")
                 sdk_digests[relative] = actual
+            sdk_host_tools: dict[str, str] = {}
+            for relative, expected in sdk_manifest["host_tools"].items():
+                path = sdk / relative
+                output = self.command("prepare", [str(path), "--version"], "host").strip()
+                if expected not in output:
+                    raise GateInconclusive("sdk_host_tool_mismatch")
+                sdk_host_tools[relative] = output.splitlines()[0]
             tool_probes = {
                 "rust": self.command("prepare", ["rustc", "--version"], "host").strip(),
                 "clang": self.command("prepare", ["clang", "--version"], "host").splitlines()[0],
@@ -705,6 +720,7 @@ class Runner:
                     "deskkin_dirty": deskkin_dirty,
                     "west_revisions": actual_revisions,
                     "sdk_file_digests": sdk_digests,
+                    "sdk_host_tools": sdk_host_tools,
                     "sdk_version": sdk_manifest["sdk_version"],
                     "tool_identities": tool_probes,
                     "input_digests": {relative: sha256(self.root / relative) for relative in gate_inputs},

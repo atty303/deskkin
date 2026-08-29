@@ -359,6 +359,36 @@ class GateRunnerTests(unittest.TestCase):
         self.assertTrue(gate_runner.privacy_safe({"deadline_miss_percent": 0.0}))
         self.assertFalse(gate_runner.privacy_safe({"deadline_miss_percent": float("nan")}))
 
+    def test_verified_host_tool_versions_are_closed_and_privacy_safe(self):
+        run_id = "run-id"
+        resource = {
+            "schema_version": 1,
+            "type": "resource",
+            "run_id": run_id,
+            "gate": "1a",
+            "mode": "default",
+        }
+        verified = {
+            **resource,
+            "type": "resource_verified",
+            "west_revisions": {"zephyr": "0" * 40},
+            "sdk_file_digests": {"sdk_version": "0" * 64},
+            "sdk_host_tools": {
+                "sysroots/x86_64-pokysdk-linux/usr/bin/dtc": "Version: DTC v1.7.0+",
+                "sysroots/x86_64-pokysdk-linux/usr/bin/qemu-system-arm": "QEMU emulator version 10.0.2",
+            },
+            "sdk_version": "1.0.1",
+            "tool_identities": {"rust": "rustc 1.95.0"},
+            "input_digests": {"west.yml": "0" * 64},
+            "application_version": "0.1.0",
+            "build_type": "dev",
+            "deskkin_revision": "0" * 40,
+            "deskkin_dirty": False,
+        }
+        self.assertTrue(gate_runner.record_schema_safe(verified))
+        self.assertTrue(gate_runner.diagnostic_records_safe([resource, verified], run_id))
+        self.assertFalse(gate_runner.record_schema_safe({**verified, "sdk_host_tools": {"dtc": 1}}))
+
     def test_truncated_artifact_is_omitted(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "build-summary.json"
