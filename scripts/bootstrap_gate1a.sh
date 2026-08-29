@@ -11,8 +11,8 @@ downloads_dir="$state_dir/downloads"
 sdk_version=1.0.1
 release_url="https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${sdk_version}"
 minimal_name="zephyr-sdk-${sdk_version}_linux-x86_64_minimal.tar.xz"
-arm_name="toolchain_linux-x86_64_arm-zephyr-eabi.tar.xz"
-riscv_name="toolchain_linux-x86_64_riscv64-zephyr-elf.tar.xz"
+arm_name="toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz"
+riscv_name="toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz"
 
 mkdir -p "$state_dir" "$downloads_dir"
 chmod 700 "$state_dir" "$downloads_dir"
