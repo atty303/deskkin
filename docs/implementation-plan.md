@@ -13,7 +13,7 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: bounded Gate 1A through Gate 1E applications, Phase 2 simulator, Phase 3 paired loopback host slice, and the physically qualified Phase 3P host/device/tooling slice
 Application dependencies: approved Gate 1A, Phase 2, Phase 3, and exact Phase 3P sets resolved in the root and device lockfiles
-Next action: prepare a separately approved Phase 4 planning checkpoint; do not access an Unraid provider yet
+Next action: review and approve or revise the proposed Phase 4 read-only contract; do not add dependencies or access an Unraid provider yet
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -465,10 +465,16 @@ identity in device flash; cleanup is never implicit.
 
 ## Phase 4: Unraid read-only feature
 
-Add an infrastructure-status feature and an Unraid connector. Keep Unraid
-payloads and credentials in the host. Normalize only the semantics needed by
-the accepted UI, and prove the connector against an isolated fake or test
-boundary before any live system access.
+The proposed contract is
+[`phase-4-unraid-read-only-proposal.md`](phase-4-unraid-read-only-proposal.md).
+It is not yet approved. Do not add an ADR, source, dependencies, credentials,
+or provider access until its domain mapping, TLS trust, credential storage,
+protocol additions, bounds, and exact dependencies are reviewed and accepted.
+
+After approval, add an infrastructure-status feature and an Unraid connector.
+Keep Unraid payloads and credentials in the host. Normalize only the semantics
+needed by the accepted UI, and prove the connector against an isolated fake or
+test boundary before any live system access.
 
 Live Unraid inspection and control require a separate explicit authorization.
 Do not broaden credentials or mutation permissions after an access denial.
@@ -542,12 +548,15 @@ Start a future development session with:
 > `docs/implementation-plan.md`, `docs/phase-0-feasibility-proposal.md`,
 > `docs/phase-2-slice-proposal.md`, `docs/phase-3-slice-proposal.md`, and
 > `docs/phase-3p-physical-slice-proposal.md`,
+> `docs/phase-4-unraid-read-only-proposal.md`,
 > `docs/decisions/0004-paired-host-protocol.md`, and
 > `docs/decisions/0005-core-s3-paired-availability.md`. Confirm that Phase 3 is
 > complete and Phase 3P was approved on 2026-08-24 with separate documentation,
 > implementation, and physical-evidence checkpoints. The implementation
-> checkpoint is complete; physically qualify Phase 3P before
-> planning Phase 4. Do not flash, provision, mutate device state, power-cycle,
+> checkpoint and physical qualification are complete. Phase 4 now has a
+> proposed but unapproved read-only
+> contract. Review that proposal before adding an ADR, code, dependencies, or
+> credentials. Do not flash, provision, mutate device state, power-cycle,
 > access a provider, release, push, or publish without the corresponding
 > explicit approval. Preserve and report the selected plaintext-NVS residual
 > state after any approved device run.
