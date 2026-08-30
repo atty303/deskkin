@@ -67,6 +67,7 @@ python scripts/phase3_device.py build
 cargo tree --locked -p application-core --edges normal
 cargo tree --locked -p application-features --edges normal
 cargo tree --locked -p deskkin-application --edges normal
+cargo tree --locked -p deskkin-host-capabilities --edges normal
 cargo tree --locked -p deskkin-protocol --edges normal
 '''
 

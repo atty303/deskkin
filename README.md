@@ -14,8 +14,9 @@ notifications, conversational AI, calendars, and home automation.
 Deskkin has completed its foundation gates, provider-neutral availability
 surface, authenticated host protocol, and the physically qualified CoreS3
 paired-availability slice. The maintained product paths now include portable
-`no_std` multi-feature application and protocol crates, the Linux host and
-simulator, and the CoreS3 firmware. Completed feasibility harnesses are no
+`no_std` multi-feature application and protocol crates, a host capability and
+connector composition crate, the Linux host and simulator, and the CoreS3
+firmware. Completed feasibility harnesses are no
 longer part of the active development surface; their contracts and evidence
 remain in `docs/`.
 
@@ -47,6 +48,11 @@ and the `deskkin-application` composition root. Zephyr owns hardware and system
 services, Embassy provides optional async orchestration, and Slint owns the
 declarative UI. Desktop and deterministic simulator adapters run the same
 application composition and UI without emulating Zephyr.
+
+The desktop host routes semantic requests through the closed
+`deskkin-host-capabilities` registry before adapting results to protocol major
+1. The current connector is deterministic availability only; it owns no
+provider payload, credential, or external authority.
 
 See [`docs/architecture.md`](docs/architecture.md) for component boundaries
 and the accepted ADRs under [`docs/decisions/`](docs/decisions/).

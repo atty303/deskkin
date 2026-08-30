@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, Foundation A, and Foundation B complete
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, and Foundations A-C complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 Current provider connector: none
@@ -11,9 +11,9 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: three-crate portable application composition, protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
+Implementation: three-crate portable application composition, host capability and connector composition, protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: prepare and review a Foundation C host capability and connector composition proposal; provider implementation remains deferred
+Next action: select and propose the first semantic provider slice; provider implementation and access remain deferred until that proposal is accepted
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -41,6 +41,16 @@ contracts. Its architecture is accepted in
 [`ADR-0007`](decisions/0007-multi-feature-application-composition.md). Provider
 connectors, protocol feature routing, and physical-device mutation remain
 outside this checkpoint.
+
+The implemented Foundation C checkpoint is
+[`foundation-c-host-capability-connector-composition-proposal.md`](foundation-c-host-capability-connector-composition-proposal.md).
+It introduces one host-only compile-time capability registry, connector
+lifecycle, namespaced connector effects, exact completion routing, and closed
+failure classification while retaining protocol major 1. Its architecture is
+accepted in
+[`ADR-0008`](decisions/0008-host-capability-connector-composition.md). Real
+providers, credentials, dynamic connector loading, and new protocol features
+remain deferred.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in

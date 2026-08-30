@@ -1038,6 +1038,7 @@ version = "0.1.0"
 name = "deskkin-desktop-host"
 version = "0.1.0"
 dependencies = [
+ "deskkin-host-capabilities",
  "deskkin-protocol",
  "local-run-recorder",
  "serde",
@@ -1046,6 +1047,10 @@ dependencies = [
  "tokio",
  "zeroize",
 ]
+
+[[package]]
+name = "deskkin-host-capabilities"
+version = "0.1.0"
 
 [[package]]
 name = "deskkin-noise-interop-tests"

@@ -71,6 +71,8 @@ pub enum Operation {
     PairingPersist,
     ProtocolNegotiate,
     AvailabilityRead,
+    HostCapabilityRoute,
+    ConnectorAvailabilityRead,
     ControlRoute,
     IdentityInit,
     IdentityUnpair,
@@ -158,6 +160,7 @@ pub enum ErrorType {
     TcpConnect,
     Noise,
     AvailabilityTimeout,
+    ConnectorUnavailable,
     RecordingDegraded,
 }
 

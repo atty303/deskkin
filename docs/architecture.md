@@ -135,6 +135,14 @@ connector converts an Unraid response into infrastructure status and declared
 actions. A future conversational connector converts provider streaming output
 into conversation events.
 
+Host semantic requests pass through the compile-time capability and connector
+composition defined by
+[`ADR-0008`](decisions/0008-host-capability-connector-composition.md). The
+composition root owns lifecycle, routing, connector identity, and completion
+correlation without depending on protocol or provider types. Protocol mapping
+remains at the desktop-host adapter, and provider execution remains behind the
+selected connector.
+
 ### Simulator
 
 The simulator runs the application core, presenter, and Slint UI with fake

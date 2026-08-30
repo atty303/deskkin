@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+deskkin-host-capabilities = { path = "../../crates/deskkin-host-capabilities" }
 deskkin-protocol = { path = "../../crates/deskkin-protocol" }
 local-run-recorder = { path = "../../crates/local-run-recorder" }
 serde = { version = "=1.0.229", default-features = false, features = ["derive"] }

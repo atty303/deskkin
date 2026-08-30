@@ -23,6 +23,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use deskkin_host_capabilities::{
+    AvailabilityValue as HostAvailabilityValue, CapabilityFailure, CapabilityRequest,
+    CapabilityResult, DeterministicAvailability, HostCapabilities,
+    Lifecycle as CapabilityLifecycle,
+};
 use deskkin_protocol::{
     APPLICATION_FRAME_MAX, AvailabilityResult, HelloRejectReason, Message, PRELUDE,
     PairingDecision, authentication_string, decode_frame_length, encode_frame_length,
@@ -52,12 +57,13 @@ pub fn new_context_id() -> Result<[u8; 16], SessionError> {
     Ok(value)
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DiagnosticKind {
     ProtocolPairing,
     ProtocolSession,
     AvailabilityRead,
+    HostAvailabilityRead,
     IdentityInit,
     IdentityUnpair,
 }
@@ -74,6 +80,8 @@ pub(crate) struct DiagnosticRecord {
     selected_features: Option<[u8; 8]>,
     granted_permissions: Option<[u8; 8]>,
     error_type: Option<local_run_recorder::ErrorType>,
+    #[serde(skip)]
+    connector_error_type: Option<local_run_recorder::ErrorType>,
     run_id: Option<String>,
     created_unix_ms: Option<u64>,
     duration_ms: Option<u32>,
@@ -98,6 +106,12 @@ pub(crate) struct DiagnosticSpan {
     run_id: String,
     created_unix_ms: u64,
     started_at: std::time::Instant,
+}
+
+#[derive(Debug)]
+struct AvailabilityDiagnostic {
+    span: DiagnosticSpan,
+    connector_error_type: Option<local_run_recorder::ErrorType>,
 }
 
 impl DiagnosticSpan {
@@ -198,7 +212,8 @@ pub struct IdentityStore {
     recording: RecordingMode,
     session_write_gate: Arc<Mutex<()>>,
     diagnostic_publisher: Arc<DiagnosticPublisher>,
-    availability_diagnostics: Arc<Mutex<std::collections::HashMap<[u8; 16], DiagnosticSpan>>>,
+    availability_diagnostics:
+        Arc<Mutex<std::collections::HashMap<[u8; 16], AvailabilityDiagnostic>>>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -258,17 +273,35 @@ impl IdentityStore {
         self.diagnostic_publisher.start(kind)
     }
     fn start_availability_diagnostic(&self, operation: [u8; 16]) {
-        if let Some(span) = self.start_diagnostic(DiagnosticKind::AvailabilityRead)
+        if let Some(span) = self.start_diagnostic(DiagnosticKind::HostAvailabilityRead)
             && let Ok(mut spans) = self.availability_diagnostics.lock()
         {
-            spans.insert(operation, span);
+            spans.insert(
+                operation,
+                AvailabilityDiagnostic {
+                    span,
+                    connector_error_type: None,
+                },
+            );
         }
     }
-    fn finish_availability_diagnostic(&self, operation: [u8; 16], record: DiagnosticRecord) {
+    fn classify_availability_diagnostic(
+        &self,
+        operation: [u8; 16],
+        error_type: Option<local_run_recorder::ErrorType>,
+    ) {
         if let Ok(mut spans) = self.availability_diagnostics.lock()
-            && let Some(span) = spans.remove(&operation)
+            && let Some(diagnostic) = spans.get_mut(&operation)
         {
-            span.finish(record);
+            diagnostic.connector_error_type = error_type;
+        }
+    }
+    fn finish_availability_diagnostic(&self, operation: [u8; 16], mut record: DiagnosticRecord) {
+        if let Ok(mut spans) = self.availability_diagnostics.lock()
+            && let Some(diagnostic) = spans.remove(&operation)
+        {
+            record.connector_error_type = diagnostic.connector_error_type;
+            diagnostic.span.finish(record);
         }
     }
     fn finish_all_availability_diagnostics(&self, session: [u8; 16], error: SessionError) {
@@ -277,10 +310,10 @@ impl IdentityStore {
             .lock()
             .map(|mut spans| spans.drain().collect::<Vec<_>>())
             .unwrap_or_default();
-        for (operation, span) in spans {
-            span.finish(DiagnosticRecord::availability_failure(
-                session, operation, error,
-            ));
+        for (operation, diagnostic) in spans {
+            let mut record = DiagnosticRecord::host_availability_failure(session, operation, error);
+            record.connector_error_type = diagnostic.connector_error_type;
+            diagnostic.span.finish(record);
         }
     }
     pub fn init(&self) -> Result<String, StoreError> {
@@ -821,7 +854,12 @@ fn diagnostic_run(
     } else {
         OperationStatus::Error
     };
-    let mut records = protocol_diagnostic_records(record.kind, status, record.error_type);
+    let mut records = protocol_diagnostic_records(
+        record.kind,
+        status,
+        record.error_type,
+        record.connector_error_type,
+    );
     if terminal {
         for operation in &mut records {
             operation.duration_ms = record.duration_ms;
@@ -882,7 +920,8 @@ fn diagnostic_run(
 fn protocol_diagnostic_records(
     kind: DiagnosticKind,
     terminal_status: OperationStatus,
-    error_type: Option<local_run_recorder::ErrorType>,
+    terminal_error_type: Option<local_run_recorder::ErrorType>,
+    connector_error_type: Option<local_run_recorder::ErrorType>,
 ) -> Vec<SemanticRecord> {
     let operations: &[Operation] = match kind {
         DiagnosticKind::ProtocolPairing => &[
@@ -901,24 +940,60 @@ fn protocol_diagnostic_records(
             Operation::TransportFrameRead,
             Operation::TransportFrameWrite,
         ],
+        DiagnosticKind::HostAvailabilityRead => &[
+            Operation::AvailabilityRead,
+            Operation::TransportFrameRead,
+            Operation::HostCapabilityRoute,
+            Operation::ConnectorAvailabilityRead,
+            Operation::TransportFrameWrite,
+        ],
         DiagnosticKind::IdentityInit => &[Operation::ControlRoute, Operation::IdentityInit],
         DiagnosticKind::IdentityUnpair => &[Operation::ControlRoute, Operation::IdentityUnpair],
     };
+    let connector_error_type = (kind == DiagnosticKind::HostAvailabilityRead)
+        .then_some(connector_error_type)
+        .flatten()
+        .filter(|error_type| {
+            matches!(
+                *error_type,
+                local_run_recorder::ErrorType::ReadUnavailable
+                    | local_run_recorder::ErrorType::ConnectorUnavailable
+                    | local_run_recorder::ErrorType::AvailabilityTimeout
+                    | local_run_recorder::ErrorType::Cancelled
+            )
+        });
     operations
         .iter()
         .enumerate()
         .map(|(index, operation)| {
             let terminal = index + 1 == operations.len();
+            let connector_failure = connector_error_type.is_some()
+                && *operation == Operation::ConnectorAvailabilityRead;
+            let terminal_failure = terminal && terminal_error_type.is_some();
             SemanticRecord {
                 operation: *operation,
                 operation_id: u16::try_from(index + 1).unwrap_or(u16::MAX),
                 parent_operation_id: (index != 0).then_some(1),
-                status: if terminal {
+                status: if connector_failure {
+                    match connector_error_type {
+                        Some(local_run_recorder::ErrorType::AvailabilityTimeout) => {
+                            OperationStatus::Timeout
+                        }
+                        Some(local_run_recorder::ErrorType::Cancelled) => OperationStatus::Cancel,
+                        _ => OperationStatus::Error,
+                    }
+                } else if terminal_failure {
                     terminal_status
                 } else {
                     OperationStatus::Success
                 },
-                error_type: terminal.then_some(error_type).flatten(),
+                error_type: if connector_failure {
+                    connector_error_type
+                } else if terminal_failure {
+                    terminal_error_type
+                } else {
+                    None
+                },
                 effect_id: None,
                 virtual_time_ms: 0,
                 end_virtual_time_ms: 0,
@@ -992,6 +1067,7 @@ impl DiagnosticRecord {
             selected_features: None,
             granted_permissions: None,
             error_type: None,
+            connector_error_type: None,
             run_id: Some(run_id),
             created_unix_ms: Some(created_unix_ms),
             duration_ms: None,
@@ -1010,6 +1086,7 @@ impl DiagnosticRecord {
             granted_permissions: None,
             error_type: (outcome == "error")
                 .then_some(local_run_recorder::ErrorType::IdentityStore),
+            connector_error_type: None,
             run_id: None,
             created_unix_ms: None,
             duration_ms: None,
@@ -1027,6 +1104,7 @@ impl DiagnosticRecord {
             selected_features: Some(deskkin_protocol::AVAILABILITY_READ_V1.0),
             granted_permissions: Some(deskkin_protocol::AVAILABILITY_READ_PERMISSION.0),
             error_type: None,
+            connector_error_type: None,
             run_id: None,
             created_unix_ms: None,
             duration_ms: None,
@@ -1049,6 +1127,7 @@ impl DiagnosticRecord {
             selected_features: None,
             granted_permissions: None,
             error_type: Some(error_type),
+            connector_error_type: None,
             run_id: None,
             created_unix_ms: None,
             duration_ms: None,
@@ -1072,10 +1151,21 @@ impl DiagnosticRecord {
             selected_features: Some(deskkin_protocol::AVAILABILITY_READ_V1.0),
             granted_permissions: Some(deskkin_protocol::AVAILABILITY_READ_PERMISSION.0),
             error_type: failed.then_some(local_run_recorder::ErrorType::ReadUnavailable),
+            connector_error_type: None,
             run_id: None,
             created_unix_ms: None,
             duration_ms: None,
         }
+    }
+    fn host_availability(
+        session: [u8; 16],
+        operation: [u8; 16],
+        result: AvailabilityResult,
+    ) -> Self {
+        let mut record = Self::availability(session, operation, result);
+        record.kind = DiagnosticKind::HostAvailabilityRead;
+        record.error_type = None;
+        record
     }
     fn session(session: [u8; 16]) -> Self {
         Self {
@@ -1089,6 +1179,7 @@ impl DiagnosticRecord {
             selected_features: Some(deskkin_protocol::AVAILABILITY_READ_V1.0),
             granted_permissions: Some(deskkin_protocol::AVAILABILITY_READ_PERMISSION.0),
             error_type: None,
+            connector_error_type: None,
             run_id: None,
             created_unix_ms: None,
             duration_ms: None,
@@ -1111,6 +1202,15 @@ impl DiagnosticRecord {
         record.operation_context_id = Some(hex(&operation));
         record
     }
+    fn host_availability_failure(
+        session: [u8; 16],
+        operation: [u8; 16],
+        error: SessionError,
+    ) -> Self {
+        let mut record = Self::availability_failure(session, operation, error);
+        record.kind = DiagnosticKind::HostAvailabilityRead;
+        record
+    }
     fn session_failure(session: [u8; 16], error: SessionError) -> Self {
         Self {
             schema_version: 1,
@@ -1123,6 +1223,7 @@ impl DiagnosticRecord {
             selected_features: None,
             granted_permissions: None,
             error_type: Some(error_type(error)),
+            connector_error_type: None,
             run_id: None,
             created_unix_ms: None,
             duration_ms: None,
@@ -2169,6 +2270,10 @@ fn run_availability_session_inner(
     session: [u8; 16],
     transport: snow::TransportState,
 ) -> Result<(), SessionError> {
+    let mut capabilities = HostCapabilities::new(host_availability(result));
+    capabilities
+        .lifecycle(CapabilityLifecycle::Start)
+        .map_err(|_| SessionError::Protocol)?;
     let transport = Arc::new(Mutex::new(transport));
     let writer = SessionWriter::start(
         stream.try_clone().map_err(|_| SessionError::Io)?,
@@ -2176,7 +2281,6 @@ fn run_availability_session_inner(
         store.clone(),
         generation,
         session,
-        result,
     );
     let mut last_request_id = 0_u32;
     stream
@@ -2199,6 +2303,11 @@ fn run_availability_session_inner(
                     return Err(SessionError::Identity);
                 }
                 store.start_availability_diagnostic(operation);
+                let invocation = capabilities
+                    .invoke(CapabilityRequest::ReadAvailability)
+                    .map_err(|_| SessionError::Protocol)?;
+                let (result, connector_error) = protocol_availability(invocation.result);
+                store.classify_availability_diagnostic(operation, connector_error);
                 let response = Message::AvailabilityResult {
                     request_id,
                     operation,
@@ -2207,7 +2316,7 @@ fn run_availability_session_inner(
                 if let Err(error) = writer.enqueue_application(response) {
                     store.finish_availability_diagnostic(
                         operation,
-                        DiagnosticRecord::availability_failure(session, operation, error),
+                        DiagnosticRecord::host_availability_failure(session, operation, error),
                     );
                     return Err(error);
                 }
@@ -2344,7 +2453,6 @@ impl SessionWriter {
         store: IdentityStore,
         generation: u64,
         session: [u8; 16],
-        availability: AvailabilityResult,
     ) -> Self {
         let (application, applications) = mpsc::sync_channel(8);
         let (control, controls) = mpsc::sync_channel(1);
@@ -2359,7 +2467,6 @@ impl SessionWriter {
                 &store,
                 generation,
                 session,
-                availability,
                 &applications,
                 &controls,
                 &writer_close,
@@ -2430,7 +2537,6 @@ fn run_session_writer(
     store: &IdentityStore,
     generation: u64,
     session: [u8; 16],
-    availability: AvailabilityResult,
     applications: &mpsc::Receiver<Message>,
     controls: &mpsc::Receiver<WriterControl>,
     close: &Mutex<Option<deskkin_protocol::CloseReason>>,
@@ -2464,8 +2570,10 @@ fn run_session_writer(
             }
             continue;
         };
-        let operation = match message {
-            Message::AvailabilityResult { operation, .. } => Some(operation),
+        let availability = match message {
+            Message::AvailabilityResult {
+                operation, result, ..
+            } => Some((operation, result)),
             _ => None,
         };
         let _gate = store
@@ -2481,15 +2589,52 @@ fn run_session_writer(
         }
         write_message_shared(stream, transport, &message)?;
         last_write = std::time::Instant::now();
-        if let Some(operation) = operation {
+        if let Some((operation, result)) = availability {
             store.finish_availability_diagnostic(
                 operation,
-                DiagnosticRecord::availability(session, operation, availability),
+                DiagnosticRecord::host_availability(session, operation, result),
             );
         }
         if matches!(message, Message::Close { .. }) {
             return Ok(());
         }
+    }
+}
+
+const fn host_availability(result: AvailabilityResult) -> DeterministicAvailability {
+    match result {
+        AvailabilityResult::Available => DeterministicAvailability::Available,
+        AvailabilityResult::Unavailable => DeterministicAvailability::Unavailable,
+        AvailabilityResult::ReadFailed => DeterministicAvailability::ReadFailed,
+    }
+}
+
+const fn protocol_availability(
+    result: CapabilityResult,
+) -> (AvailabilityResult, Option<local_run_recorder::ErrorType>) {
+    match result {
+        CapabilityResult::Availability(Ok(HostAvailabilityValue::Available)) => {
+            (AvailabilityResult::Available, None)
+        }
+        CapabilityResult::Availability(Ok(HostAvailabilityValue::Unavailable)) => {
+            (AvailabilityResult::Unavailable, None)
+        }
+        CapabilityResult::Availability(Err(CapabilityFailure::ReadFailed)) => (
+            AvailabilityResult::ReadFailed,
+            Some(local_run_recorder::ErrorType::ReadUnavailable),
+        ),
+        CapabilityResult::Availability(Err(CapabilityFailure::ConnectorUnavailable)) => (
+            AvailabilityResult::ReadFailed,
+            Some(local_run_recorder::ErrorType::ConnectorUnavailable),
+        ),
+        CapabilityResult::Availability(Err(CapabilityFailure::Timeout)) => (
+            AvailabilityResult::ReadFailed,
+            Some(local_run_recorder::ErrorType::AvailabilityTimeout),
+        ),
+        CapabilityResult::Availability(Err(CapabilityFailure::Cancelled)) => (
+            AvailabilityResult::ReadFailed,
+            Some(local_run_recorder::ErrorType::Cancelled),
+        ),
     }
 }
 
@@ -4912,5 +5057,98 @@ mod tests {
         fs::write(&canonical, serde_json::to_vec(&value).unwrap()).unwrap();
         fs::set_permissions(&canonical, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(variant_store.peer(), Err(StoreError::Invalid));
+    }
+
+    #[test]
+    fn host_capability_failures_collapse_only_at_the_protocol_boundary() {
+        for (failure, expected_error) in [
+            (
+                CapabilityFailure::ReadFailed,
+                local_run_recorder::ErrorType::ReadUnavailable,
+            ),
+            (
+                CapabilityFailure::ConnectorUnavailable,
+                local_run_recorder::ErrorType::ConnectorUnavailable,
+            ),
+            (
+                CapabilityFailure::Timeout,
+                local_run_recorder::ErrorType::AvailabilityTimeout,
+            ),
+            (
+                CapabilityFailure::Cancelled,
+                local_run_recorder::ErrorType::Cancelled,
+            ),
+        ] {
+            assert_eq!(
+                protocol_availability(CapabilityResult::Availability(Err(failure))),
+                (AvailabilityResult::ReadFailed, Some(expected_error))
+            );
+        }
+    }
+
+    #[test]
+    fn host_connector_diagnostic_identifies_the_exact_failure_stage() {
+        let records = protocol_diagnostic_records(
+            DiagnosticKind::HostAvailabilityRead,
+            OperationStatus::Error,
+            None,
+            Some(local_run_recorder::ErrorType::AvailabilityTimeout),
+        );
+        assert_eq!(records.len(), 5);
+        assert_eq!(records[2].operation, Operation::HostCapabilityRoute);
+        assert_eq!(records[2].status, OperationStatus::Success);
+        assert_eq!(records[3].operation, Operation::ConnectorAvailabilityRead);
+        assert_eq!(records[3].status, OperationStatus::Timeout);
+        assert_eq!(
+            records[3].error_type,
+            Some(local_run_recorder::ErrorType::AvailabilityTimeout)
+        );
+        assert_eq!(records[4].operation, Operation::TransportFrameWrite);
+        assert_eq!(records[4].status, OperationStatus::Success);
+
+        let client_records = protocol_diagnostic_records(
+            DiagnosticKind::AvailabilityRead,
+            OperationStatus::Success,
+            None,
+            None,
+        );
+        assert_eq!(client_records.len(), 3);
+        assert!(client_records.iter().all(|record| !matches!(
+            record.operation,
+            Operation::HostCapabilityRoute | Operation::ConnectorAvailabilityRead
+        )));
+    }
+
+    #[test]
+    fn host_diagnostic_preserves_connector_and_delivery_failures() {
+        for (delivery_failure, expected_delivery_error) in [
+            (
+                SessionError::Io,
+                local_run_recorder::ErrorType::ConnectionLost,
+            ),
+            (
+                SessionError::QueueFull,
+                local_run_recorder::ErrorType::QueueFull,
+            ),
+        ] {
+            let mut record =
+                DiagnosticRecord::host_availability_failure([1; 16], [2; 16], delivery_failure);
+            record.connector_error_type = Some(local_run_recorder::ErrorType::ReadUnavailable);
+            let run = diagnostic_run(ResourceRole::Host, record, true, None);
+            let connector = run
+                .records
+                .iter()
+                .find(|record| record.operation == Operation::ConnectorAvailabilityRead)
+                .unwrap();
+            assert_eq!(connector.status, OperationStatus::Error);
+            assert_eq!(
+                connector.error_type,
+                Some(local_run_recorder::ErrorType::ReadUnavailable)
+            );
+            let delivery = run.records.last().unwrap();
+            assert_eq!(delivery.operation, Operation::TransportFrameWrite);
+            assert_eq!(delivery.status, OperationStatus::Error);
+            assert_eq!(delivery.error_type, Some(expected_delivery_error));
+        }
     }
 }

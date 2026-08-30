@@ -5,6 +5,7 @@ members = [
   "crates/application-core",
   "crates/application-features",
   "crates/deskkin-application",
+  "crates/deskkin-host-capabilities",
   "crates/deskkin-protocol",
   "crates/deskkin-protocol-client",
   "crates/deskkin-noise-interop-tests",
