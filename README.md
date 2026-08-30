@@ -14,9 +14,10 @@ notifications, conversational AI, calendars, and home automation.
 Deskkin has completed its foundation gates, provider-neutral availability
 surface, authenticated host protocol, and the physically qualified CoreS3
 paired-availability slice. The maintained product paths now include portable
-`no_std` application and protocol crates, the Linux host and simulator, and the
-CoreS3 firmware. Completed feasibility harnesses are no longer part of the
-active development surface; their contracts and evidence remain in `docs/`.
+`no_std` multi-feature application and protocol crates, the Linux host and
+simulator, and the CoreS3 firmware. Completed feasibility harnesses are no
+longer part of the active development surface; their contracts and evidence
+remain in `docs/`.
 
 The agreed product boundary, architecture, decisions, evidence, and phased plan
 remain in [`docs/implementation-plan.md`](docs/implementation-plan.md). Phase 2
@@ -40,10 +41,12 @@ credentials                                Zephyr hardware platform
 policy                                     Embassy async runtime
 ```
 
-The application core is portable `no_std` Rust. Zephyr owns hardware and
-system services, Embassy provides optional async orchestration, and Slint owns
-the declarative UI. Desktop and deterministic simulator adapters run the same
-application and UI without emulating Zephyr.
+The portable application is split into a feature-neutral `application-core`,
+an `application-features` crate containing availability and synthetic notice,
+and the `deskkin-application` composition root. Zephyr owns hardware and system
+services, Embassy provides optional async orchestration, and Slint owns the
+declarative UI. Desktop and deterministic simulator adapters run the same
+application composition and UI without emulating Zephyr.
 
 See [`docs/architecture.md`](docs/architecture.md) for component boundaries
 and the accepted ADRs under [`docs/decisions/`](docs/decisions/).
@@ -86,6 +89,7 @@ Run the Linux simulator and deterministic scenarios with:
 mise run simulator:desktop
 mise run simulator:scenario -- periodic-success
 mise run simulator:scenario -- periodic-read-failure
+mise run simulator:scenario -- multi-feature-composition
 ```
 
 The native fake repeats `Available`, `Unavailable`, and read failure after an
@@ -93,7 +97,10 @@ initial 250 ms read and five-second refresh timers. Headless results and bounded
 default-on diagnostics are atomically written below `.deskkin/phase2/`.
 Recording can be disabled by passing `--recording-off` to either binary.
 Refresh runs publish a private in-progress marker and replace it on completion;
-the next store access recovers a marker left by a crash as a partial run.
+the next store access recovers a marker left by a crash as a partial run. The
+multi-feature scenario also proves deterministic notice preemption, underlying
+availability progress, session invalidation, and restoration without exposing
+a production notice command.
 
 Diagnostic administration accepts only an exact operation and run ID:
 

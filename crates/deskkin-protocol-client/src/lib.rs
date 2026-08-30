@@ -1,9 +1,6 @@
 #![no_std]
 #![allow(clippy::missing_errors_doc)]
 
-use application_core::{
-    Availability, AvailabilityInvalidated, Core, Input, ReadCompleted, ReadError, State,
-};
 use deskkin_protocol::{AvailabilityResult, ContextId, HelloRejectReason};
 
 pub const RECONNECT_DELAYS_MS: [u32; 5] = [250, 500, 1_000, 2_000, 5_000];
@@ -23,7 +20,6 @@ pub enum ProtocolAdapterError {
     NoActiveRead,
     SessionMismatch,
     RequestMismatch,
-    CoreRejected,
     ActiveRead,
     Stopped,
 }
@@ -35,11 +31,27 @@ pub enum TerminalReason {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AvailabilityValue {
+    Available,
+    Unavailable,
+    ReadFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolEvent {
+    AvailabilityCompleted {
+        effect_id: u64,
+        value: AvailabilityValue,
+    },
+    SessionInvalidated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProtocolAdapter {
     state: ConnectionState,
     session: Option<ContextId>,
     request_id: u32,
-    active: Option<(ContextId, u32, application_core::EffectId)>,
+    active: Option<(ContextId, u32, u64)>,
     backoff_index: usize,
     terminal_reason: Option<TerminalReason>,
 }
@@ -140,7 +152,7 @@ impl ProtocolAdapter {
 
     pub fn begin_read(
         &mut self,
-        core: &Core,
+        effect_id: u64,
         operation: ContextId,
     ) -> Result<u32, ProtocolAdapterError> {
         if self.state != ConnectionState::Authenticated {
@@ -149,9 +161,9 @@ impl ProtocolAdapter {
         if self.active.is_some() {
             return Err(ProtocolAdapterError::ActiveRead);
         }
-        let State::Reading { effect_id } = core.state() else {
+        if effect_id == 0 {
             return Err(ProtocolAdapterError::NoActiveRead);
-        };
+        }
         let next = self
             .request_id
             .checked_add(1)
@@ -163,12 +175,11 @@ impl ProtocolAdapter {
 
     pub fn result(
         &mut self,
-        core: &mut Core,
         session: ContextId,
         request_id: u32,
         operation: ContextId,
         result: AvailabilityResult,
-    ) -> Result<Option<application_core::Effect>, ProtocolAdapterError> {
+    ) -> Result<ProtocolEvent, ProtocolAdapterError> {
         if self.state != ConnectionState::Authenticated || self.session != Some(session) {
             return Err(ProtocolAdapterError::SessionMismatch);
         }
@@ -178,36 +189,25 @@ impl ProtocolAdapter {
         if expected_request != request_id || expected_operation != operation {
             return Err(ProtocolAdapterError::RequestMismatch);
         }
-        let result = match result {
-            AvailabilityResult::Available => Ok(Availability::Available),
-            AvailabilityResult::Unavailable => Ok(Availability::Unavailable),
-            AvailabilityResult::ReadFailed => Err(ReadError::Unavailable),
+        let value = match result {
+            AvailabilityResult::Available => AvailabilityValue::Available,
+            AvailabilityResult::Unavailable => AvailabilityValue::Unavailable,
+            AvailabilityResult::ReadFailed => AvailabilityValue::ReadFailed,
         };
-        let next = core
-            .transition(Input::ReadCompleted(ReadCompleted { effect_id, result }))
-            .map_err(|_| ProtocolAdapterError::CoreRejected)?
-            .effect;
         self.active = None;
         self.backoff_index = 0;
-        Ok(next)
+        Ok(ProtocolEvent::AvailabilityCompleted { effect_id, value })
     }
 
-    pub fn disconnected(
-        &mut self,
-        core: &mut Core,
-    ) -> Result<Option<application_core::Effect>, ProtocolAdapterError> {
+    pub fn disconnected(&mut self) -> Option<ProtocolEvent> {
         if self.state == ConnectionState::Stopped {
-            return Ok(None);
+            return None;
         }
         self.state = ConnectionState::Backoff;
         self.session = None;
         self.active = None;
         self.terminal_reason = None;
-        core.transition(Input::AvailabilityInvalidated(
-            AvailabilityInvalidated::SourceUnavailable,
-        ))
-        .map(|transition| transition.effect)
-        .map_err(|_| ProtocolAdapterError::CoreRejected)
+        Some(ProtocolEvent::SessionInvalidated)
     }
 
     pub fn stop(&mut self) {
@@ -220,58 +220,45 @@ impl ProtocolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use application_core::{Command, StatusView, TimerArmCompleted};
 
     #[test]
     fn maps_all_results_and_rejects_stale_session() {
-        for (wire, view) in [
-            (AvailabilityResult::Available, StatusView::Available),
-            (AvailabilityResult::Unavailable, StatusView::Unavailable),
-            (AvailabilityResult::ReadFailed, StatusView::Unknown),
+        for (wire, value) in [
+            (AvailabilityResult::Available, AvailabilityValue::Available),
+            (
+                AvailabilityResult::Unavailable,
+                AvailabilityValue::Unavailable,
+            ),
+            (
+                AvailabilityResult::ReadFailed,
+                AvailabilityValue::ReadFailed,
+            ),
         ] {
-            let mut core = Core::new();
-            core.transition(Input::Command(Command::Start)).unwrap();
             let mut adapter = ProtocolAdapter::new();
             adapter.authenticated([1; 16]);
-            let request = adapter.begin_read(&core, [2; 16]).unwrap();
-            adapter
-                .result(&mut core, [1; 16], request, [2; 16], wire)
-                .unwrap();
-            assert_eq!(core.view(), view);
+            let request = adapter.begin_read(7, [2; 16]).unwrap();
             assert_eq!(
-                adapter.result(&mut core, [9; 16], request, [2; 16], wire),
+                adapter.result([1; 16], request, [2; 16], wire).unwrap(),
+                ProtocolEvent::AvailabilityCompleted {
+                    effect_id: 7,
+                    value,
+                }
+            );
+            assert_eq!(
+                adapter.result([9; 16], request, [2; 16], wire),
                 Err(ProtocolAdapterError::SessionMismatch)
             );
         }
     }
 
     #[test]
-    fn disconnect_invalidates_waiting_without_changing_timer() {
-        let mut core = Core::new();
-        let read = core
-            .transition(Input::Command(Command::Start))
-            .unwrap()
-            .effect
-            .unwrap();
-        let timer = core
-            .transition(Input::ReadCompleted(ReadCompleted {
-                effect_id: read.id,
-                result: Ok(Availability::Available),
-            }))
-            .unwrap()
-            .effect
-            .unwrap();
-        core.transition(Input::TimerArmCompleted(TimerArmCompleted {
-            effect_id: timer.id,
-            result: Ok(()),
-        }))
-        .unwrap();
-        let state = core.state();
+    fn disconnect_emits_semantic_invalidation() {
         let mut adapter = ProtocolAdapter::new();
         adapter.authenticated([1; 16]);
-        adapter.disconnected(&mut core).unwrap();
-        assert_eq!(core.view(), StatusView::Unknown);
-        assert_eq!(core.state(), state);
+        assert_eq!(
+            adapter.disconnected(),
+            Some(ProtocolEvent::SessionInvalidated)
+        );
         assert_eq!(adapter.state(), ConnectionState::Backoff);
     }
 
@@ -281,17 +268,9 @@ mod tests {
         assert_eq!(adapter.connection_failed(), Ok(250));
         assert_eq!(adapter.connection_failed(), Ok(500));
         adapter.authenticated([1; 16]);
-        let mut core = Core::new();
-        core.transition(Input::Command(Command::Start)).unwrap();
-        let request = adapter.begin_read(&core, [2; 16]).unwrap();
+        let request = adapter.begin_read(1, [2; 16]).unwrap();
         adapter
-            .result(
-                &mut core,
-                [1; 16],
-                request,
-                [2; 16],
-                AvailabilityResult::Available,
-            )
+            .result([1; 16], request, [2; 16], AvailabilityResult::Available)
             .unwrap();
         assert_eq!(adapter.connection_failed(), Ok(250));
         adapter.hello_rejected(HelloRejectReason::PermissionDenied);

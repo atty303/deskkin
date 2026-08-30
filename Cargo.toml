@@ -3,6 +3,8 @@ members = [
   "apps/desktop-host",
   "apps/simulator",
   "crates/application-core",
+  "crates/application-features",
+  "crates/deskkin-application",
   "crates/deskkin-protocol",
   "crates/deskkin-protocol-client",
   "crates/deskkin-noise-interop-tests",

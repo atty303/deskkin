@@ -1,13 +1,13 @@
 # Foundation B proposal: multi-feature application composition
 
-Status: Proposed
+Status: Accepted and implemented
 
 Date: 2026-08-30
 
-This proposal is the approval boundary for Foundation B. It defines the next
-portable application checkpoint after the completed repeatable physical
-profile. Reviewing this document does not authorize an ADR, implementation,
-dependency change, protocol change, private-LAN launch, device access, provider
+This document records the accepted and implemented Foundation B contract. Its
+implementation authority was limited to the architecture, isolated tests,
+shared UI, reproducible builds, and documentation defined here. It did not
+authorize a protocol change, private-LAN launch, device access, provider
 access, push, release, or publication.
 
 ## Goal and observable result
@@ -358,25 +358,39 @@ recorder, and existing application/runtime adapters. Existing GPL-bearing
 simulator/device binary boundaries remain unchanged. No binary, package,
 release, or published artifact is produced.
 
-## Ordered checkpoints
+## Completed checkpoints
 
-1. Review and approve or revise this proposal. Approval authorizes only the
-   architecture, implementation, isolated tests, shared UI changes,
-   reproducible builds, and documentation defined above.
-2. After approval, record the long-lived application composition and surface
-   ownership decision in a new ADR without rewriting ADR-0003 or ADR-0004.
-3. Refactor `application-core`, add `application-features` and
-   `deskkin-application`, then implement the synthetic conformance feature,
-   presenter shell, adapters, observation records, and deterministic scenarios
-   as one reviewed local checkpoint.
-4. Run `mise run fix`, `mise run test`, portable dependency inspection, and a
-   fresh durable review before committing the implementation.
+1. The proposal was approved for the architecture, implementation, isolated
+   tests, shared UI changes, reproducible builds, and documentation above.
+2. ADR-0007 records the long-lived application composition and surface
+   ownership decision without rewriting ADR-0003 or ADR-0004.
+3. `application-core`, `application-features`, `deskkin-application`, the
+   synthetic conformance feature, presenter shell, adapters, observation
+   records, and deterministic scenarios form one reviewed local checkpoint.
+4. `mise run fix`, `mise run test`, portable dependency inspection, and a
+   fresh durable review close the implementation checkpoint.
 
 Physical hardware, private-LAN launch, device mutation, provider access,
 Foundation C, push, release, and publication remain outside these checkpoints
 unless separately requested.
 
-## Approval choices proposed
+## Implementation result
+
+Foundation B completed on 2026-08-30. ADR-0007 records the long-lived decision.
+The workspace now contains the feature-neutral `application-core`, the shared
+`application-features` crate with availability and synthetic notice, and the
+`deskkin-application` composition root. The protocol client emits semantic
+events without depending on any application crate.
+
+The desktop simulator, deterministic headless scenario, and CoreS3 firmware
+compile the same application composition and shared Slint application surface.
+The `multi-feature-composition` replay proves notice preemption, covered
+availability change, restoration, session invalidation, stale-expiry
+rejection, and reconnect without notice restoration. Recording on and off
+produce the same replay content and frames. No physical device, retained
+profile, private-LAN listener, provider, or external service was accessed.
+
+## Accepted decisions
 
 - Composition is a closed compile-time registry, not a dynamic plugin ABI.
 - `application-core` owns feature-neutral contracts,

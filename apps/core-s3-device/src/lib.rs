@@ -1116,11 +1116,15 @@ fn availability_loop(
     if unsafe { deskkin_tcp_set_timeout(descriptor, 10) } != 0 {
         return Err(SessionFailure::Tcp);
     }
-    let mut core = application_core::Core::new();
-    core.transition(application_core::Input::Command(
-        application_core::Command::Start,
-    ))
-    .map_err(|_| SessionFailure::Protocol)?;
+    let mut application = deskkin_application::Application::new();
+    let mut read_effect = application
+        .transition(deskkin_application::ApplicationInput::Lifecycle(
+            deskkin_application::Lifecycle::Start,
+        ))
+        .map_err(|_| SessionFailure::Protocol)?
+        .effects
+        .get(0)
+        .ok_or(SessionFailure::Protocol)?;
     let mut adapter = deskkin_protocol_client::ProtocolAdapter::new();
     adapter.authenticated(session);
     let mut control_frame = [0_u8; deskkin_core_s3::CONTROL_PAYLOAD_MAX + 28];
@@ -1133,7 +1137,7 @@ fn availability_loop(
             LAST_STAGE.store(6, Ordering::Release);
             store_context(&OPERATION_CONTEXT, operation);
             let request_id = adapter
-                .begin_read(&core, operation)
+                .begin_read(read_effect.id.local.get(), operation)
                 .map_err(|_| SessionFailure::Protocol)?;
             let deadline = deadline_after(2_000);
             write_message(
@@ -1153,33 +1157,76 @@ fn availability_loop(
                         operation: received_operation,
                         result,
                     } => {
-                        let timer = adapter
-                            .result(&mut core, session, received_id, received_operation, result)
-                            .map_err(|_| SessionFailure::Protocol)?
-                            .ok_or(SessionFailure::Protocol)?;
                         if received_id != request_id || received_operation != operation {
                             return Err(SessionFailure::Protocol);
                         }
+                        let event = adapter
+                            .result(session, received_id, received_operation, result)
+                            .map_err(|_| SessionFailure::Protocol)?;
+                        let deskkin_protocol_client::ProtocolEvent::AvailabilityCompleted {
+                            effect_id,
+                            value,
+                        } = event
+                        else {
+                            return Err(SessionFailure::Protocol);
+                        };
+                        let effect_id = deskkin_application::LocalEffectId::new(effect_id)
+                            .ok_or(SessionFailure::Protocol)?;
+                        let result = match value {
+                            deskkin_protocol_client::AvailabilityValue::Available => {
+                                Ok(deskkin_application::availability::Availability::Available)
+                            }
+                            deskkin_protocol_client::AvailabilityValue::Unavailable => {
+                                Ok(deskkin_application::availability::Availability::Unavailable)
+                            }
+                            deskkin_protocol_client::AvailabilityValue::ReadFailed => {
+                                Err(deskkin_application::availability::ReadError::Unavailable)
+                            }
+                        };
+                        let transition = application
+                            .transition(deskkin_application::ApplicationInput::availability(
+                                read_effect.id,
+                                deskkin_application::availability::Input::ReadCompleted(
+                                    deskkin_application::availability::ReadCompleted {
+                                        effect_id,
+                                        result,
+                                    },
+                                ),
+                            ))
+                            .map_err(|_| SessionFailure::Protocol)?;
+                        let timer = transition.effects.get(0).ok_or(SessionFailure::Protocol)?;
                         VALID_RESULT.store(1, Ordering::Release);
                         RESULT_ATTEMPT
                             .store(RUN_ATTEMPT.load(Ordering::Acquire), Ordering::Release);
                         UI_VIEW.store(
-                            match core.view() {
-                                application_core::StatusView::Unknown => 0,
-                                application_core::StatusView::Available => 1,
-                                application_core::StatusView::Unavailable => 2,
+                            match transition.view {
+                                deskkin_application::ApplicationView::Availability(
+                                    deskkin_application::availability::Surface::Unknown,
+                                )
+                                | deskkin_application::ApplicationView::Empty
+                                | deskkin_application::ApplicationView::SyntheticNotice(_) => 0,
+                                deskkin_application::ApplicationView::Availability(
+                                    deskkin_application::availability::Surface::Available,
+                                ) => 1,
+                                deskkin_application::ApplicationView::Availability(
+                                    deskkin_application::availability::Surface::Unavailable,
+                                ) => 2,
                             },
                             Ordering::Release,
                         );
                         LAST_STAGE.store(7, Ordering::Release);
                         LAST_ERROR.store(0, Ordering::Release);
-                        core.transition(application_core::Input::TimerArmCompleted(
-                            application_core::TimerArmCompleted {
-                                effect_id: timer.id,
-                                result: Ok(()),
-                            },
-                        ))
-                        .map_err(|_| SessionFailure::Protocol)?;
+                        application
+                            .transition(deskkin_application::ApplicationInput::availability(
+                                timer.id,
+                                deskkin_application::availability::Input::TimerArmCompleted(
+                                    deskkin_application::availability::TimerArmCompleted {
+                                        effect_id: timer.id.local,
+                                        result: Ok(()),
+                                    },
+                                ),
+                            ))
+                            .map_err(|_| SessionFailure::Protocol)?;
                         for _ in 0..500 {
                             if let Some(active) = poll_active_control(&mut control_frame) {
                                 return Err(SessionFailure::Control(active));
@@ -1203,12 +1250,19 @@ fn availability_loop(
                             }
                             unsafe { deskkin_sleep_ms(10) };
                         }
-                        core.transition(application_core::Input::RefreshDue(
-                            application_core::RefreshDue {
-                                effect_id: timer.id,
-                            },
-                        ))
-                        .map_err(|_| SessionFailure::Protocol)?;
+                        read_effect = application
+                            .transition(deskkin_application::ApplicationInput::availability(
+                                timer.id,
+                                deskkin_application::availability::Input::RefreshDue(
+                                    deskkin_application::availability::RefreshDue {
+                                        effect_id: timer.id.local,
+                                    },
+                                ),
+                            ))
+                            .map_err(|_| SessionFailure::Protocol)?
+                            .effects
+                            .get(0)
+                            .ok_or(SessionFailure::Protocol)?;
                         break;
                     }
                     deskkin_protocol::Message::Ping => {
@@ -1226,7 +1280,13 @@ fn availability_loop(
         }
     })();
     if result.is_err() {
-        let _ = adapter.disconnected(&mut core);
+        if let Some(deskkin_protocol_client::ProtocolEvent::SessionInvalidated) =
+            adapter.disconnected()
+        {
+            let _ = application.transition(deskkin_application::ApplicationInput::Lifecycle(
+                deskkin_application::Lifecycle::SessionInvalidated,
+            ));
+        }
         UI_VIEW.store(0, Ordering::Release);
     }
     result

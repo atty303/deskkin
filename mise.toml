@@ -55,13 +55,18 @@ cargo test --locked --workspace
 cargo run --locked --quiet --bin deskkin-scenario -- periodic-success --recording-off
 cargo run --locked --quiet --bin deskkin-scenario -- periodic-read-failure --recording-off
 cargo run --locked --quiet --bin deskkin-scenario -- protocol-disconnect-recovery --recording-off
+cargo run --locked --quiet --bin deskkin-scenario -- multi-feature-composition --recording-off
 cargo check --locked -p application-core --target thumbv7m-none-eabi
+cargo check --locked -p application-features --target thumbv7m-none-eabi
+cargo check --locked -p deskkin-application --target thumbv7m-none-eabi
 cargo check --locked -p deskkin-protocol --target thumbv7m-none-eabi
 cargo check --locked -p deskkin-protocol-client --target thumbv7m-none-eabi
 cargo check --locked -p deskkin-core-s3 --target thumbv7m-none-eabi
 DESKKIN_TEST_AGE=1 python -m unittest discover -s tests
 python scripts/phase3_device.py build
 cargo tree --locked -p application-core --edges normal
+cargo tree --locked -p application-features --edges normal
+cargo tree --locked -p deskkin-application --edges normal
 cargo tree --locked -p deskkin-protocol --edges normal
 '''
 

@@ -1,9 +1,13 @@
 use std::fmt;
 use std::rc::Rc;
 
-use application_core::{
-    Availability, AvailabilityInvalidated, Command, Core, Effect, EffectRequest, Input,
-    ReadCompleted, ReadError, RefreshDue, StatusView, TimerArmCompleted,
+use deskkin_application::{
+    Application, ApplicationInput, ApplicationView, Effect, EffectRequest, Lifecycle,
+    availability::{
+        self, Availability, Input as AvailabilityInput, ReadCompleted, ReadError, RefreshDue,
+        TimerArmCompleted,
+    },
+    synthetic_notice,
 };
 use serde::{Deserialize, Serialize};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
@@ -49,6 +53,7 @@ pub enum ScenarioName {
     PeriodicSuccess,
     PeriodicReadFailure,
     ProtocolDisconnectRecovery,
+    MultiFeatureComposition,
 }
 
 impl ScenarioName {
@@ -62,6 +67,7 @@ impl ScenarioName {
             "periodic-success" => Ok(Self::PeriodicSuccess),
             "periodic-read-failure" => Ok(Self::PeriodicReadFailure),
             "protocol-disconnect-recovery" => Ok(Self::ProtocolDisconnectRecovery),
+            "multi-feature-composition" => Ok(Self::MultiFeatureComposition),
             _ => Err(format!("unknown scenario: {value}")),
         }
     }
@@ -71,6 +77,7 @@ impl ScenarioName {
             Self::PeriodicSuccess => "periodic-success",
             Self::PeriodicReadFailure => "periodic-read-failure",
             Self::ProtocolDisconnectRecovery => "protocol-disconnect-recovery",
+            Self::MultiFeatureComposition => "multi-feature-composition",
         }
     }
 }
@@ -94,6 +101,11 @@ enum TraceKind {
     RefreshDue,
     ViewApplied,
     SourceUnavailable,
+    NoticeShow,
+    NoticeArmRequested,
+    NoticeArmed,
+    NoticeExpired,
+    SessionInvalidated,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,18 +118,70 @@ struct TraceRecord {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+enum FeatureName {
+    Availability,
+    SyntheticNotice,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LifecycleName {
+    Start,
+    SessionInvalidated,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EffectName {
+    ReadAvailability,
+    ArmRefreshTimer,
+    ArmNoticeExpiry,
+    NoticeExpiryDue,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SurfaceClassName {
+    Ambient,
+    Information,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TransitionOutcome {
+    Success,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct CompositionRecord {
+    virtual_time_ms: u64,
+    routed_feature: Option<FeatureName>,
+    lifecycle: Option<LifecycleName>,
+    effect: Option<EffectName>,
+    surface_owner: Option<FeatureName>,
+    surface_class: Option<SurfaceClassName>,
+    outcome: TransitionOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum ViewName {
+    Empty,
     Unknown,
     Available,
     Unavailable,
+    Notice,
 }
 
-impl From<StatusView> for ViewName {
-    fn from(value: StatusView) -> Self {
+impl From<ApplicationView> for ViewName {
+    fn from(value: ApplicationView) -> Self {
         match value {
-            StatusView::Unknown => Self::Unknown,
-            StatusView::Available => Self::Available,
-            StatusView::Unavailable => Self::Unavailable,
+            ApplicationView::Empty => Self::Empty,
+            ApplicationView::Availability(availability::Surface::Unknown) => Self::Unknown,
+            ApplicationView::Availability(availability::Surface::Available) => Self::Available,
+            ApplicationView::Availability(availability::Surface::Unavailable) => Self::Unavailable,
+            ApplicationView::SyntheticNotice(_) => Self::Notice,
         }
     }
 }
@@ -125,6 +189,7 @@ impl From<StatusView> for ViewName {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct Replay {
     semantic_records: Vec<TraceRecord>,
+    composition_records: Vec<CompositionRecord>,
     views: Vec<ViewName>,
     virtual_timestamps_ms: Vec<u64>,
     rgb565_frames: Vec<Vec<u8>>,
@@ -138,6 +203,19 @@ struct RefreshEvidence {
 struct ExecutedReplay {
     replay: Replay,
     refreshes: Vec<RefreshEvidence>,
+}
+
+struct ReplayExecution {
+    ui: StatusWindow,
+    application: Application,
+    trace: Vec<TraceRecord>,
+    composition_records: Vec<CompositionRecord>,
+    views: Vec<ViewName>,
+    times: Vec<u64>,
+    frames: Vec<Vec<u8>>,
+    refreshes: Vec<RefreshEvidence>,
+    first_timer: Effect,
+    second_result: Result<Availability, ReadError>,
 }
 
 #[derive(Serialize)]
@@ -175,7 +253,7 @@ pub fn run_scenario_command(
         let _ = recorder.publish(in_progress_run(
             run_id.clone(),
             scenario_run_id.clone(),
-            effect.id.get(),
+            effect.id.local.get(),
             started_ms,
         ));
         first_run_ids.push((run_id, effect, started_ms));
@@ -193,7 +271,7 @@ pub fn run_scenario_command(
         let _ = recorder.publish(in_progress_run(
             run_id.clone(),
             scenario_run_id.clone(),
-            effect.id.get(),
+            effect.id.local.get(),
             started_ms,
         ));
         second_run_ids.push((run_id, effect, started_ms));
@@ -295,7 +373,7 @@ fn terminalize_scenario_error(
         let mut run = in_progress_run(
             run_id.clone(),
             scenario_run_id.into(),
-            effect.id.get(),
+            effect.id.local.get(),
             *started_ms,
         );
         run.terminal = true;
@@ -321,36 +399,44 @@ const fn merge_health(left: RecordingHealth, right: RecordingHealth) -> Recordin
     }
 }
 
-fn execute_replay(
+fn initialize_replay(
     scenario: ScenarioName,
     window: &Rc<MinimalSoftwareWindow>,
     on_refresh_started: &mut impl FnMut(Effect, u64),
-) -> Result<ExecutedReplay, String> {
+) -> Result<ReplayExecution, String> {
     let ui = StatusWindow::new().map_err(|error| error.to_string())?;
     ui.show().map_err(|error| error.to_string())?;
-    let mut core = Core::new();
+    let mut application = Application::new();
     let mut trace = vec![TraceRecord {
         virtual_time_ms: 0,
         kind: TraceKind::CommandStart,
         effect_id: None,
         view: Some(ViewName::Unknown),
     }];
-    apply_view(&ui, core.view());
+    let start = application
+        .transition(ApplicationInput::Lifecycle(Lifecycle::Start))
+        .map_err(|error| format!("application start: {error:?}"))?;
+    apply_view(&ui, start.view);
     let mut frames = vec![render(window)?];
-    let mut views = vec![ViewName::Unknown];
+    let mut views = vec![start.view.into()];
     let mut times = vec![0];
     let mut refreshes = Vec::new();
+    let composition_records = vec![CompositionRecord {
+        virtual_time_ms: 0,
+        routed_feature: None,
+        lifecycle: Some(LifecycleName::Start),
+        effect: Some(EffectName::ReadAvailability),
+        surface_owner: Some(FeatureName::Availability),
+        surface_class: Some(SurfaceClassName::Ambient),
+        outcome: TransitionOutcome::Success,
+    }];
 
-    let first_read = core
-        .transition(Input::Command(Command::Start))
-        .map_err(|error| format!("core start: {error:?}"))?
-        .effect
-        .ok_or("start did not request read")?;
+    let first_read = start.effects.get(0).ok_or("start did not request read")?;
     trace.push(effect_trace(0, first_read));
     on_refresh_started(first_read, 0);
     let (first_result, second_result) = scenario_results(scenario);
     let first_timer = complete_read(
-        &mut core,
+        &mut application,
         &ui,
         &mut trace,
         &mut views,
@@ -362,7 +448,7 @@ fn execute_replay(
         first_result,
     )?;
     refreshes.push(arm_timer(
-        &mut core,
+        &mut application,
         0,
         250,
         first_read,
@@ -370,9 +456,57 @@ fn execute_replay(
         first_result,
     )?);
 
+    Ok(ReplayExecution {
+        ui,
+        application,
+        trace,
+        composition_records,
+        views,
+        times,
+        frames,
+        refreshes,
+        first_timer,
+        second_result,
+    })
+}
+
+fn execute_replay(
+    scenario: ScenarioName,
+    window: &Rc<MinimalSoftwareWindow>,
+    on_refresh_started: &mut impl FnMut(Effect, u64),
+) -> Result<ExecutedReplay, String> {
+    let ReplayExecution {
+        ui,
+        mut application,
+        mut trace,
+        mut composition_records,
+        mut views,
+        mut times,
+        mut frames,
+        mut refreshes,
+        first_timer,
+        second_result,
+    } = initialize_replay(scenario, window, on_refresh_started)?;
+
+    let notice_timer = if scenario == ScenarioName::MultiFeatureComposition {
+        Some(show_notice_and_arm(
+            &mut application,
+            &ui,
+            &mut trace,
+            &mut composition_records,
+            &mut views,
+            &mut times,
+            &mut frames,
+            window,
+            4_000,
+        )?)
+    } else {
+        None
+    };
+
     if scenario == ScenarioName::ProtocolDisconnectRecovery {
         apply_source_disconnect(
-            &mut core,
+            &mut application,
             &ui,
             &mut trace,
             &mut views,
@@ -382,52 +516,325 @@ fn execute_replay(
         )?;
     }
 
-    trace.push(TraceRecord {
-        virtual_time_ms: 5_250,
-        kind: TraceKind::RefreshDue,
-        effect_id: Some(first_timer.id.get()),
-        view: None,
-    });
-    let second_read = core
-        .transition(Input::RefreshDue(RefreshDue {
-            effect_id: first_timer.id,
-        }))
-        .map_err(|error| format!("refresh due: {error:?}"))?
-        .effect
-        .ok_or("refresh due did not request read")?;
-    trace.push(effect_trace(5_250, second_read));
-    on_refresh_started(second_read, 5_250);
-    let second_timer = complete_read(
-        &mut core,
+    let (second_timer, second_refresh) = complete_refresh_cycle(
+        &mut application,
         &ui,
         &mut trace,
         &mut views,
         &mut times,
         &mut frames,
         window,
-        5_500,
-        second_read,
-        second_result,
-    )?;
-    refreshes.push(arm_timer(
-        &mut core,
         5_250,
         5_500,
-        second_read,
-        second_timer,
+        first_timer,
         second_result,
-    )?);
+        on_refresh_started,
+    )?;
+    refreshes.push(second_refresh);
+    composition_records.push(CompositionRecord {
+        virtual_time_ms: 5_500,
+        routed_feature: Some(FeatureName::Availability),
+        lifecycle: None,
+        effect: Some(EffectName::ArmRefreshTimer),
+        surface_owner: notice_timer
+            .map(|_| FeatureName::SyntheticNotice)
+            .or(Some(FeatureName::Availability)),
+        surface_class: notice_timer
+            .map(|_| SurfaceClassName::Information)
+            .or(Some(SurfaceClassName::Ambient)),
+        outcome: TransitionOutcome::Success,
+    });
+
+    if let Some(notice) = notice_timer {
+        complete_multi_feature_tail(
+            &mut application,
+            &ui,
+            &mut trace,
+            &mut composition_records,
+            &mut views,
+            &mut times,
+            &mut frames,
+            &mut refreshes,
+            window,
+            on_refresh_started,
+            notice,
+            second_timer,
+        )?;
+    }
     ui.hide().map_err(|error| error.to_string())?;
 
     Ok(ExecutedReplay {
         replay: Replay {
             semantic_records: trace,
+            composition_records,
             views,
             virtual_timestamps_ms: times,
             rgb565_frames: frames,
         },
         refreshes,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_notice_and_arm(
+    application: &mut Application,
+    ui: &StatusWindow,
+    trace: &mut Vec<TraceRecord>,
+    composition_records: &mut Vec<CompositionRecord>,
+    views: &mut Vec<ViewName>,
+    times: &mut Vec<u64>,
+    frames: &mut Vec<Vec<u8>>,
+    window: &Rc<MinimalSoftwareWindow>,
+    virtual_time_ms: u64,
+) -> Result<Effect, String> {
+    trace.push(TraceRecord {
+        virtual_time_ms,
+        kind: TraceKind::NoticeShow,
+        effect_id: None,
+        view: None,
+    });
+    let transition = application
+        .transition(ApplicationInput::synthetic_notice_command(
+            synthetic_notice::Command::Show(synthetic_notice::NoticeKind::CompositionCheck),
+        ))
+        .map_err(|error| format!("notice show: {error:?}"))?;
+    let notice = transition
+        .effects
+        .get(0)
+        .ok_or("notice show did not request expiry timer")?;
+    trace.push(effect_trace(virtual_time_ms, notice));
+    apply_view(ui, transition.view);
+    trace.push(TraceRecord {
+        virtual_time_ms,
+        kind: TraceKind::ViewApplied,
+        effect_id: None,
+        view: Some(transition.view.into()),
+    });
+    views.push(transition.view.into());
+    times.push(virtual_time_ms);
+    frames.push(render(window)?);
+    composition_records.push(CompositionRecord {
+        virtual_time_ms,
+        routed_feature: Some(FeatureName::SyntheticNotice),
+        lifecycle: None,
+        effect: Some(EffectName::ArmNoticeExpiry),
+        surface_owner: Some(FeatureName::SyntheticNotice),
+        surface_class: Some(SurfaceClassName::Information),
+        outcome: TransitionOutcome::Success,
+    });
+    application
+        .transition(ApplicationInput::synthetic_notice_effect(
+            notice.id,
+            synthetic_notice::Input::TimerArmCompleted(synthetic_notice::TimerArmCompleted {
+                effect_id: notice.id.local,
+                result: Ok(()),
+            }),
+        ))
+        .map_err(|error| format!("notice timer arm: {error:?}"))?;
+    trace.push(TraceRecord {
+        virtual_time_ms,
+        kind: TraceKind::NoticeArmed,
+        effect_id: Some(notice.id.local.get()),
+        view: None,
+    });
+    Ok(notice)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_refresh_cycle(
+    application: &mut Application,
+    ui: &StatusWindow,
+    trace: &mut Vec<TraceRecord>,
+    views: &mut Vec<ViewName>,
+    times: &mut Vec<u64>,
+    frames: &mut Vec<Vec<u8>>,
+    window: &Rc<MinimalSoftwareWindow>,
+    started_ms: u64,
+    completed_ms: u64,
+    previous_timer: Effect,
+    result: Result<Availability, ReadError>,
+    on_refresh_started: &mut impl FnMut(Effect, u64),
+) -> Result<(Effect, RefreshEvidence), String> {
+    trace.push(TraceRecord {
+        virtual_time_ms: started_ms,
+        kind: TraceKind::RefreshDue,
+        effect_id: Some(previous_timer.id.local.get()),
+        view: None,
+    });
+    let read = application
+        .transition(ApplicationInput::availability(
+            previous_timer.id,
+            AvailabilityInput::RefreshDue(RefreshDue {
+                effect_id: previous_timer.id.local,
+            }),
+        ))
+        .map_err(|error| format!("refresh due: {error:?}"))?
+        .effects
+        .get(0)
+        .ok_or("refresh due did not request read")?;
+    trace.push(effect_trace(started_ms, read));
+    on_refresh_started(read, started_ms);
+    let refresh_timer = complete_read(
+        application,
+        ui,
+        trace,
+        views,
+        times,
+        frames,
+        window,
+        completed_ms,
+        read,
+        result,
+    )?;
+    let evidence = arm_timer(
+        application,
+        started_ms,
+        completed_ms,
+        read,
+        refresh_timer,
+        result,
+    )?;
+    Ok((refresh_timer, evidence))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_multi_feature_tail(
+    application: &mut Application,
+    ui: &StatusWindow,
+    trace: &mut Vec<TraceRecord>,
+    composition_records: &mut Vec<CompositionRecord>,
+    views: &mut Vec<ViewName>,
+    times: &mut Vec<u64>,
+    frames: &mut Vec<Vec<u8>>,
+    refreshes: &mut Vec<RefreshEvidence>,
+    window: &Rc<MinimalSoftwareWindow>,
+    on_refresh_started: &mut impl FnMut(Effect, u64),
+    notice: Effect,
+    availability_timer: Effect,
+) -> Result<(), String> {
+    let expired = application
+        .transition(ApplicationInput::synthetic_notice_effect(
+            notice.id,
+            synthetic_notice::Input::ExpiryDue(synthetic_notice::ExpiryDue {
+                effect_id: notice.id.local,
+            }),
+        ))
+        .map_err(|error| format!("notice expiry: {error:?}"))?;
+    apply_view(ui, expired.view);
+    trace.push(TraceRecord {
+        virtual_time_ms: 6_000,
+        kind: TraceKind::NoticeExpired,
+        effect_id: Some(notice.id.local.get()),
+        view: Some(expired.view.into()),
+    });
+    views.push(expired.view.into());
+    times.push(6_000);
+    frames.push(render(window)?);
+    composition_records.push(CompositionRecord {
+        virtual_time_ms: 6_000,
+        routed_feature: Some(FeatureName::SyntheticNotice),
+        lifecycle: None,
+        effect: Some(EffectName::NoticeExpiryDue),
+        surface_owner: Some(FeatureName::Availability),
+        surface_class: Some(SurfaceClassName::Ambient),
+        outcome: TransitionOutcome::Success,
+    });
+
+    let stale_notice = show_notice_and_arm(
+        application,
+        ui,
+        trace,
+        composition_records,
+        views,
+        times,
+        frames,
+        window,
+        6_500,
+    )?;
+
+    let invalidated = application
+        .transition(ApplicationInput::Lifecycle(Lifecycle::SessionInvalidated))
+        .map_err(|error| format!("session invalidation: {error:?}"))?;
+    if !invalidated.effects.is_empty() {
+        return Err("waiting invalidation changed the availability timer".into());
+    }
+    apply_view(ui, invalidated.view);
+    trace.push(TraceRecord {
+        virtual_time_ms: 6_750,
+        kind: TraceKind::SessionInvalidated,
+        effect_id: None,
+        view: Some(invalidated.view.into()),
+    });
+    views.push(invalidated.view.into());
+    times.push(6_750);
+    frames.push(render(window)?);
+    composition_records.push(CompositionRecord {
+        virtual_time_ms: 6_750,
+        routed_feature: None,
+        lifecycle: Some(LifecycleName::SessionInvalidated),
+        effect: None,
+        surface_owner: Some(FeatureName::Availability),
+        surface_class: Some(SurfaceClassName::Ambient),
+        outcome: TransitionOutcome::Success,
+    });
+
+    reject_stale_notice(application, composition_records, stale_notice)?;
+
+    let (_, third_refresh) = complete_refresh_cycle(
+        application,
+        ui,
+        trace,
+        views,
+        times,
+        frames,
+        window,
+        10_500,
+        10_750,
+        availability_timer,
+        Ok(Availability::Available),
+        on_refresh_started,
+    )?;
+    refreshes.push(third_refresh);
+    composition_records.push(CompositionRecord {
+        virtual_time_ms: 10_750,
+        routed_feature: Some(FeatureName::Availability),
+        lifecycle: None,
+        effect: Some(EffectName::ReadAvailability),
+        surface_owner: Some(FeatureName::Availability),
+        surface_class: Some(SurfaceClassName::Ambient),
+        outcome: TransitionOutcome::Success,
+    });
+    Ok(())
+}
+
+fn reject_stale_notice(
+    application: &mut Application,
+    composition_records: &mut Vec<CompositionRecord>,
+    stale_notice: Effect,
+) -> Result<(), String> {
+    let before = application.view();
+    if application
+        .transition(ApplicationInput::synthetic_notice_effect(
+            stale_notice.id,
+            synthetic_notice::Input::ExpiryDue(synthetic_notice::ExpiryDue {
+                effect_id: stale_notice.id.local,
+            }),
+        ))
+        .is_ok()
+        || application.view() != before
+    {
+        return Err("invalidated notice accepted a stale expiry".into());
+    }
+    composition_records.push(CompositionRecord {
+        virtual_time_ms: 8_500,
+        routed_feature: Some(FeatureName::SyntheticNotice),
+        lifecycle: None,
+        effect: Some(EffectName::NoticeExpiryDue),
+        surface_owner: Some(FeatureName::Availability),
+        surface_class: Some(SurfaceClassName::Ambient),
+        outcome: TransitionOutcome::Rejected,
+    });
+    Ok(())
 }
 
 const fn scenario_results(
@@ -437,7 +844,7 @@ const fn scenario_results(
     Result<Availability, ReadError>,
 ) {
     match scenario {
-        ScenarioName::PeriodicSuccess => {
+        ScenarioName::PeriodicSuccess | ScenarioName::MultiFeatureComposition => {
             (Ok(Availability::Available), Ok(Availability::Unavailable))
         }
         ScenarioName::PeriodicReadFailure => {
@@ -451,7 +858,7 @@ const fn scenario_results(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_source_disconnect(
-    core: &mut Core,
+    application: &mut Application,
     ui: &StatusWindow,
     trace: &mut Vec<TraceRecord>,
     views: &mut Vec<ViewName>,
@@ -465,12 +872,10 @@ fn apply_source_disconnect(
         effect_id: None,
         view: None,
     });
-    let transition = core
-        .transition(Input::AvailabilityInvalidated(
-            AvailabilityInvalidated::SourceUnavailable,
-        ))
+    let transition = application
+        .transition(ApplicationInput::Lifecycle(Lifecycle::SessionInvalidated))
         .map_err(|error| format!("source invalidation: {error:?}"))?;
-    if transition.effect.is_some() {
+    if !transition.effects.is_empty() {
         return Err("waiting disconnect changed the armed timer".into());
     }
     apply_view(ui, transition.view);
@@ -488,7 +893,7 @@ fn apply_source_disconnect(
 
 #[allow(clippy::too_many_arguments)]
 fn complete_read(
-    core: &mut Core,
+    application: &mut Application,
     ui: &StatusWindow,
     trace: &mut Vec<TraceRecord>,
     views: &mut Vec<ViewName>,
@@ -507,14 +912,17 @@ fn complete_read(
     trace.push(TraceRecord {
         virtual_time_ms,
         kind,
-        effect_id: Some(read.id.get()),
+        effect_id: Some(read.id.local.get()),
         view: None,
     });
-    let transition = core
-        .transition(Input::ReadCompleted(ReadCompleted {
-            effect_id: read.id,
-            result,
-        }))
+    let transition = application
+        .transition(ApplicationInput::availability(
+            read.id,
+            AvailabilityInput::ReadCompleted(ReadCompleted {
+                effect_id: read.id.local,
+                result,
+            }),
+        ))
         .map_err(|error| format!("read completion: {error:?}"))?;
     apply_view(ui, transition.view);
     trace.push(TraceRecord {
@@ -526,24 +934,31 @@ fn complete_read(
     views.push(transition.view.into());
     times.push(virtual_time_ms);
     frames.push(render(window)?);
-    let timer_effect = transition.effect.ok_or("read did not request timer")?;
+    let timer_effect = transition
+        .effects
+        .get(0)
+        .ok_or("read did not request timer")?;
     trace.push(effect_trace(virtual_time_ms, timer_effect));
     Ok(timer_effect)
 }
 
 fn arm_timer(
-    core: &mut Core,
+    application: &mut Application,
     started_ms: u64,
     completed_ms: u64,
     read: Effect,
     timer: Effect,
     read_result: Result<Availability, ReadError>,
 ) -> Result<RefreshEvidence, String> {
-    core.transition(Input::TimerArmCompleted(TimerArmCompleted {
-        effect_id: timer.id,
-        result: Ok(()),
-    }))
-    .map_err(|error| format!("timer arm: {error:?}"))?;
+    application
+        .transition(ApplicationInput::availability(
+            timer.id,
+            AvailabilityInput::TimerArmCompleted(TimerArmCompleted {
+                effect_id: timer.id.local,
+                result: Ok(()),
+            }),
+        ))
+        .map_err(|error| format!("timer arm: {error:?}"))?;
     let (read_value, view_value) = match read_result {
         Ok(Availability::Available) => (ClosedValue::Available, ClosedValue::Available),
         Ok(Availability::Unavailable) => (ClosedValue::Unavailable, ClosedValue::Unavailable),
@@ -563,13 +978,13 @@ fn arm_timer(
         ),
         diagnostic(
             Operation::EffectReadStatus,
-            Some(read.id.get()),
+            Some(read.id.local.get()),
             completed_ms,
             Some(read_value),
         ),
         diagnostic(
             Operation::CoreTransition,
-            Some(read.id.get()),
+            Some(read.id.local.get()),
             completed_ms,
             Some(view_value),
         ),
@@ -585,7 +1000,7 @@ fn arm_timer(
             parent_operation_id: None,
             status: crate::diagnostics::OperationStatus::Success,
             error_type: None,
-            effect_id: Some(timer.id.get()),
+            effect_id: Some(timer.id.local.get()),
             virtual_time_ms: completed_ms,
             end_virtual_time_ms: completed_ms,
             duration_ms: Some(5_000),
@@ -633,13 +1048,20 @@ fn diagnostic(
 
 fn effect_trace(virtual_time_ms: u64, effect: Effect) -> TraceRecord {
     let kind = match effect.request {
-        EffectRequest::ReadAvailability => TraceKind::ReadRequested,
-        EffectRequest::ArmRefreshTimer { .. } => TraceKind::TimerArmRequested,
+        EffectRequest::Availability(availability::EffectRequest::ReadAvailability) => {
+            TraceKind::ReadRequested
+        }
+        EffectRequest::Availability(availability::EffectRequest::ArmRefreshTimer { .. }) => {
+            TraceKind::TimerArmRequested
+        }
+        EffectRequest::SyntheticNotice(synthetic_notice::EffectRequest::ArmExpiryTimer {
+            ..
+        }) => TraceKind::NoticeArmRequested,
     };
     TraceRecord {
         virtual_time_ms,
         kind,
-        effect_id: Some(effect.id.get()),
+        effect_id: Some(effect.id.local.get()),
         view: None,
     }
 }
@@ -727,6 +1149,43 @@ mod tests {
     }
 
     #[test]
+    fn multi_feature_scenario_preempts_restores_invalidates_and_reconnects() {
+        let window = setup_headless();
+        let result = execute_replay(
+            ScenarioName::MultiFeatureComposition,
+            &window,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            result.replay.views,
+            [
+                ViewName::Unknown,
+                ViewName::Available,
+                ViewName::Notice,
+                ViewName::Notice,
+                ViewName::Unavailable,
+                ViewName::Notice,
+                ViewName::Unknown,
+                ViewName::Available,
+            ]
+        );
+        assert_eq!(result.refreshes.len(), 3);
+        assert!(result.replay.composition_records.iter().any(|record| {
+            record.surface_owner == Some(FeatureName::SyntheticNotice)
+                && record.surface_class == Some(SurfaceClassName::Information)
+        }));
+        assert!(result.replay.composition_records.iter().any(|record| {
+            record.lifecycle == Some(LifecycleName::SessionInvalidated)
+                && record.outcome == TransitionOutcome::Success
+        }));
+        assert!(result.replay.composition_records.iter().any(|record| {
+            record.routed_feature == Some(FeatureName::SyntheticNotice)
+                && record.outcome == TransitionOutcome::Rejected
+        }));
+    }
+
+    #[test]
     fn driver_outcomes_keep_cancel_and_timeout_distinct() {
         assert_ne!(RunOutcome::Cancel, RunOutcome::Timeout);
         assert_eq!(ClosedValue::Cancel, ClosedValue::Cancel);
@@ -737,17 +1196,18 @@ mod tests {
     fn clean_scenario_failure_terminalizes_started_markers() {
         let root = std::env::temp_dir().join(new_run_id("scenario-failure"));
         let recorder = Recorder::at_root(root.clone());
-        let mut core = Core::new();
-        let read = core
-            .transition(Input::Command(Command::Start))
+        let mut application = Application::new();
+        let read = application
+            .transition(ApplicationInput::Lifecycle(Lifecycle::Start))
             .unwrap()
-            .effect
+            .effects
+            .get(0)
             .unwrap();
         let markers: Vec<(String, Effect, u64)> = vec![("refresh-failed".into(), read, 0)];
         let _ = recorder.publish(in_progress_run(
             markers[0].0.clone(),
             "scenario-failed".into(),
-            read.id.get(),
+            read.id.local.get(),
             0,
         ));
         terminalize_scenario_error(&recorder, "scenario-failed", &markers);

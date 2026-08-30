@@ -1,11 +1,19 @@
 use std::fs;
 use std::thread;
 
-use application_core::{Command, Core, Input, RefreshDue, StatusView, TimerArmCompleted};
+use deskkin_application::{
+    Application, ApplicationEffectId, ApplicationInput, ApplicationView, FeatureId, Lifecycle,
+    LocalEffectId,
+    availability::{
+        self, Availability, Input as AvailabilityInput, ReadCompleted, ReadError, RefreshDue,
+        TimerArmCompleted,
+    },
+};
 use deskkin_desktop_host::{
     IdentityStore, bind_loopback, pair_initiator, pair_responder, read_once, serve_one,
 };
 use deskkin_protocol::AvailabilityResult;
+use deskkin_protocol_client::{AvailabilityValue, ProtocolEvent};
 use deskkin_simulator::ProtocolAdapter;
 use local_run_recorder::ResourceRole;
 use serde_json::Value;
@@ -14,6 +22,80 @@ use serde_json::Value;
 fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     let base = std::env::temp_dir().join(format!("deskkin-protocol-e2e-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
+    let (host, device) = pair_and_verify(&base);
+    let listener = bind_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let first_host = host.clone();
+    let join =
+        thread::spawn(move || serve_one(&listener, &first_host, AvailabilityResult::Available));
+    let wire = read_once(address, &device, [2; 16], [3; 16]).unwrap();
+    join.join().unwrap().unwrap();
+    let mut application = Application::new();
+    let read = application
+        .transition(ApplicationInput::Lifecycle(Lifecycle::Start))
+        .unwrap()
+        .effects
+        .get(0)
+        .unwrap();
+    let mut adapter = ProtocolAdapter::new();
+    adapter.authenticated([2; 16]);
+    let request = adapter.begin_read(read.id.local.get(), [3; 16]).unwrap();
+    let timer = apply_protocol_event(
+        &mut application,
+        adapter.result([2; 16], request, [3; 16], wire).unwrap(),
+    )
+    .effects
+    .get(0)
+    .unwrap();
+    assert_eq!(
+        application.view(),
+        ApplicationView::Availability(availability::Surface::Available)
+    );
+    application
+        .transition(ApplicationInput::availability(
+            timer.id,
+            AvailabilityInput::TimerArmCompleted(TimerArmCompleted {
+                effect_id: timer.id.local,
+                result: Ok(()),
+            }),
+        ))
+        .unwrap();
+    apply_protocol_event(&mut application, adapter.disconnected().unwrap());
+    assert_eq!(
+        application.view(),
+        ApplicationView::Availability(availability::Surface::Unknown)
+    );
+
+    let read = application
+        .transition(ApplicationInput::availability(
+            timer.id,
+            AvailabilityInput::RefreshDue(RefreshDue {
+                effect_id: timer.id.local,
+            }),
+        ))
+        .unwrap()
+        .effects
+        .get(0)
+        .unwrap();
+    let listener = bind_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let join = thread::spawn(move || serve_one(&listener, &host, AvailabilityResult::Available));
+    let wire = read_once(address, &device, [4; 16], [5; 16]).unwrap();
+    join.join().unwrap().unwrap();
+    adapter.connecting();
+    adapter.authenticated([4; 16]);
+    let request = adapter.begin_read(read.id.local.get(), [5; 16]).unwrap();
+    apply_protocol_event(
+        &mut application,
+        adapter.result([4; 16], request, [5; 16], wire).unwrap(),
+    );
+    assert_eq!(
+        application.view(),
+        ApplicationView::Availability(availability::Surface::Available)
+    );
+}
+
+fn pair_and_verify(base: &std::path::Path) -> (IdentityStore, IdentityStore) {
     let host = IdentityStore::new(base.join("host/identity"));
     let device = IdentityStore::new_for_role(
         base.join("device-simulator/identity"),
@@ -54,51 +136,37 @@ fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     assert!(!diagnostic_text.contains(&host.public_key().unwrap()));
     assert!(!diagnostic_text.contains(&device.public_key().unwrap()));
     assert!(!diagnostic_text.contains(&String::from_utf8_lossy(&device_sas).to_string()));
-    let listener = bind_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
-    let address = listener.local_addr().unwrap();
-    let first_host = host.clone();
-    let join =
-        thread::spawn(move || serve_one(&listener, &first_host, AvailabilityResult::Available));
-    let wire = read_once(address, &device, [2; 16], [3; 16]).unwrap();
-    join.join().unwrap().unwrap();
-    let mut core = Core::new();
-    core.transition(Input::Command(Command::Start)).unwrap();
-    let mut adapter = ProtocolAdapter::new();
-    adapter.authenticated([2; 16]);
-    let request = adapter.begin_read(&core, [3; 16]).unwrap();
-    let timer = adapter
-        .result(&mut core, [2; 16], request, [3; 16], wire)
-        .unwrap()
-        .unwrap();
-    assert_eq!(core.view(), StatusView::Available);
-    core.transition(Input::TimerArmCompleted(TimerArmCompleted {
-        effect_id: timer.id,
-        result: Ok(()),
-    }))
-    .unwrap();
-    let waiting = core.state();
-    adapter.disconnected(&mut core).unwrap();
-    assert_eq!(core.view(), StatusView::Unknown);
-    assert_eq!(core.state(), waiting);
+    (host, device)
+}
 
-    core.transition(Input::RefreshDue(RefreshDue {
-        effect_id: timer.id,
-    }))
-    .unwrap()
-    .effect
-    .unwrap();
-    let listener = bind_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
-    let address = listener.local_addr().unwrap();
-    let join = thread::spawn(move || serve_one(&listener, &host, AvailabilityResult::Available));
-    let wire = read_once(address, &device, [4; 16], [5; 16]).unwrap();
-    join.join().unwrap().unwrap();
-    adapter.connecting();
-    adapter.authenticated([4; 16]);
-    let request = adapter.begin_read(&core, [5; 16]).unwrap();
-    adapter
-        .result(&mut core, [4; 16], request, [5; 16], wire)
-        .unwrap();
-    assert_eq!(core.view(), StatusView::Available);
+fn apply_protocol_event(
+    application: &mut Application,
+    event: ProtocolEvent,
+) -> deskkin_application::Transition {
+    let input = match event {
+        ProtocolEvent::SessionInvalidated => {
+            ApplicationInput::Lifecycle(Lifecycle::SessionInvalidated)
+        }
+        ProtocolEvent::AvailabilityCompleted { effect_id, value } => {
+            let result = match value {
+                AvailabilityValue::Available => Ok(Availability::Available),
+                AvailabilityValue::Unavailable => Ok(Availability::Unavailable),
+                AvailabilityValue::ReadFailed => Err(ReadError::Unavailable),
+            };
+            let local = LocalEffectId::new(effect_id).unwrap();
+            ApplicationInput::availability(
+                ApplicationEffectId {
+                    feature: FeatureId::Availability,
+                    local,
+                },
+                AvailabilityInput::ReadCompleted(ReadCompleted {
+                    effect_id: local,
+                    result,
+                }),
+            )
+        }
+    };
+    application.transition(input).unwrap()
 }
 
 fn diagnostic_values(root: &std::path::Path) -> Vec<Value> {

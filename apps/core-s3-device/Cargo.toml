@@ -16,7 +16,7 @@ name = "rustapp"
 crate-type = ["staticlib"]
 
 [dependencies]
-application-core = { path = "../../crates/application-core" }
+deskkin-application = { path = "../../crates/deskkin-application" }
 critical-section = "=1.2.0"
 deskkin-core-s3 = { path = "../../crates/deskkin-core-s3" }
 deskkin-protocol = { path = "../../crates/deskkin-protocol" }

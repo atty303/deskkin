@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, and Phase 3P complete
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, Foundation A, and Foundation B complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 Current provider connector: none
@@ -11,9 +11,9 @@ Selected UI: Slint
 Selected device platform: Zephyr
 Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
-Implementation: portable application/protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
+Implementation: three-crate portable application composition, protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: review and approve or revise the proposed Foundation B multi-feature application composition contract; provider connectors remain deferred
+Next action: prepare and review a Foundation C host capability and connector composition proposal; provider implementation remains deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -31,13 +31,16 @@ authorized retained-profile qualification completed on 2026-08-30; its
 observed reconnect and lifecycle evidence is recorded in
 [`foundation-a-repeatable-physical-profile-qualification.md`](foundation-a-repeatable-physical-profile-qualification.md).
 
-The next proposed checkpoint is
+The implemented Foundation B checkpoint is
 [`foundation-b-multi-feature-application-composition-proposal.md`](foundation-b-multi-feature-application-composition-proposal.md).
 It defines compile-time feature composition, namespaced application effects,
 shared session invalidation, deterministic surface arbitration, and a presenter
 shell across a feature-neutral core, one current-feature crate, and one concrete
 composition crate while preserving the existing availability and protocol
-contracts. Its proposal is not yet accepted and authorizes no implementation.
+contracts. Its architecture is accepted in
+[`ADR-0007`](decisions/0007-multi-feature-application-composition.md). Provider
+connectors, protocol feature routing, and physical-device mutation remain
+outside this checkpoint.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in

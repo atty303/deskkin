@@ -1,4 +1,4 @@
-import { StatusSurface } from "../../../ui/status-surface.slint";
+import { ApplicationSurface } from "../../../ui/application-surface.slint";
 
 export component StatusWindow inherits Window {
     width: 320px;
@@ -7,15 +7,19 @@ export component StatusWindow inherits Window {
 
     in property <string> status-text: "Unknown";
     in property <color> status-color: #f3b33d;
+    in property <bool> notice-visible: false;
+    in property <string> notice-text: "";
 
     background: #16191d;
 
-    StatusSurface {
+    ApplicationSurface {
         x: 24px;
         y: 58px;
         width: 272px;
         height: 124px;
         status-text: root.status-text;
         status-color: root.status-color;
+        notice-visible: root.notice-visible;
+        notice-text: root.notice-text;
     }
 }

@@ -46,6 +46,7 @@ fn recording_on_and_off_preserve_semantics_and_frames() {
         "periodic-success",
         "periodic-read-failure",
         "protocol-disconnect-recovery",
+        "multi-feature-composition",
     ] {
         let on_root = temp_root("recording-on");
         let off_root = temp_root("recording-off");
@@ -57,8 +58,13 @@ fn recording_on_and_off_preserve_semantics_and_frames() {
         assert_eq!(on["protocol_major"], Value::from(1));
         assert_eq!(on["selected_features"], off["selected_features"]);
         assert_eq!(on["granted_permissions"], off["granted_permissions"]);
-        assert!(on["child_refresh_runs"].as_array().unwrap().len() == 4);
-        assert!(off["child_refresh_runs"].as_array().unwrap().len() == 4);
+        let expected_refresh_runs = if name == "multi-feature-composition" {
+            6
+        } else {
+            4
+        };
+        assert!(on["child_refresh_runs"].as_array().unwrap().len() == expected_refresh_runs);
+        assert!(off["child_refresh_runs"].as_array().unwrap().len() == expected_refresh_runs);
         assert!(
             on["child_refresh_runs"]
                 .as_array()

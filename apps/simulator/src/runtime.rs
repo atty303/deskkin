@@ -7,9 +7,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use application_core::{
-    Availability, Command, Core, Effect, EffectRequest, Input, ReadCompleted, ReadError,
-    RefreshDue, State, TimerArmCompleted, TimerArmError,
+use deskkin_application::{
+    Application, ApplicationEffectId, ApplicationInput, ApplicationView, Effect, EffectRequest,
+    FeatureId, Lifecycle,
+    availability::{
+        self, Availability, Input as AvailabilityInput, ReadCompleted, ReadError, RefreshDue,
+        TimerArmCompleted, TimerArmError,
+    },
 };
 use slint::{ComponentHandle, Timer, TimerMode};
 
@@ -28,10 +32,10 @@ use crate::diagnostics::{
     resource_identity_for,
 };
 use crate::presenter::apply_view;
-use deskkin_protocol_client::ProtocolAdapter;
+use deskkin_protocol_client::{AvailabilityValue, ProtocolAdapter, ProtocolEvent};
 
 struct NativeRuntime {
-    core: Core,
+    core: Application,
     ui: StatusWindow,
     read_timer: Timer,
     read_timeout_timer: Timer,
@@ -58,9 +62,9 @@ struct ActiveRead {
 /// native event loop cannot start.
 pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
     let ui = StatusWindow::new().map_err(|error| error.to_string())?;
-    apply_view(&ui, application_core::StatusView::Unknown);
+    apply_view(&ui, ApplicationView::Empty);
     let runtime = Rc::new(RefCell::new(NativeRuntime {
-        core: Core::new(),
+        core: Application::new(),
         ui: ui.clone_strong(),
         read_timer: Timer::default(),
         read_timeout_timer: Timer::default(),
@@ -74,11 +78,15 @@ pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
     let transition = runtime
         .borrow_mut()
         .core
-        .transition(Input::Command(Command::Start))
-        .map_err(|error| format!("core start: {error:?}"))?;
+        .transition(ApplicationInput::Lifecycle(Lifecycle::Start))
+        .map_err(|error| format!("application start: {error:?}"))?;
+    apply_view(&runtime.borrow().ui, transition.view);
     dispatch_effect(
         &runtime,
-        transition.effect.ok_or("start did not request read")?,
+        transition
+            .effects
+            .get(0)
+            .ok_or("start did not request read")?,
     )?;
     let result = ui.run().map_err(|error| error.to_string());
     let mut state = runtime.borrow_mut();
@@ -100,7 +108,7 @@ pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
 }
 
 struct ProtocolRuntime {
-    core: Core,
+    core: Application,
     ui: StatusWindow,
     refresh_timer: Timer,
     reconnect_timer: Timer,
@@ -432,7 +440,7 @@ pub fn run_protocol_desktop_with_recording(
             Err(_) => Err("simulator owner control startup panicked".into()),
         };
     }
-    apply_view(&ui, application_core::StatusView::Unknown);
+    apply_view(&ui, ApplicationView::Empty);
     let (network_commands, network_command_receiver) = std::sync::mpsc::sync_channel(8);
     let (network_control, network_control_receiver) = std::sync::mpsc::channel();
     let (network_event_sender, network_events) = std::sync::mpsc::channel();
@@ -477,7 +485,7 @@ pub fn run_protocol_desktop_with_recording(
         }
     });
     let runtime = Rc::new(RefCell::new(ProtocolRuntime {
-        core: Core::new(),
+        core: Application::new(),
         ui: ui.clone_strong(),
         refresh_timer: Timer::default(),
         reconnect_timer: Timer::default(),
@@ -518,10 +526,12 @@ pub fn run_protocol_desktop_with_recording(
     let effect = runtime
         .borrow_mut()
         .core
-        .transition(Input::Command(Command::Start))
-        .map_err(|error| format!("core start: {error:?}"))?
-        .effect
+        .transition(ApplicationInput::Lifecycle(Lifecycle::Start))
+        .map_err(|error| format!("application start: {error:?}"))?
+        .effects
+        .get(0)
         .ok_or("start did not request read")?;
+    apply_view(&runtime.borrow().ui, runtime.borrow().core.view());
     dispatch_protocol_effect(&runtime, effect)?;
     let result = ui.run().map_err(|error| error.to_string());
     let mut state = runtime.borrow_mut();
@@ -593,13 +603,11 @@ fn handle_owner_events(weak: &Weak<RefCell<ProtocolRuntime>>) {
                 state.adapter.stop();
                 let invalidation_effect = state
                     .core
-                    .transition(Input::AvailabilityInvalidated(
-                        application_core::AvailabilityInvalidated::SourceUnavailable,
-                    ))
+                    .transition(ApplicationInput::Lifecycle(Lifecycle::SessionInvalidated))
                     .ok()
                     .and_then(|transition| {
                         apply_view(&state.ui, transition.view);
-                        transition.effect
+                        transition.effects.get(0)
                     });
                 state.revocation_join_ack = Some(joined);
                 let _ = state.network_control.send(NetworkControl::Revoke);
@@ -754,25 +762,30 @@ fn dispatch_protocol_effect(
     effect: Effect,
 ) -> Result<(), String> {
     match effect.request {
-        EffectRequest::ReadAvailability => perform_protocol_read(runtime),
-        EffectRequest::ArmRefreshTimer { delay_ms } => {
+        EffectRequest::Availability(availability::EffectRequest::ReadAvailability) => {
+            perform_protocol_read(runtime, effect)
+        }
+        EffectRequest::Availability(availability::EffectRequest::ArmRefreshTimer { delay_ms }) => {
             arm_protocol_refresh(runtime, effect, delay_ms)
         }
+        EffectRequest::SyntheticNotice(_) => Ok(()),
     }
 }
 
-fn perform_protocol_read(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
+fn perform_protocol_read(
+    runtime: &Rc<RefCell<ProtocolRuntime>>,
+    effect: Effect,
+) -> Result<(), String> {
     if !runtime.borrow().connected {
-        return complete_read_while_disconnected(runtime);
+        return complete_read_while_disconnected(runtime, effect);
     }
 
     let operation = new_context_id().map_err(|error| format!("operation context: {error:?}"))?;
     let request_id = {
         let mut state = runtime.borrow_mut();
-        let core = state.core;
         state
             .adapter
-            .begin_read(&core, operation)
+            .begin_read(effect.id.local.get(), operation)
             .map_err(|error| format!("begin availability read: {error:?}"))?
     };
     let session = runtime
@@ -809,21 +822,24 @@ fn perform_protocol_read(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), S
     protocol_disconnected(runtime)
 }
 
-fn complete_read_while_disconnected(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
+fn complete_read_while_disconnected(
+    runtime: &Rc<RefCell<ProtocolRuntime>>,
+    effect: Effect,
+) -> Result<(), String> {
     let next = {
         let mut state = runtime.borrow_mut();
-        let State::Reading { effect_id } = state.core.state() else {
-            return Err("disconnected read missing core effect".into());
-        };
         let transition = state
             .core
-            .transition(Input::ReadCompleted(ReadCompleted {
-                effect_id,
-                result: Err(ReadError::Unavailable),
-            }))
+            .transition(ApplicationInput::availability(
+                effect.id,
+                AvailabilityInput::ReadCompleted(ReadCompleted {
+                    effect_id: effect.id.local,
+                    result: Err(ReadError::Unavailable),
+                }),
+            ))
             .map_err(|error| format!("disconnected read completion: {error:?}"))?;
         apply_view(&state.ui, transition.view);
-        transition.effect
+        transition.effects.get(0)
     };
     if !runtime.borrow().connecting
         && runtime.borrow().adapter.terminal_reason().is_none()
@@ -863,15 +879,12 @@ fn handle_read_result(
         if !state.connected || state.adapter.session_context() != Some(session) {
             return None;
         }
-        let mut core = state.core;
-        let Ok(next) = state
-            .adapter
-            .result(&mut core, session, request_id, operation, result)
-        else {
+        let Ok(event) = state.adapter.result(session, request_id, operation, result) else {
             return None;
         };
-        state.core = core;
-        apply_view(&state.ui, state.core.view());
+        let input = protocol_event_input(event).ok()?;
+        let transition = state.core.transition(input).ok()?;
+        apply_view(&state.ui, transition.view);
         record_protocol(
             &state,
             Operation::AvailabilityRead,
@@ -885,7 +898,7 @@ fn handle_read_result(
             Some(session),
             Some(operation),
         );
-        next
+        transition.effects.get(0)
     });
     let Ok(next) = next else {
         record_protocol(
@@ -928,13 +941,17 @@ fn protocol_disconnected(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), S
         state.connected = false;
         state.connecting = false;
         state.pending_session = None;
-        let mut core = state.core;
-        let next = state
-            .adapter
-            .disconnected(&mut core)
-            .map_err(|error| format!("disconnect invalidation: {error:?}"))?;
-        state.core = core;
-        apply_view(&state.ui, state.core.view());
+        let next = if let Some(event) = state.adapter.disconnected() {
+            let input = protocol_event_input(event)?;
+            let transition = state
+                .core
+                .transition(input)
+                .map_err(|error| format!("disconnect invalidation: {error:?}"))?;
+            apply_view(&state.ui, transition.view);
+            transition.effects.get(0)
+        } else {
+            None
+        };
         record_protocol(
             &state,
             Operation::ProtocolNegotiate,
@@ -952,6 +969,30 @@ fn protocol_disconnected(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), S
         dispatch_protocol_effect(runtime, effect)?;
     }
     Ok(())
+}
+
+fn protocol_event_input(event: ProtocolEvent) -> Result<ApplicationInput, String> {
+    match event {
+        ProtocolEvent::SessionInvalidated => {
+            Ok(ApplicationInput::Lifecycle(Lifecycle::SessionInvalidated))
+        }
+        ProtocolEvent::AvailabilityCompleted { effect_id, value } => {
+            let effect_id = deskkin_application::LocalEffectId::new(effect_id)
+                .ok_or_else(|| "protocol returned zero effect identity".to_owned())?;
+            let result = match value {
+                AvailabilityValue::Available => Ok(Availability::Available),
+                AvailabilityValue::Unavailable => Ok(Availability::Unavailable),
+                AvailabilityValue::ReadFailed => Err(ReadError::Unavailable),
+            };
+            Ok(ApplicationInput::availability(
+                ApplicationEffectId {
+                    feature: FeatureId::Availability,
+                    local: effect_id,
+                },
+                AvailabilityInput::ReadCompleted(ReadCompleted { effect_id, result }),
+            ))
+        }
+    }
 }
 
 fn schedule_protocol_reconnect(runtime: &Rc<RefCell<ProtocolRuntime>>) -> Result<(), String> {
@@ -1077,18 +1118,20 @@ fn protocol_terminal(
     );
     let timer = state
         .core
-        .transition(Input::AvailabilityInvalidated(
-            application_core::AvailabilityInvalidated::SourceUnavailable,
-        ))
+        .transition(ApplicationInput::Lifecycle(Lifecycle::SessionInvalidated))
         .map_err(|error| format!("terminal invalidation: {error:?}"))?
-        .effect;
+        .effects
+        .get(0);
     if let Some(timer) = timer {
         state
             .core
-            .transition(Input::TimerArmCompleted(TimerArmCompleted {
-                effect_id: timer.id,
-                result: Err(TimerArmError::Unavailable),
-            }))
+            .transition(ApplicationInput::availability(
+                timer.id,
+                AvailabilityInput::TimerArmCompleted(TimerArmCompleted {
+                    effect_id: timer.id.local,
+                    result: Err(TimerArmError::Unavailable),
+                }),
+            ))
             .map_err(|error| format!("terminal stop: {error:?}"))?;
     }
     apply_view(&state.ui, state.core.view());
@@ -1340,10 +1383,13 @@ fn arm_protocol_refresh(
     let mut state = runtime.borrow_mut();
     let transition = state
         .core
-        .transition(Input::TimerArmCompleted(TimerArmCompleted {
-            effect_id: effect.id,
-            result,
-        }))
+        .transition(ApplicationInput::availability(
+            effect.id,
+            AvailabilityInput::TimerArmCompleted(TimerArmCompleted {
+                effect_id: effect.id.local,
+                result,
+            }),
+        ))
         .map_err(|error| format!("timer arm completion: {error:?}"))?;
     apply_view(&state.ui, transition.view);
     Ok(())
@@ -1356,11 +1402,14 @@ fn protocol_refresh_due(weak: &Weak<RefCell<ProtocolRuntime>>, timer: Effect) {
     let next = runtime
         .borrow_mut()
         .core
-        .transition(Input::RefreshDue(RefreshDue {
-            effect_id: timer.id,
-        }))
+        .transition(ApplicationInput::availability(
+            timer.id,
+            AvailabilityInput::RefreshDue(RefreshDue {
+                effect_id: timer.id.local,
+            }),
+        ))
         .ok()
-        .and_then(|transition| transition.effect);
+        .and_then(|transition| transition.effects.get(0));
     if let Some(effect) = next {
         let _ = dispatch_protocol_effect(&runtime, effect);
     }
@@ -1368,7 +1417,7 @@ fn protocol_refresh_due(weak: &Weak<RefCell<ProtocolRuntime>>, timer: Effect) {
 
 fn dispatch_effect(runtime: &Rc<RefCell<NativeRuntime>>, effect: Effect) -> Result<(), String> {
     match effect.request {
-        EffectRequest::ReadAvailability => {
+        EffectRequest::Availability(availability::EffectRequest::ReadAvailability) => {
             let started_ms = runtime.borrow().logical_time_ms;
             let run_id = new_run_id("refresh");
             {
@@ -1376,7 +1425,7 @@ fn dispatch_effect(runtime: &Rc<RefCell<NativeRuntime>>, effect: Effect) -> Resu
                 let _ = state.recorder.publish(in_progress_run(
                     run_id.clone(),
                     state.session_run_id.clone(),
-                    effect.id.get(),
+                    effect.id.local.get(),
                     started_ms,
                 ));
             }
@@ -1400,7 +1449,10 @@ fn dispatch_effect(runtime: &Rc<RefCell<NativeRuntime>>, effect: Effect) -> Resu
             );
             Ok(())
         }
-        EffectRequest::ArmRefreshTimer { delay_ms } => arm_native_timer(runtime, effect, delay_ms),
+        EffectRequest::Availability(availability::EffectRequest::ArmRefreshTimer { delay_ms }) => {
+            arm_native_timer(runtime, effect, delay_ms)
+        }
+        EffectRequest::SyntheticNotice(_) => Ok(()),
     }
 }
 
@@ -1450,24 +1502,28 @@ fn finish_native_read(
         state.read_timer.stop();
         state.read_timeout_timer.stop();
         state.logical_time_ms = active.started_ms.saturating_add(elapsed_ms);
-        let Ok(transition) = state.core.transition(Input::ReadCompleted(ReadCompleted {
-            effect_id: active.effect.id,
-            result,
-        })) else {
+        let Ok(transition) = state.core.transition(ApplicationInput::availability(
+            active.effect.id,
+            AvailabilityInput::ReadCompleted(ReadCompleted {
+                effect_id: active.effect.id.local,
+                result,
+            }),
+        )) else {
             return;
         };
         apply_view(&state.ui, transition.view);
-        (active, transition.effect)
+        (active, transition.effects.get(0))
     };
     if let Some(timer) = next_effect {
         if arm_native_timer(runtime, timer, 5_000).is_err() {
             let mut state = runtime.borrow_mut();
-            let _ = state
-                .core
-                .transition(Input::TimerArmCompleted(TimerArmCompleted {
-                    effect_id: timer.id,
+            let _ = state.core.transition(ApplicationInput::availability(
+                timer.id,
+                AvailabilityInput::TimerArmCompleted(TimerArmCompleted {
+                    effect_id: timer.id.local,
                     result: Err(TimerArmError::Unavailable),
-                }));
+                }),
+            ));
             apply_view(&state.ui, state.core.view());
             publish_native_refresh(&state, &effect, timer, result, false, outcome_override);
         } else {
@@ -1500,10 +1556,13 @@ fn arm_native_timer(
     runtime
         .borrow_mut()
         .core
-        .transition(Input::TimerArmCompleted(TimerArmCompleted {
-            effect_id: effect.id,
-            result: Ok(()),
-        }))
+        .transition(ApplicationInput::availability(
+            effect.id,
+            AvailabilityInput::TimerArmCompleted(TimerArmCompleted {
+                effect_id: effect.id.local,
+                result: Ok(()),
+            }),
+        ))
         .map_err(|error| format!("timer arm completion: {error:?}"))?;
     Ok(())
 }
@@ -1517,11 +1576,14 @@ fn refresh_due(weak: &Weak<RefCell<NativeRuntime>>, timer: Effect) {
         state.logical_time_ms = state.logical_time_ms.saturating_add(5_000);
         state
             .core
-            .transition(Input::RefreshDue(RefreshDue {
-                effect_id: timer.id,
-            }))
+            .transition(ApplicationInput::availability(
+                timer.id,
+                AvailabilityInput::RefreshDue(RefreshDue {
+                    effect_id: timer.id.local,
+                }),
+            ))
             .ok()
-            .and_then(|transition| transition.effect)
+            .and_then(|transition| transition.effects.get(0))
     };
     if let Some(effect) = next_effect {
         let _ = dispatch_effect(&runtime, effect);
@@ -1613,13 +1675,13 @@ fn native_refresh_records(
         ),
         native_record(
             Operation::EffectReadStatus,
-            Some(read.id.get()),
+            Some(read.id.local.get()),
             completed_ms,
             read_value,
         ),
         native_record(
             Operation::CoreTransition,
-            Some(read.id.get()),
+            Some(read.id.local.get()),
             completed_ms,
             view_value,
         ),
@@ -1643,7 +1705,7 @@ fn native_refresh_records(
             parent_operation_id: None,
             status: crate::diagnostics::OperationStatus::Success,
             error_type: None,
-            effect_id: Some(timer.id.get()),
+            effect_id: Some(timer.id.local.get()),
             virtual_time_ms: completed_ms,
             end_virtual_time_ms: completed_ms,
             duration_ms: Some(5_000),
@@ -1659,7 +1721,7 @@ fn native_refresh_records(
     if !arm_succeeded {
         records.push(native_record(
             Operation::CoreTransition,
-            Some(timer.id.get()),
+            Some(timer.id.local.get()),
             completed_ms,
             ClosedValue::Unknown,
         ));
@@ -1752,7 +1814,7 @@ fn interrupted_records(
         ),
         native_record(
             Operation::EffectReadStatus,
-            Some(read.id.get()),
+            Some(read.id.local.get()),
             completed_ms,
             value,
         ),
@@ -1796,8 +1858,6 @@ fn native_record(
 mod tests {
     use std::fs;
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
-
-    use application_core::{Command, Core, Input, ReadCompleted};
 
     use super::*;
 
@@ -1903,19 +1963,24 @@ mod tests {
     }
 
     fn effects() -> (Effect, Effect) {
-        let mut core = Core::new();
-        let read = core
-            .transition(Input::Command(Command::Start))
+        let mut application = Application::new();
+        let read = application
+            .transition(ApplicationInput::Lifecycle(Lifecycle::Start))
             .unwrap()
-            .effect
+            .effects
+            .get(0)
             .unwrap();
-        let timer = core
-            .transition(Input::ReadCompleted(ReadCompleted {
-                effect_id: read.id,
-                result: Ok(Availability::Available),
-            }))
+        let timer = application
+            .transition(ApplicationInput::availability(
+                read.id,
+                AvailabilityInput::ReadCompleted(ReadCompleted {
+                    effect_id: read.id.local,
+                    result: Ok(Availability::Available),
+                }),
+            ))
             .unwrap()
-            .effect
+            .effects
+            .get(0)
             .unwrap();
         (read, timer)
     }

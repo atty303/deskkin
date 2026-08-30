@@ -123,6 +123,13 @@ name = "application-core"
 version = "0.1.0"
 
 [[package]]
+name = "application-features"
+version = "0.1.0"
+dependencies = [
+ "application-core",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1018,6 +1025,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "deskkin-application"
+version = "0.1.0"
+dependencies = [
+ "application-core",
+ "application-features",
+]
+
+[[package]]
 name = "deskkin-core-s3"
 version = "0.1.0"
 
@@ -1025,8 +1040,8 @@ version = "0.1.0"
 name = "deskkin-core-s3-device"
 version = "0.1.0"
 dependencies = [
- "application-core",
  "critical-section",
+ "deskkin-application",
  "deskkin-core-s3",
  "deskkin-protocol",
  "deskkin-protocol-client",
@@ -1052,7 +1067,6 @@ dependencies = [
 name = "deskkin-protocol-client"
 version = "0.1.0"
 dependencies = [
- "application-core",
  "deskkin-protocol",
 ]
 

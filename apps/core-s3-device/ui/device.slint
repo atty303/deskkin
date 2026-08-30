@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { Button } from "std-widgets.slint";
+import { ApplicationSurface } from "../../../ui/application-surface.slint";
 import { StatusSurface } from "../../../ui/status-surface.slint";
 
 export component DeviceWindow inherits Window {
@@ -11,6 +12,8 @@ export component DeviceWindow inherits Window {
     in-out property <string> shell-state: "SetupRequired";
     in-out property <string> status-text: "Unknown";
     in-out property <color> status-color: #9aa0a6;
+    in-out property <bool> notice-visible: false;
+    in-out property <string> notice-text: "";
     in-out property <string> authentication-string: "";
     callback pair();
     callback confirm();
@@ -20,9 +23,18 @@ export component DeviceWindow inherits Window {
         padding: 18px;
         spacing: 12px;
         Text { text: root.shell-state; color: #d7e3f4; font-size: 20px; }
+        ApplicationSurface {
+            height: 92px;
+            visible: root.authentication-string == "";
+            status-text: root.status-text;
+            status-color: root.status-color;
+            notice-visible: root.notice-visible;
+            notice-text: root.notice-text;
+        }
         StatusSurface {
             height: 92px;
-            status-text: root.authentication-string == "" ? root.status-text : root.authentication-string;
+            visible: root.authentication-string != "";
+            status-text: root.authentication-string;
             status-color: root.status-color;
         }
         HorizontalLayout {
