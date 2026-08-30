@@ -80,6 +80,14 @@ pub enum Operation {
     NvsPublication,
     DeviceUi,
     DisplayTransfer,
+    ProfileResolve,
+    HostOwnerAcquire,
+    HostBind,
+    HostRuntimeStart,
+    HostRuntimeStop,
+    HostOwnerRelease,
+    ProfileStatus,
+    ProfileStop,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -139,6 +147,9 @@ pub enum ErrorType {
     StoreFailed,
     StoreStalled,
     OwnerBusy,
+    ProfileMismatch,
+    StaleGeneration,
+    ShutdownRejected,
     LockTimeout,
     ProfileDecryptFailed,
     ProfileSchemaInvalid,

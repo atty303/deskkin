@@ -3,12 +3,14 @@
 
 mod identity_actor;
 mod owner_control;
+pub mod profile;
 
 pub use identity_actor::IdentityActor;
 pub use owner_control::{
-    OwnerCommand, OwnerEvent, OwnerPairingTask, OwnerResponse, acquire_owner_lock,
-    call_owner_control, discover_owner, owner_is_alive, query_command_result, run_owner_control,
-    run_owner_control_with_events, try_acquire_owner_lock,
+    OwnerCommand, OwnerEvent, OwnerInfo, OwnerLaunchMetadata, OwnerPairingTask, OwnerResponse,
+    acquire_owner_lock, call_owner_control, discover_owner, discover_owner_info, owner_is_alive,
+    query_command_result, run_owner_control, run_owner_control_with_events,
+    run_owner_control_with_events_scoped, try_acquire_owner_lock,
 };
 
 use std::fs::{self, File, OpenOptions};
@@ -83,8 +85,12 @@ enum DiagnosticEvent {
         run_id: String,
         created_unix_ms: u64,
         kind: DiagnosticKind,
+        scenario_context_id: Option<String>,
     },
-    Finish(DiagnosticRecord),
+    Finish {
+        record: DiagnosticRecord,
+        scenario_context_id: Option<String>,
+    },
 }
 
 pub(crate) struct DiagnosticSpan {
@@ -212,7 +218,7 @@ impl IdentityStore {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         let diagnostic_publisher =
-            diagnostic_publisher(&root, ResourceRole::Host, RecordingMode::On);
+            diagnostic_publisher(&root, ResourceRole::Host, RecordingMode::On, None);
         Self {
             root,
             role: ResourceRole::Host,
@@ -224,7 +230,7 @@ impl IdentityStore {
     }
     #[must_use]
     pub fn new_for_role(root: PathBuf, role: ResourceRole) -> Self {
-        let diagnostic_publisher = diagnostic_publisher(&root, role, RecordingMode::On);
+        let diagnostic_publisher = diagnostic_publisher(&root, role, RecordingMode::On, None);
         Self {
             root,
             role,
@@ -237,7 +243,14 @@ impl IdentityStore {
     #[must_use]
     pub fn with_recording(mut self, recording: RecordingMode) -> Self {
         self.recording = recording;
-        self.diagnostic_publisher = diagnostic_publisher(&self.root, self.role, recording);
+        self.diagnostic_publisher = diagnostic_publisher(&self.root, self.role, recording, None);
+        self.availability_diagnostics = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        self
+    }
+    #[must_use]
+    pub(crate) fn with_scenario_context(mut self, context: Option<String>) -> Self {
+        self.diagnostic_publisher =
+            diagnostic_publisher(&self.root, self.role, self.recording, context);
         self.availability_diagnostics = Arc::new(Mutex::new(std::collections::HashMap::new()));
         self
     }
@@ -653,6 +666,7 @@ struct DiagnosticPublisher {
     sender: Mutex<Option<mpsc::SyncSender<DiagnosticEvent>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     dropped: Arc<Mutex<Option<String>>>,
+    scenario_context_id: Option<String>,
 }
 
 impl std::fmt::Debug for DiagnosticPublisher {
@@ -680,6 +694,7 @@ impl DiagnosticPublisher {
             run_id: run_id.clone(),
             created_unix_ms,
             kind,
+            scenario_context_id: self.scenario_context_id.clone(),
         })?;
         Some(DiagnosticSpan {
             publisher: self.clone(),
@@ -690,7 +705,10 @@ impl DiagnosticPublisher {
     }
 
     fn finish(&self, record: DiagnosticRecord) {
-        let _ = self.send(DiagnosticEvent::Finish(record));
+        let _ = self.send(DiagnosticEvent::Finish {
+            record,
+            scenario_context_id: self.scenario_context_id.clone(),
+        });
     }
 
     fn send(&self, event: DiagnosticEvent) -> Option<()> {
@@ -723,6 +741,7 @@ fn diagnostic_publisher(
     identity_root: &Path,
     role: ResourceRole,
     recording: RecordingMode,
+    scenario_context_id: Option<String>,
 ) -> Arc<DiagnosticPublisher> {
     let (sender, receiver) = mpsc::sync_channel::<DiagnosticEvent>(32);
     let role_root = identity_root.parent().map(Path::to_path_buf);
@@ -738,6 +757,7 @@ fn diagnostic_publisher(
                     run_id,
                     created_unix_ms,
                     kind,
+                    scenario_context_id,
                 } => {
                     if let Ok(marker) = recorder.begin_live_run(&run_id) {
                         live_runs.insert(run_id.clone(), marker);
@@ -746,12 +766,16 @@ fn diagnostic_publisher(
                         role,
                         DiagnosticRecord::started(kind, run_id, created_unix_ms),
                         false,
+                        scenario_context_id,
                     );
                     let _ = recorder.publish(partial);
                 }
-                DiagnosticEvent::Finish(record) => {
+                DiagnosticEvent::Finish {
+                    record,
+                    scenario_context_id,
+                } => {
                     let run_id = record.run_id.clone();
-                    let run = diagnostic_run(role, record, true);
+                    let run = diagnostic_run(role, record, true, scenario_context_id);
                     let _ = recorder.publish(run);
                     if let Some(run_id) = run_id
                         && let Some(marker) = live_runs.remove(&run_id)
@@ -778,10 +802,16 @@ fn diagnostic_publisher(
         sender: Mutex::new(Some(sender)),
         join: Mutex::new(Some(join)),
         dropped,
+        scenario_context_id,
     })
 }
 
-fn diagnostic_run(role: ResourceRole, record: DiagnosticRecord, terminal: bool) -> DiagnosticRun {
+fn diagnostic_run(
+    role: ResourceRole,
+    record: DiagnosticRecord,
+    terminal: bool,
+    scenario_context_id: Option<String>,
+) -> DiagnosticRun {
     let run_id = record
         .run_id
         .clone()
@@ -815,12 +845,14 @@ fn diagnostic_run(role: ResourceRole, record: DiagnosticRecord, terminal: bool) 
             role,
         ),
         run_id: run_id.clone(),
-        scenario_run_id: record
-            .operation_context_id
-            .clone()
-            .or_else(|| record.session_context_id.clone())
-            .or_else(|| record.transaction_id.clone())
-            .unwrap_or_else(|| run_id.clone()),
+        scenario_run_id: scenario_context_id.unwrap_or_else(|| {
+            record
+                .operation_context_id
+                .clone()
+                .or_else(|| record.session_context_id.clone())
+                .or_else(|| record.transaction_id.clone())
+                .unwrap_or_else(|| run_id.clone())
+        }),
         transaction_id: record.transaction_id,
         session_context_id: record.session_context_id,
         operation_context_id: record.operation_context_id,
@@ -2486,7 +2518,10 @@ pub fn run_host_runtime_with_recording(
     if !address.ip().is_loopback() {
         return Err(SessionError::NonLoopback);
     }
-    run_host_runtime_scoped(address, role_root, result, recording)
+    let startup = profile::managed_startup_barrier(role_root).map_err(|_| SessionError::Io)?;
+    run_host_runtime_scoped(address, role_root, result, recording, None, startup, None)
+        .map(|_| ())
+        .map_err(|failure| failure.error)
 }
 
 pub fn run_private_lan_host_runtime_with_recording(
@@ -2498,7 +2533,69 @@ pub fn run_private_lan_host_runtime_with_recording(
     if !is_exact_private_lan_address(address) {
         return Err(SessionError::NonPrivateLan);
     }
-    run_host_runtime_scoped(address, role_root, result, recording)
+    let startup = profile::managed_startup_barrier(role_root).map_err(|_| SessionError::Io)?;
+    run_host_runtime_scoped(address, role_root, result, recording, None, startup, None)
+        .map(|_| ())
+        .map_err(|failure| failure.error)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HostExit {
+    Stopped,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HostRuntimeError {
+    pub error: SessionError,
+    pub stage: Operation,
+}
+
+impl From<SessionError> for HostRuntimeError {
+    fn from(error: SessionError) -> Self {
+        Self {
+            error,
+            stage: Operation::HostRuntimeStop,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_profile_host_runtime(
+    address: SocketAddr,
+    role_root: &Path,
+    bind_mode: profile::BindMode,
+    result: AvailabilityResult,
+    recording: RecordingMode,
+    launch: OwnerLaunchMetadata,
+    startup: Option<File>,
+    scenario_context: Option<String>,
+) -> Result<HostExit, HostRuntimeError> {
+    match bind_mode {
+        profile::BindMode::Loopback if address.ip().is_loopback() => {}
+        profile::BindMode::PrivateLan if is_exact_private_lan_address(address) => {}
+        profile::BindMode::Loopback => {
+            return Err(HostRuntimeError {
+                error: SessionError::NonLoopback,
+                stage: Operation::HostBind,
+            });
+        }
+        profile::BindMode::PrivateLan => {
+            return Err(HostRuntimeError {
+                error: SessionError::NonPrivateLan,
+                stage: Operation::HostBind,
+            });
+        }
+    }
+    run_host_runtime_scoped(
+        address,
+        role_root,
+        result,
+        recording,
+        Some(launch),
+        startup,
+        scenario_context,
+    )
 }
 
 fn run_host_runtime_scoped(
@@ -2506,56 +2603,145 @@ fn run_host_runtime_scoped(
     role_root: &Path,
     result: AvailabilityResult,
     recording: RecordingMode,
-) -> Result<(), SessionError> {
-    let store = IdentityStore::new(role_root.join("identity")).with_recording(recording);
-    store.peer().map_err(|_| SessionError::Identity)?;
-    let actor = IdentityActor::start(store.clone());
-    let control_root = role_root.join("control");
-    let generation = new_control_id()?;
-    let owner_actor = actor.clone();
-    let (done_sender, done_receiver) = mpsc::sync_channel(1);
-    let (event_sender, event_receiver) = mpsc::channel();
-    let owner = thread::spawn(move || {
-        let result = run_owner_control_with_events(
-            &control_root,
-            &owner_actor,
-            &generation,
-            Some(event_sender),
-        );
-        let _ = done_sender.send(result);
-    });
+    launch: Option<OwnerLaunchMetadata>,
+    startup: Option<File>,
+    scenario_context: Option<String>,
+) -> Result<HostExit, HostRuntimeError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
-        .map_err(|_| SessionError::Io)?;
-    runtime.block_on(host_accept_loop(
+        .map_err(|_| HostRuntimeError {
+            error: SessionError::Io,
+            stage: Operation::HostOwnerAcquire,
+        })?;
+    let (interrupt, terminate) = {
+        let _runtime = runtime.enter();
+        (
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(
+                |_| HostRuntimeError {
+                    error: SessionError::Io,
+                    stage: Operation::HostOwnerAcquire,
+                },
+            )?,
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(
+                |_| HostRuntimeError {
+                    error: SessionError::Io,
+                    stage: Operation::HostOwnerAcquire,
+                },
+            )?,
+        )
+    };
+    let store = IdentityStore::new(role_root.join("identity"))
+        .with_recording(recording)
+        .with_scenario_context(scenario_context);
+    store.peer().map_err(|_| HostRuntimeError {
+        error: SessionError::Identity,
+        stage: Operation::HostOwnerAcquire,
+    })?;
+    let actor = IdentityActor::start(store.clone());
+    let control_root = role_root.join("control");
+    let generation = new_control_id().map_err(|error| HostRuntimeError {
+        error,
+        stage: Operation::HostOwnerAcquire,
+    })?;
+    let owner_actor = actor.clone();
+    let (done_sender, done_receiver) = mpsc::sync_channel(1);
+    let (event_sender, event_receiver) = mpsc::channel();
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    let owner_generation = generation.clone();
+    let owner_control_root = control_root.clone();
+    let startup_cancel = Arc::new(AtomicBool::new(false));
+    let owner_startup_cancel = startup_cancel.clone();
+    let owner = thread::spawn(move || {
+        let result = owner_control::run_owner_control_for_runtime(
+            &control_root,
+            &owner_actor,
+            &generation,
+            owner_control::OwnerControlOptions {
+                event_sender: Some(event_sender),
+                launch,
+                startup: None,
+                ready: Some(ready_sender),
+                startup_cancel: Some(owner_startup_cancel),
+            },
+        );
+        let _ = done_sender.send(result);
+    });
+    if ready_receiver.recv_timeout(Duration::from_secs(2)).is_err() {
+        startup_cancel.store(true, Ordering::Release);
+        owner.join().map_err(|_| HostRuntimeError {
+            error: SessionError::Io,
+            stage: Operation::HostOwnerRelease,
+        })?;
+        return Err(HostRuntimeError {
+            error: SessionError::Io,
+            stage: Operation::HostOwnerAcquire,
+        });
+    }
+    let runtime_result = runtime.block_on(host_accept_loop(HostLoop {
         address,
         store,
         result,
         done_receiver,
         event_receiver,
-    ))?;
-    owner.join().map_err(|_| SessionError::Io)?;
-    Ok(())
+        owner_control_root: owner_control_root.clone(),
+        owner_generation: owner_generation.clone(),
+        startup,
+        interrupt,
+        terminate,
+    }));
+    if runtime_result.is_err() {
+        startup_cancel.store(true, Ordering::Release);
+    }
+    owner.join().map_err(|_| HostRuntimeError {
+        error: SessionError::Io,
+        stage: Operation::HostOwnerRelease,
+    })?;
+    runtime_result
 }
 
-#[allow(clippy::too_many_lines)]
-async fn host_accept_loop(
+struct HostLoop {
     address: SocketAddr,
     store: IdentityStore,
     result: AvailabilityResult,
     done_receiver: mpsc::Receiver<std::io::Result<()>>,
     event_receiver: mpsc::Receiver<OwnerEvent>,
-) -> Result<(), SessionError> {
+    owner_control_root: PathBuf,
+    owner_generation: String,
+    startup: Option<File>,
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn host_accept_loop(loop_state: HostLoop) -> Result<HostExit, HostRuntimeError> {
     use std::collections::HashMap;
     use std::net::Shutdown;
     use std::sync::Arc;
     use tokio::sync::Semaphore;
     use tokio::task::JoinSet;
+    let HostLoop {
+        address,
+        store,
+        result,
+        done_receiver,
+        event_receiver,
+        owner_control_root: control_root,
+        owner_generation,
+        mut startup,
+        mut interrupt,
+        mut terminate,
+    } = loop_state;
     let listener = tokio::net::TcpListener::bind(address)
         .await
-        .map_err(|_| SessionError::Io)?;
+        .map_err(|_| HostRuntimeError {
+            error: SessionError::Io,
+            stage: Operation::HostBind,
+        })?;
+    startup.take();
+    let mut listener = Some(listener);
+    let mut signal_requested = false;
     let preauth = Arc::new(Semaphore::new(4));
     let authenticated = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
@@ -2604,6 +2790,7 @@ async fn host_accept_loop(
                 }
                 OwnerEvent::PairStart { task, .. } => task.finish(false),
                 OwnerEvent::RuntimeShutdown { joined } => {
+                    listener.take();
                     if let Some(task) = &pairing_window {
                         task.cancel();
                     }
@@ -2660,7 +2847,50 @@ async fn host_accept_loop(
             owner_result.map_err(|_| SessionError::Io)?;
             break;
         }
-        match tokio::time::timeout(Duration::from_millis(10), listener.accept()).await {
+        let Some(listener) = listener.as_ref() else {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            continue;
+        };
+        let accepted = tokio::select! {
+            _ = interrupt.recv(), if !signal_requested => {
+                let response = call_owner_control(
+                    &control_root,
+                    &OwnerCommand::Shutdown {
+                        owner_generation: owner_generation.clone(),
+                    },
+                ).map_err(|_| HostRuntimeError {
+                    error: SessionError::Io,
+                    stage: Operation::HostRuntimeStop,
+                })?;
+                if response != OwnerResponse::ShutdownAccepted {
+                    return Err(SessionError::Io.into());
+                }
+                signal_requested = true;
+                None
+            }
+            _ = terminate.recv(), if !signal_requested => {
+                let response = call_owner_control(
+                    &control_root,
+                    &OwnerCommand::Shutdown {
+                        owner_generation: owner_generation.clone(),
+                    },
+                ).map_err(|_| HostRuntimeError {
+                    error: SessionError::Io,
+                    stage: Operation::HostRuntimeStop,
+                })?;
+                if response != OwnerResponse::ShutdownAccepted {
+                    return Err(SessionError::Io.into());
+                }
+                signal_requested = true;
+                None
+            }
+            result = tokio::time::timeout(
+                Duration::from_millis(10),
+                listener.accept(),
+            ) => Some(result),
+        };
+        let Some(accepted) = accepted else { continue };
+        match accepted {
             Ok(Ok((stream, _))) => {
                 let Ok(preauth_permit) = preauth.clone().try_acquire_owned() else {
                     store.record(&DiagnosticRecord::preauth_capacity());
@@ -2756,12 +2986,16 @@ async fn host_accept_loop(
                     let _ = connection_done.send(connection_id);
                 });
             }
-            Ok(Err(_)) => return Err(SessionError::Io),
+            Ok(Err(_)) => return Err(SessionError::Io.into()),
             Err(_) => {}
         }
     }
     while tasks.join_next().await.is_some() {}
-    Ok(())
+    Ok(if signal_requested {
+        HostExit::Interrupted
+    } else {
+        HostExit::Stopped
+    })
 }
 
 fn reserve_pairing_window(state: &Mutex<(bool, bool, bool)>) -> bool {
@@ -3401,7 +3635,6 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
     use std::os::unix::fs::symlink;
-    use std::os::unix::net::UnixStream;
     use std::thread;
     fn temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("deskkin-host-{name}-{}", std::process::id()))
@@ -4034,8 +4267,9 @@ mod tests {
                     .ok()
             })
             .unwrap();
-        let OwnerResponse::OwnerInfo { owner_generation } =
-            call_owner_control(&control, &OwnerCommand::OwnerInfo).unwrap()
+        let OwnerResponse::OwnerInfo {
+            owner_generation, ..
+        } = call_owner_control(&control, &OwnerCommand::OwnerInfo).unwrap()
         else {
             panic!("owner info missing")
         };
@@ -4076,7 +4310,7 @@ mod tests {
         assert_eq!(terminal, OwnerResponse::Unpaired);
         assert!(session.read_availability([15; 16]).is_err());
         assert_eq!(
-            call_owner_control(&control, &OwnerCommand::Shutdown).unwrap(),
+            call_owner_control(&control, &OwnerCommand::Shutdown { owner_generation },).unwrap(),
             OwnerResponse::ShutdownAccepted
         );
         server.join().unwrap().unwrap();
@@ -4103,20 +4337,17 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let mut stream = UnixStream::connect(socket).unwrap();
-        let payload = br#"{"command":"shutdown"}"#;
-        stream
-            .write_all(&(u32::try_from(payload.len()).unwrap()).to_be_bytes())
-            .unwrap();
-        stream.write_all(payload).unwrap();
-        let mut prefix = [0; 4];
-        stream.read_exact(&mut prefix).unwrap();
-        let mut response = vec![0; u32::from_be_bytes(prefix) as usize];
-        stream.read_exact(&mut response).unwrap();
-        assert!(
-            String::from_utf8(response)
-                .unwrap()
-                .contains("shutdown_accepted")
+        let control = role_root.join("control");
+        let generation = discover_owner(&control).unwrap().unwrap();
+        assert_eq!(
+            call_owner_control(
+                &control,
+                &OwnerCommand::Shutdown {
+                    owner_generation: generation,
+                },
+            )
+            .unwrap(),
+            OwnerResponse::ShutdownAccepted
         );
         join.join().unwrap().unwrap();
     }
@@ -4145,6 +4376,7 @@ mod tests {
         wait_for_owner_socket(&host_control);
         let OwnerResponse::OwnerInfo {
             owner_generation: host_generation,
+            ..
         } = call_owner_control(&host_control, &OwnerCommand::OwnerInfo).unwrap()
         else {
             panic!("host owner info missing");
@@ -4309,13 +4541,25 @@ mod tests {
             }
         }
         assert_eq!(
-            call_owner_control(&simulator_control, &OwnerCommand::Shutdown).unwrap(),
+            call_owner_control(
+                &simulator_control,
+                &OwnerCommand::Shutdown {
+                    owner_generation: simulator_generation,
+                },
+            )
+            .unwrap(),
             OwnerResponse::ShutdownAccepted
         );
         simulator_owner.join().unwrap().unwrap();
         simulator_pairing.join().unwrap();
         assert_eq!(
-            call_owner_control(&host_control, &OwnerCommand::Shutdown).unwrap(),
+            call_owner_control(
+                &host_control,
+                &OwnerCommand::Shutdown {
+                    owner_generation: host_generation,
+                },
+            )
+            .unwrap(),
             OwnerResponse::ShutdownAccepted
         );
         host_runtime.join().unwrap().unwrap();

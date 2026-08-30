@@ -1,15 +1,16 @@
 # Foundation A proposal: repeatable physical profile
 
-Status: Proposed
+Status: Accepted and implemented
 
 Date: 2026-08-30
 
-This proposal is the approval boundary for Foundation A. It records no accepted
-architectural decision and authorizes no implementation, dependency, live host
-launch, identity mutation, device access, or network exposure. After approval,
-implement and verify the isolated profile and host-lifecycle path as one durable
-local checkpoint. Qualification with the retained CoreS3 is a later, separately
-authorized checkpoint.
+This proposal was the approval boundary for Foundation A. Its accepted
+architecture is recorded in
+[`ADR-0006`](decisions/0006-repeatable-physical-profile.md), and its isolated
+profile and host-lifecycle path is implemented. Qualification with the retained
+CoreS3 remains a later, separately authorized checkpoint; this acceptance does
+not authorize a live host launch, identity mutation, device access, or private
+network exposure.
 
 ## Goal and observable result
 

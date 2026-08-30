@@ -1,6 +1,9 @@
 use std::io;
 use std::path::PathBuf;
 
+use deskkin_desktop_host::profile::{
+    BindMode, PhysicalProfile, ProfileAvailability, ProfileRecording, ProfileStore,
+};
 use deskkin_desktop_host::{
     IdentityActor, IdentityStore, OwnerCommand, OwnerResponse, acquire_owner_lock, bind_loopback,
     call_owner_control, discover_owner, new_control_id, query_command_result,
@@ -21,15 +24,14 @@ fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or_else(usage)?;
     match command.as_str() {
+        "profile" => profile_command(args)?,
+        "profile-host" | "profile-status" | "profile-stop" => {
+            profile_runtime_command(&command, &mut args)?;
+        }
         "identity-init" => {
             identity_init(identity_root(args.next()))?;
         }
-        "identity-list" => println!(
-            "{:?}",
-            IdentityStore::new(identity_root(args.next()))
-                .peer()
-                .map_err(debug)?
-        ),
+        "identity-list" => identity_list(identity_root(args.next()))?,
         "unpair" => {
             let peer = args.next().ok_or_else(usage)?;
             unpair(identity_root(args.next()), &peer)?;
@@ -59,9 +61,10 @@ fn run() -> Result<(), String> {
                 _ => return Err(usage()),
             };
             let root = identity_root(args.next());
-            let _owner = standalone_owner_lock(&root)?;
+            let mut owner = standalone_owner_lock(&root)?;
             let store = IdentityStore::new(root);
             let listener = bind_loopback(address).map_err(debug)?;
+            owner.ready();
             println!("listening {}", listener.local_addr().map_err(debug)?);
             serve_one(&listener, &store, result).map_err(debug)?;
         }
@@ -114,6 +117,122 @@ fn run() -> Result<(), String> {
                 .map_err(debug)?;
         }
         _ => return Err(usage()),
+    }
+    Ok(())
+}
+
+fn identity_list(root: PathBuf) -> Result<(), String> {
+    println!("{:?}", IdentityStore::new(root).peer().map_err(debug)?);
+    Ok(())
+}
+
+fn profile_runtime_command(
+    command: &str,
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), String> {
+    let name = profile_argument(args)?;
+    reject_remaining(args)?;
+    let store = ProfileStore::local();
+    match command {
+        "profile-host" => store.run(&name).map_err(debug),
+        "profile-status" => store
+            .status(&name)
+            .map(|status| println!("{status}"))
+            .map_err(debug),
+        "profile-stop" => store
+            .stop(&name)
+            .map(|()| println!("stopped"))
+            .map_err(debug),
+        _ => Err(usage()),
+    }
+}
+
+fn profile_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let command = args.next().ok_or_else(usage)?;
+    let store = ProfileStore::local();
+    match command.as_str() {
+        "list" => {
+            reject_remaining(&mut args)?;
+            for name in store.list().map_err(debug)? {
+                println!("{name}");
+            }
+        }
+        "show" => {
+            let name = args.next().ok_or_else(usage)?;
+            reject_remaining(&mut args)?;
+            print!("{}", store.show(&name).map_err(debug)?);
+        }
+        "delete" => {
+            let name = args.next().ok_or_else(usage)?;
+            reject_remaining(&mut args)?;
+            store.delete(&name).map_err(debug)?;
+            println!("deleted");
+        }
+        "set" => {
+            let name = args.next().ok_or_else(usage)?;
+            let mut role_root = None;
+            let mut bind_mode = None;
+            let mut address = None;
+            let mut availability = None;
+            let mut recording = None;
+            while let Some(flag) = args.next() {
+                let value = args.next().ok_or_else(usage)?;
+                match flag.as_str() {
+                    "--role-root" if role_root.is_none() => role_root = Some(value),
+                    "--bind-mode" if bind_mode.is_none() => {
+                        bind_mode = Some(match value.as_str() {
+                            "loopback" => BindMode::Loopback,
+                            "private_lan" => BindMode::PrivateLan,
+                            _ => return Err(usage()),
+                        });
+                    }
+                    "--address" if address.is_none() => {
+                        address = Some(value.parse().map_err(debug)?);
+                    }
+                    "--availability" if availability.is_none() => {
+                        availability = Some(match value.as_str() {
+                            "available" => ProfileAvailability::Available,
+                            "unavailable" => ProfileAvailability::Unavailable,
+                            "read_failed" => ProfileAvailability::ReadFailed,
+                            _ => return Err(usage()),
+                        });
+                    }
+                    "--recording" if recording.is_none() => {
+                        recording = Some(match value.as_str() {
+                            "on" => ProfileRecording::On,
+                            "off" => ProfileRecording::Off,
+                            _ => return Err(usage()),
+                        });
+                    }
+                    _ => return Err(usage()),
+                }
+            }
+            let profile = PhysicalProfile::new(
+                role_root.ok_or_else(usage)?,
+                bind_mode.ok_or_else(usage)?,
+                address.ok_or_else(usage)?,
+                availability.ok_or_else(usage)?,
+                recording.ok_or_else(usage)?,
+            )
+            .map_err(debug)?;
+            store.set(&name, &profile).map_err(debug)?;
+            println!("stored");
+        }
+        _ => return Err(usage()),
+    }
+    Ok(())
+}
+
+fn profile_argument(args: &mut impl Iterator<Item = String>) -> Result<String, String> {
+    if args.next().as_deref() != Some("--profile") {
+        return Err(usage());
+    }
+    args.next().ok_or_else(usage)
+}
+
+fn reject_remaining(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    if args.next().is_some() {
+        return Err(usage());
     }
     Ok(())
 }
@@ -179,8 +298,28 @@ fn control_root(identity_root: &std::path::Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "identity root has no role parent".into())
 }
 
-fn standalone_owner_lock(identity_root: &std::path::Path) -> Result<std::fs::File, String> {
-    acquire_owner_lock(&control_root(identity_root)?).map_err(debug)
+struct StandaloneOwner {
+    startup_guard: Option<std::fs::File>,
+    _owner: std::fs::File,
+}
+
+impl StandaloneOwner {
+    fn ready(&mut self) {
+        self.startup_guard.take();
+    }
+}
+
+fn standalone_owner_lock(identity_root: &std::path::Path) -> Result<StandaloneOwner, String> {
+    let role_root = identity_root
+        .parent()
+        .ok_or_else(|| "identity root has no role parent".to_owned())?;
+    let startup = deskkin_desktop_host::profile::managed_startup_barrier(role_root)
+        .map_err(|error| error.to_string())?;
+    let owner = acquire_owner_lock(&control_root(identity_root)?).map_err(debug)?;
+    Ok(StandaloneOwner {
+        startup_guard: startup,
+        _owner: owner,
+    })
 }
 
 fn owner_mutation(
@@ -301,9 +440,53 @@ fn query_owner_result(
 }
 
 fn usage() -> String {
-    "usage: deskkin-desktop-host identity-init|identity-list [ROOT] | unpair PEER [ROOT] | pairing-window-open [ROOT] | serve-once ADDRESS available|unavailable|read_failed [ROOT] | owner [ROLE_ROOT] | run ADDRESS available|unavailable|read_failed [ROLE_ROOT] | run-private-lan RFC1918_IPV4:39042 available|unavailable|read_failed [ROLE_ROOT]".into()
+    "usage: deskkin-desktop-host profile list|show NAME|set NAME --role-root ROOT --bind-mode loopback|private_lan --address ADDRESS --availability available|unavailable|read_failed --recording on|off|delete NAME | profile-host|profile-status|profile-stop --profile NAME | identity-init|identity-list [ROOT] | unpair PEER [ROOT] | pairing-window-open [ROOT] | serve-once ADDRESS available|unavailable|read_failed [ROOT] | owner [ROLE_ROOT] | run ADDRESS available|unavailable|read_failed [ROLE_ROOT] | run-private-lan RFC1918_IPV4:39042 available|unavailable|read_failed [ROLE_ROOT]".into()
 }
 
 fn debug(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use deskkin_desktop_host::profile::ProfileState;
+
+    #[test]
+    fn standalone_listener_releases_startup_barrier_at_readiness() {
+        let base = std::env::temp_dir().join(format!(
+            "deskkin-standalone-ready-{}-{}",
+            std::process::id(),
+            new_control_id().unwrap()
+        ));
+        let state_root = base.join(".deskkin");
+        let role_root = state_root.join("roles/host");
+        let identity_root = role_root.join("identity");
+        let _ = std::fs::remove_dir_all(&base);
+        let store = ProfileStore::at(state_root);
+        let profile = PhysicalProfile::new(
+            "roles/host".into(),
+            BindMode::Loopback,
+            "127.0.0.1:39032".parse().unwrap(),
+            ProfileAvailability::Available,
+            ProfileRecording::Off,
+        )
+        .unwrap();
+        store.set("physical", &profile).unwrap();
+        let mut owner = standalone_owner_lock(&identity_root).unwrap();
+        let listener = bind_loopback("127.0.0.1:0".parse().unwrap()).unwrap();
+        owner.ready();
+
+        let started = Instant::now();
+        assert_eq!(
+            store.status("physical").unwrap(),
+            ProfileState::OwnerUnknown
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+        drop(listener);
+        drop(owner);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }

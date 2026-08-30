@@ -53,7 +53,26 @@ pub enum OwnerCommand {
         command_id: String,
         owner_generation: String,
     },
-    Shutdown,
+    Shutdown {
+        owner_generation: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerLaunchMetadata {
+    pub profile_name: String,
+    pub role_root: String,
+    pub bind_mode: String,
+    pub bind_address: String,
+    pub availability: String,
+    pub recording: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnerInfo {
+    pub owner_generation: String,
+    pub launch: Option<OwnerLaunchMetadata>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -61,6 +80,8 @@ pub enum OwnerCommand {
 pub enum OwnerResponse {
     OwnerInfo {
         owner_generation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch: Option<OwnerLaunchMetadata>,
     },
     IdentityInitialized,
     IdentityState {
@@ -190,12 +211,35 @@ struct CommandRecord {
     diagnostic: Option<(DiagnosticKind, DiagnosticSpan)>,
 }
 
+#[derive(Default)]
+pub(crate) struct OwnerControlOptions {
+    pub(crate) event_sender: Option<mpsc::Sender<OwnerEvent>>,
+    pub(crate) launch: Option<OwnerLaunchMetadata>,
+    pub(crate) startup: Option<File>,
+    pub(crate) ready: Option<mpsc::SyncSender<()>>,
+    pub(crate) startup_cancel: Option<Arc<AtomicBool>>,
+}
+
 pub fn run_owner_control(
     root: &Path,
     actor: &IdentityActor,
     owner_generation: &str,
 ) -> std::io::Result<()> {
-    run_owner_control_with_events(root, actor, owner_generation, None)
+    let startup = root
+        .parent()
+        .map(crate::profile::managed_startup_barrier)
+        .transpose()
+        .map_err(std::io::Error::other)?
+        .flatten();
+    run_owner_control_inner(
+        root,
+        actor,
+        owner_generation,
+        OwnerControlOptions {
+            startup,
+            ..OwnerControlOptions::default()
+        },
+    )
 }
 
 pub fn run_owner_control_with_events(
@@ -204,6 +248,69 @@ pub fn run_owner_control_with_events(
     owner_generation: &str,
     event_sender: Option<mpsc::Sender<OwnerEvent>>,
 ) -> std::io::Result<()> {
+    let startup = root
+        .parent()
+        .map(crate::profile::managed_startup_barrier)
+        .transpose()
+        .map_err(std::io::Error::other)?
+        .flatten();
+    run_owner_control_inner(
+        root,
+        actor,
+        owner_generation,
+        OwnerControlOptions {
+            event_sender,
+            startup,
+            ..OwnerControlOptions::default()
+        },
+    )
+}
+
+pub fn run_owner_control_with_events_scoped(
+    root: &Path,
+    actor: &IdentityActor,
+    owner_generation: &str,
+    event_sender: Option<mpsc::Sender<OwnerEvent>>,
+    startup: Option<File>,
+    ready: mpsc::SyncSender<()>,
+    startup_cancel: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    run_owner_control_inner(
+        root,
+        actor,
+        owner_generation,
+        OwnerControlOptions {
+            event_sender,
+            startup,
+            ready: Some(ready),
+            startup_cancel: Some(startup_cancel),
+            ..OwnerControlOptions::default()
+        },
+    )
+}
+
+pub(crate) fn run_owner_control_for_runtime(
+    root: &Path,
+    actor: &IdentityActor,
+    owner_generation: &str,
+    options: OwnerControlOptions,
+) -> std::io::Result<()> {
+    run_owner_control_inner(root, actor, owner_generation, options)
+}
+
+fn run_owner_control_inner(
+    root: &Path,
+    actor: &IdentityActor,
+    owner_generation: &str,
+    options: OwnerControlOptions,
+) -> std::io::Result<()> {
+    let OwnerControlOptions {
+        event_sender,
+        launch,
+        mut startup,
+        ready,
+        startup_cancel,
+    } = options;
     let _owner_lock = acquire_owner_lock(root)?;
     let socket = root.join("owner.sock");
     if socket.exists() {
@@ -219,6 +326,12 @@ pub fn run_owner_control_with_events(
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
+    if let Some(ready) = ready {
+        ready
+            .send(())
+            .map_err(|_| std::io::Error::other("owner readiness receiver unavailable"))?;
+    }
+    startup.take();
     let (completion_sender, completion_receiver) = mpsc::channel();
     let state = Arc::new(Mutex::new(ControlState {
         table: VecDeque::new(),
@@ -229,8 +342,13 @@ pub fn run_owner_control_with_events(
     }));
     let shutdown = Arc::new(AtomicBool::new(false));
     let generation = Arc::new(owner_generation.to_owned());
+    let launch = Arc::new(launch);
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
-    while !shutdown.load(Ordering::Acquire) {
+    while !shutdown.load(Ordering::Acquire)
+        && !startup_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+    {
         let mut index = 0;
         while index < connections.len() {
             if connections[index].is_finished() {
@@ -246,12 +364,19 @@ pub fn run_owner_control_with_events(
                 let shutdown = shutdown.clone();
                 let actor = actor.clone();
                 let generation = generation.clone();
+                let launch = launch.clone();
                 connections.push(std::thread::spawn(move || {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                     let command = read_command(&mut stream);
                     let (response, requests_shutdown) = match command {
-                        Ok(command) => handle_command(command, &actor, &generation, &state),
+                        Ok(command) => handle_command(
+                            command,
+                            &actor,
+                            &generation,
+                            launch.as_ref().as_ref(),
+                            &state,
+                        ),
                         Err(()) => (OwnerResponse::InvalidRequest, false),
                     };
                     if write_response(&mut stream, &response).is_ok() && requests_shutdown {
@@ -266,6 +391,16 @@ pub fn run_owner_control_with_events(
             Err(error) => return Err(error),
         }
     }
+    finish_owner_control(connections, &state, actor, &socket, startup_cancel.as_ref())
+}
+
+fn finish_owner_control(
+    connections: Vec<JoinHandle<()>>,
+    state: &Mutex<ControlState>,
+    actor: &IdentityActor,
+    socket: &Path,
+    startup_cancel: Option<&Arc<AtomicBool>>,
+) -> std::io::Result<()> {
     for connection in connections {
         let _ = connection.join();
     }
@@ -276,7 +411,11 @@ pub fn run_owner_control_with_events(
         let _ = worker.join();
     }
     apply_completions(&mut state);
-    if let Some(event_sender) = &state.event_sender {
+    if let Some(event_sender) = &state.event_sender
+        && !startup_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+    {
         let (joined, acknowledgement) = mpsc::sync_channel(1);
         event_sender
             .send(OwnerEvent::RuntimeShutdown { joined })
@@ -305,6 +444,7 @@ fn handle_command(
     command: OwnerCommand,
     actor: &IdentityActor,
     owner_generation: &str,
+    launch: Option<&OwnerLaunchMetadata>,
     state: &Mutex<ControlState>,
 ) -> (OwnerResponse, bool) {
     let Ok(mut state) = state.lock() else {
@@ -325,6 +465,7 @@ fn handle_command(
         OwnerCommand::OwnerInfo => (
             OwnerResponse::OwnerInfo {
                 owner_generation: owner_generation.to_owned(),
+                launch: launch.cloned(),
             },
             false,
         ),
@@ -358,7 +499,9 @@ fn handle_command(
                 .unwrap_or(OwnerResponse::CommandUnknown),
             false,
         ),
-        OwnerCommand::Shutdown => (OwnerResponse::ShutdownAccepted, true),
+        OwnerCommand::Shutdown {
+            owner_generation: generation,
+        } if generation == owner_generation => (OwnerResponse::ShutdownAccepted, true),
         OwnerCommand::IdentityInit {
             command_id,
             owner_generation: generation,
@@ -453,7 +596,8 @@ fn handle_command(
         | OwnerCommand::Unpair { .. }
         | OwnerCommand::PairingWindowOpen { .. }
         | OwnerCommand::PairStart { .. }
-        | OwnerCommand::PairingDecide { .. } => (OwnerResponse::StaleOwner, false),
+        | OwnerCommand::PairingDecide { .. }
+        | OwnerCommand::Shutdown { .. } => (OwnerResponse::StaleOwner, false),
     }
 }
 
@@ -700,6 +844,7 @@ pub fn owner_is_alive(root: &Path) -> std::io::Result<bool> {
 
 /// Attempts to acquire the owner lock without waiting.
 pub fn try_acquire_owner_lock(root: &Path) -> std::io::Result<Option<File>> {
+    validate_control_root(root)?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -715,6 +860,7 @@ pub fn try_acquire_owner_lock(root: &Path) -> std::io::Result<Option<File>> {
 }
 
 pub fn call_owner_control(root: &Path, command: &OwnerCommand) -> std::io::Result<OwnerResponse> {
+    validate_owner_socket(root)?;
     let mut stream = UnixStream::connect(root.join("owner.sock"))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -758,14 +904,60 @@ pub fn call_owner_control(root: &Path, command: &OwnerCommand) -> std::io::Resul
 /// Discovers the live owner generation, cleaning a stale socket only while
 /// holding the unowned lock.
 pub fn discover_owner(root: &Path) -> std::io::Result<Option<String>> {
-    if !root.join("owner.sock").exists() {
-        return Ok(None);
+    Ok(discover_owner_info(root)?.map(|info| info.owner_generation))
+}
+
+/// Discovers the complete private owner identity and launch metadata.
+pub fn discover_owner_info(root: &Path) -> std::io::Result<Option<OwnerInfo>> {
+    match fs::symlink_metadata(root) {
+        Ok(_) => validate_control_root(root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     }
+    let socket_exists = match fs::symlink_metadata(root.join("owner.sock")) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if !socket_exists {
+        return match try_acquire_owner_lock(root)? {
+            Some(_) => Ok(None),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "owner_control_not_ready",
+            )),
+        };
+    }
+    let socket_metadata = fs::symlink_metadata(root.join("owner.sock"))?;
+    if socket_metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("owner socket symlink"));
+    }
+    if !socket_metadata.file_type().is_socket() {
+        if let Some(_owner_lock) = try_acquire_owner_lock(root)? {
+            fs::remove_file(root.join("owner.sock"))?;
+            return Ok(None);
+        }
+        return Err(std::io::Error::other("owner socket path is not a socket"));
+    }
+    if socket_metadata.permissions().mode() & 0o077 != 0 {
+        if let Some(_owner_lock) = try_acquire_owner_lock(root)? {
+            fs::remove_file(root.join("owner.sock"))?;
+            return Ok(None);
+        }
+        return Err(std::io::Error::other("owner socket is not private"));
+    }
+    validate_owner_socket(root)?;
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match call_owner_control(root, &OwnerCommand::OwnerInfo) {
-            Ok(OwnerResponse::OwnerInfo { owner_generation }) => {
-                return Ok(Some(owner_generation));
+            Ok(OwnerResponse::OwnerInfo {
+                owner_generation,
+                launch,
+            }) => {
+                return Ok(Some(OwnerInfo {
+                    owner_generation,
+                    launch,
+                }));
             }
             Ok(_) => return Err(std::io::Error::other("unexpected owner_info response")),
             Err(error) => {
@@ -786,6 +978,29 @@ pub fn discover_owner(root: &Path) -> std::io::Result<Option<String>> {
             }
         }
     }
+}
+
+fn validate_control_root(root: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(std::io::Error::other("control root is not private"));
+    }
+    Ok(())
+}
+
+fn validate_owner_socket(root: &Path) -> std::io::Result<()> {
+    validate_control_root(root)?;
+    let metadata = fs::symlink_metadata(root.join("owner.sock"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_socket()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(std::io::Error::other("owner socket is not private"));
+    }
+    Ok(())
 }
 
 /// Queries one accepted command without replaying it. Transient control
@@ -901,6 +1116,46 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_millis(200));
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn scoped_startup_timeout_is_cancelled_and_joined_without_a_socket() {
+        let base = std::env::temp_dir().join(format!(
+            "deskkin-owner-startup-cancel-{}-{}",
+            std::process::id(),
+            crate::new_control_id().unwrap()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let role_root = base.join(".deskkin/roles/simulator");
+        let control = role_root.join("control");
+        let actor = IdentityActor::start(IdentityStore::new(role_root.join("identity")));
+        actor.init().unwrap();
+        fs::set_permissions(base.join(".deskkin"), fs::Permissions::from_mode(0o700)).unwrap();
+        let blocker = acquire_owner_lock(&control).unwrap();
+        let startup = crate::profile::managed_startup_barrier(&role_root).unwrap();
+        let (ready, readiness) = mpsc::sync_channel(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let server_cancel = cancel.clone();
+        let server_actor = actor.clone();
+        let server_control = control.clone();
+        let server = thread::spawn(move || {
+            run_owner_control_with_events_scoped(
+                &server_control,
+                &server_actor,
+                "102132435465768798a9bacbdcedfe0f",
+                None,
+                startup,
+                ready,
+                server_cancel,
+            )
+        });
+        assert!(readiness.recv_timeout(Duration::from_millis(50)).is_err());
+        cancel.store(true, Ordering::Release);
+        assert!(server.join().unwrap().is_err());
+        assert!(!control.join("owner.sock").exists());
+        drop(blocker);
+        actor.stop_and_join().unwrap();
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -1102,13 +1357,19 @@ mod tests {
         assert_eq!(
             call(&control, r#"{"command":"owner_info"}"#),
             OwnerResponse::OwnerInfo {
-                owner_generation: generation
+                owner_generation: generation.clone(),
+                launch: None,
             }
         );
+        let shutdown = format!(r#"{{"command":"shutdown","owner_generation":"{generation}"}}"#);
         assert_eq!(
-            call(&control, r#"{"command":"shutdown"}"#),
-            OwnerResponse::ShutdownAccepted
+            call(
+                &control,
+                r#"{"command":"shutdown","owner_generation":"ffffffffffffffffffffffffffffffff"}"#,
+            ),
+            OwnerResponse::StaleOwner
         );
+        assert_eq!(call(&control, &shutdown), OwnerResponse::ShutdownAccepted);
         join.join().unwrap().unwrap();
         assert_eq!(actor.peer(), Err(crate::StoreError::Io));
         assert!(!control.join("owner.sock").exists());
@@ -1171,7 +1432,12 @@ mod tests {
         drop(partial);
         for _ in 0..100 {
             if matches!(
-                call_owner_control(&control, &OwnerCommand::Shutdown),
+                call_owner_control(
+                    &control,
+                    &OwnerCommand::Shutdown {
+                        owner_generation: "11223344556677889900aabbccddeeff".into(),
+                    },
+                ),
                 Ok(OwnerResponse::ShutdownAccepted)
             ) {
                 break;
@@ -1227,10 +1493,8 @@ mod tests {
                 peer: PeerState::Unpaired
             }
         );
-        assert_eq!(
-            call(&control, r#"{"command":"shutdown"}"#),
-            OwnerResponse::ShutdownAccepted
-        );
+        let shutdown = format!(r#"{{"command":"shutdown","owner_generation":"{generation}"}}"#);
+        assert_eq!(call(&control, &shutdown), OwnerResponse::ShutdownAccepted);
         join.join().unwrap().unwrap();
     }
     #[test]
@@ -1279,10 +1543,8 @@ mod tests {
             .unwrap();
         assert_eq!(terminal, OwnerResponse::IdentityInitialized);
         assert_eq!(call(&control, &request), terminal);
-        assert_eq!(
-            call(&control, r#"{"command":"shutdown"}"#),
-            OwnerResponse::ShutdownAccepted
-        );
+        let shutdown = format!(r#"{{"command":"shutdown","owner_generation":"{generation}"}}"#);
+        assert_eq!(call(&control, &shutdown), OwnerResponse::ShutdownAccepted);
         join.join().unwrap().unwrap();
     }
 

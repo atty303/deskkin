@@ -81,6 +81,22 @@ run = "cargo run --locked --quiet --bin deskkin-diagnostics --"
 description = "Run one explicit Phase 3 desktop-host command"
 run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host --"
 
+[tasks."deskkin:profile"]
+description = "Manage ignored repeatable physical-host profiles"
+run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host -- profile"
+
+[tasks."deskkin:host"]
+description = "Run one named physical-host profile in the foreground"
+run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host -- profile-host"
+
+[tasks."deskkin:status"]
+description = "Read the exact owner state for one physical-host profile"
+run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host -- profile-status"
+
+[tasks."deskkin:stop"]
+description = "Stop the matching generation of one physical-host profile"
+run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host -- profile-stop"
+
 [tasks."phase3:simulator"]
 description = "Run one explicit Phase 3 device-simulator command"
 run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-desktop --"

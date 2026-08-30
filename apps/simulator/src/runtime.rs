@@ -15,8 +15,8 @@ use slint::{ComponentHandle, Timer, TimerMode};
 
 use deskkin_desktop_host::{
     ClientSession, IdentityActor, IdentityStore, OwnerCommand, OwnerEvent, OwnerPairingTask,
-    OwnerResponse, SessionError, call_owner_control, new_context_id, new_control_id,
-    pair_initiator_until, run_owner_control_with_events,
+    OwnerResponse, SessionError, call_owner_control, discover_owner, new_context_id,
+    new_control_id, pair_initiator_until, run_owner_control_with_events_scoped,
 };
 use deskkin_protocol::HelloRejectReason;
 
@@ -405,25 +405,32 @@ pub fn run_protocol_desktop_with_recording(
     let owner_actor = actor.clone();
     let owner_root = control_root.clone();
     let (owner_event_sender, owner_events) = std::sync::mpsc::channel();
+    let startup = deskkin_desktop_host::profile::managed_startup_barrier(&role_root)
+        .map_err(|error| format!("profile startup barrier: {error}"))?;
+    let (owner_ready, owner_readiness) = std::sync::mpsc::sync_channel(1);
+    let owner_cancel = Arc::new(AtomicBool::new(false));
+    let owner_startup_cancel = owner_cancel.clone();
     let owner = thread::spawn(move || {
-        run_owner_control_with_events(
+        run_owner_control_with_events_scoped(
             &owner_root,
             &owner_actor,
             &generation,
             Some(owner_event_sender),
+            startup,
+            owner_ready,
+            owner_startup_cancel,
         )
     });
-    for _ in 0..200 {
-        if control_root.join("owner.sock").exists() {
-            break;
-        }
-        if owner.is_finished() {
-            return Err("simulator owner control failed to start".into());
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    if !control_root.join("owner.sock").exists() {
-        return Err("simulator owner control start timed out".into());
+    if owner_readiness
+        .recv_timeout(Duration::from_secs(2))
+        .is_err()
+    {
+        owner_cancel.store(true, Ordering::Release);
+        return match owner.join() {
+            Ok(Ok(())) => Err("simulator owner control start timed out".into()),
+            Ok(Err(error)) => Err(format!("simulator owner control failed to start: {error}")),
+            Err(_) => Err("simulator owner control startup panicked".into()),
+        };
     }
     apply_view(&ui, application_core::StatusView::Unknown);
     let (network_commands, network_command_receiver) = std::sync::mpsc::sync_channel(8);
@@ -528,8 +535,14 @@ pub fn run_protocol_desktop_with_recording(
             .join()
             .map_err(|_| "simulator network worker panicked".to_owned())?;
     }
-    let shutdown_response = call_owner_control(&state.control_root, &OwnerCommand::Shutdown)
-        .map_err(|error| format!("simulator owner shutdown: {error}"))?;
+    let owner_generation = discover_owner(&state.control_root)
+        .map_err(|error| format!("simulator owner discovery: {error}"))?
+        .ok_or_else(|| "simulator owner is not running".to_owned())?;
+    let shutdown_response = call_owner_control(
+        &state.control_root,
+        &OwnerCommand::Shutdown { owner_generation },
+    )
+    .map_err(|error| format!("simulator owner shutdown: {error}"))?;
     if shutdown_response != OwnerResponse::ShutdownAccepted {
         return Err("simulator owner rejected shutdown".into());
     }

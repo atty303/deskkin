@@ -129,6 +129,31 @@ mise run phase3:diagnostics -- --root .deskkin/phase3/host list
 mise run phase3:diagnostics -- --root .deskkin/phase3/device-simulator list
 ```
 
+For repeatable physical-host operation, store only the secret-free launch
+selection in an ignored named profile. The role root references an existing
+identity; profile creation never initializes, copies, or changes it:
+
+```sh
+mise run deskkin:profile -- set core-s3 --role-root phase3/physical-demo/host --bind-mode private_lan --address 192.168.1.10:39042 --availability available --recording on
+mise run deskkin:profile -- show core-s3
+mise run deskkin:profile -- list
+```
+
+Launch remains foreground-only. Status compares the live owner's exact launch
+metadata, and stop is accepted only for the matching owner generation:
+
+```sh
+mise run deskkin:host -- --profile core-s3
+mise run deskkin:status -- --profile core-s3
+mise run deskkin:stop -- --profile core-s3
+```
+
+Use the machine's exact assigned RFC1918 address; wildcard, public, link-local,
+unassigned, IPv6 private-LAN, and non-39042 physical binds are rejected. Never
+place Wi-Fi, Noise, pairing, or provider credentials in a host profile. Profile
+creation and a private-LAN launch for retained state are operational changes and
+must follow their explicit live checkpoint.
+
 CoreS3 development uses explicit, separate bootstrap, build, device-mutation,
 and read-only status tasks. Mutation tasks do not run as part of tests:
 

@@ -124,8 +124,21 @@ fn control_root(identity_root: &std::path::Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "identity root has no role parent".into())
 }
 
-fn standalone_owner_lock(identity_root: &std::path::Path) -> Result<std::fs::File, String> {
-    acquire_owner_lock(&control_root(identity_root)?).map_err(debug)
+struct StandaloneOwner {
+    _startup: Option<std::fs::File>,
+    _owner: std::fs::File,
+}
+fn standalone_owner_lock(identity_root: &std::path::Path) -> Result<StandaloneOwner, String> {
+    let role_root = identity_root
+        .parent()
+        .ok_or_else(|| "identity root has no role parent".to_owned())?;
+    let startup = deskkin_desktop_host::profile::managed_startup_barrier(role_root)
+        .map_err(|error| error.to_string())?;
+    let owner = acquire_owner_lock(&control_root(identity_root)?).map_err(debug)?;
+    Ok(StandaloneOwner {
+        _startup: startup,
+        _owner: owner,
+    })
 }
 
 fn owner_mutation(
