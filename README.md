@@ -4,9 +4,9 @@ Deskkin is a modular platform for embodied desktop companions. It connects a
 portable device application and Slint user interface to desktop-hosted
 integrations through a capability-oriented protocol.
 
-The first device target is StackChan on M5Stack CoreS3. Provider connectors are
-deliberately deferred while the shared application, protocol, device, and
-development foundations mature. Future candidates include Unraid, desktop
+The first device target is StackChan on M5Stack CoreS3. The first provider slice
+is now proposed as read-only Unraid array status, but no provider connector or
+provider access is implemented yet. Future candidates include desktop
 notifications, conversational AI, calendars, and home automation.
 
 ## Status
@@ -19,6 +19,10 @@ connector composition crate, the Linux host and simulator, and the CoreS3
 firmware. Completed feasibility harnesses are no
 longer part of the active development surface; their contracts and evidence
 remain in `docs/`.
+
+The proposed provider checkpoint and its explicit dependency, credential,
+network, observation, and live-access approval boundaries are in
+[`docs/first-provider-unraid-array-status-proposal.md`](docs/first-provider-unraid-array-status-proposal.md).
 
 The agreed product boundary, architecture, decisions, evidence, and phased plan
 remain in [`docs/implementation-plan.md`](docs/implementation-plan.md). Phase 2

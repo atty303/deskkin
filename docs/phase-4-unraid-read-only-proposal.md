@@ -1,8 +1,12 @@
 # Phase 4 proposal: Unraid read-only infrastructure status
 
-Status: Proposed
+Status: Superseded by
+[`first-provider-unraid-array-status-proposal.md`](first-provider-unraid-array-status-proposal.md)
 
 Date: 2026-08-29
+
+This exploratory proposal is retained as historical design input. It is not the
+current approval boundary and authorizes no implementation or access.
 
 This proposal is the approval boundary for the first provider-backed feature.
 It records no accepted decision and authorizes no implementation, dependency,
