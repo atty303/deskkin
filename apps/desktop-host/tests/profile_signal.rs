@@ -8,6 +8,44 @@ use std::time::{Duration, Instant};
 
 use deskkin_desktop_host::IdentityStore;
 
+struct TempCleanup(std::path::PathBuf);
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+            && !std::thread::panicking()
+        {
+            panic!("failed to clean temporary test path: {error}");
+        }
+    }
+}
+
+struct ChildCleanup(Child);
+
+impl std::ops::Deref for ChildCleanup {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ChildCleanup {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ChildCleanup {
+    fn drop(&mut self) {
+        if let Ok(None) = self.0.try_wait() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 fn host(root: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_deskkin-desktop-host"))
         .current_dir(root)
@@ -40,6 +78,7 @@ fn saturated_owner_control_signal_exits_bounded_and_cleans_ownership() {
             .unwrap()
             .as_nanos()
     ));
+    let _root_cleanup = TempCleanup(root.clone());
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -83,11 +122,13 @@ fn saturated_owner_control_signal_exits_bounded_and_cleans_ownership() {
         .init()
         .unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_deskkin-desktop-host"))
-        .current_dir(&root)
-        .args(["profile-host", "--profile", "physical"])
-        .spawn()
-        .unwrap();
+    let mut child = ChildCleanup(
+        Command::new(env!("CARGO_BIN_EXE_deskkin-desktop-host"))
+            .current_dir(&root)
+            .args(["profile-host", "--profile", "physical"])
+            .spawn()
+            .unwrap(),
+    );
     let control = root.join(".deskkin/roles/host/control/owner.sock");
     for _ in 0..300 {
         if control.exists() {

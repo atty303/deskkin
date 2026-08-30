@@ -454,6 +454,19 @@ mod tests {
     use super::*;
     use deskkin_desktop_host::profile::ProfileState;
 
+    struct TempCleanup(PathBuf);
+
+    impl Drop for TempCleanup {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.0)
+                && error.kind() != io::ErrorKind::NotFound
+                && !std::thread::panicking()
+            {
+                panic!("failed to clean temporary test path: {error}");
+            }
+        }
+    }
+
     #[test]
     fn standalone_listener_releases_startup_barrier_at_readiness() {
         let base = std::env::temp_dir().join(format!(
@@ -461,6 +474,7 @@ mod tests {
             std::process::id(),
             new_control_id().unwrap()
         ));
+        let _base_cleanup = TempCleanup(base.clone());
         let state_root = base.join(".deskkin");
         let role_root = state_root.join("roles/host");
         let identity_root = role_root.join("identity");

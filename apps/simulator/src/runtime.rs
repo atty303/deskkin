@@ -1860,6 +1860,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 
     use super::*;
+    use crate::TempCleanup;
 
     #[test]
     fn durable_pairing_with_terminal_hello_reject_does_not_reconnect() {
@@ -1881,6 +1882,7 @@ mod tests {
     #[test]
     fn network_worker_serializes_authenticated_connect_read_and_close() {
         let base = std::env::temp_dir().join(new_run_id("network-worker"));
+        let _base_cleanup = TempCleanup::new(&base);
         let host = IdentityStore::new_for_role(base.join("host/identity"), ResourceRole::Host);
         let simulator = IdentityStore::new_for_role(
             base.join("simulator/identity"),
@@ -2047,6 +2049,7 @@ mod tests {
             (RunOutcome::Timeout, 2_000, ClosedValue::Timeout),
         ] {
             let root = std::env::temp_dir().join(new_run_id("runtime-publication"));
+            let _root_cleanup = TempCleanup::new(&root);
             let recorder = Recorder::at_root(root.clone());
             let active = ActiveRead {
                 effect: read,

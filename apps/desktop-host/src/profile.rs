@@ -1009,7 +1009,9 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    use crate::{ClientSession, IdentityStore, bind_loopback, pair_initiator, pair_responder};
+    use crate::{
+        ClientSession, IdentityStore, TempCleanup, bind_loopback, pair_initiator, pair_responder,
+    };
 
     fn temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1094,6 +1096,7 @@ mod tests {
     #[test]
     fn store_round_trips_sorted_profiles_and_exact_delete() {
         let root = temp("round-trip");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = ProfileStore::at(root.clone());
         store.set("zeta", &profile("roles/zeta")).unwrap();
@@ -1119,6 +1122,7 @@ mod tests {
     #[test]
     fn store_enforces_file_count_size_encoding_permissions_and_trailing_input() {
         let root = temp("store-bounds");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = ProfileStore::at(root.clone());
         for index in 0..PROFILE_LIMIT {
@@ -1171,6 +1175,7 @@ mod tests {
     #[test]
     fn publication_faults_are_closed_and_temporary_files_are_recovered() {
         let root = temp("publication-faults");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = ProfileStore::at(root.clone());
         let original = profile("roles/original");
@@ -1207,6 +1212,7 @@ mod tests {
     #[test]
     fn store_rejects_symlink_and_unknown_entry() {
         let root = temp("unsafe");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = ProfileStore::at(root.clone());
         store.set("safe", &profile("roles/safe")).unwrap();
@@ -1223,6 +1229,7 @@ mod tests {
     #[test]
     fn every_role_operation_rejects_a_symlinked_role_root() {
         let base = temp("role-symlink");
+        let _base_cleanup = TempCleanup::new(&base);
         let root = base.join(STATE_ROOT);
         let outside = base.join("outside");
         let _ = fs::remove_dir_all(&base);
@@ -1261,6 +1268,7 @@ mod tests {
     fn every_owner_probe_rejects_symlinked_control_and_socket_paths() {
         for kind in ["control", "dangling-control", "socket"] {
             let base = temp(&format!("owner-symlink-{kind}"));
+            let _base_cleanup = TempCleanup::new(&base);
             let root = base.join(STATE_ROOT);
             let role_root = root.join("roles/physical");
             let outside = base.join("outside");
@@ -1315,6 +1323,7 @@ mod tests {
     #[test]
     fn occupied_bind_fails_bounded_and_releases_the_owner() {
         let base = temp("occupied-bind");
+        let _base_cleanup = TempCleanup::new(&base);
         let root = base.join(STATE_ROOT);
         let role = "roles/physical";
         let role_root = root.join(role);
@@ -1388,6 +1397,7 @@ mod tests {
     #[test]
     fn unresolved_profile_records_only_a_closed_fallback_error() {
         let root = temp("fallback");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = ProfileStore::at(root.clone());
         assert!(matches!(
@@ -1410,6 +1420,7 @@ mod tests {
     #[test]
     fn profile_launch_status_authenticated_read_stop_and_relaunch() {
         let root = temp("lifecycle");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let role = "roles/physical";
         let role_root = root.join(role);
@@ -1514,6 +1525,7 @@ mod tests {
     #[test]
     fn profile_stop_refuses_a_low_level_owner() {
         let base = temp("mismatch");
+        let _base_cleanup = TempCleanup::new(&base);
         let root = base.join(STATE_ROOT);
         let _ = fs::remove_dir_all(&base);
         prepare_private_directory(&root).unwrap();
@@ -1617,6 +1629,7 @@ mod tests {
             ),
         ] {
             let base = temp(name);
+            let _base_cleanup = TempCleanup::new(&base);
             let root = base.join(STATE_ROOT);
             let role = format!("roles/{name}");
             let role_root = root.join(&role);
@@ -1680,6 +1693,7 @@ mod tests {
     #[test]
     fn owner_without_control_socket_is_unknown_and_records_closed_errors() {
         let base = temp("owner-not-ready");
+        let _base_cleanup = TempCleanup::new(&base);
         let root = base.join(STATE_ROOT);
         let role = "roles/physical";
         let role_root = root.join(role);
@@ -1729,6 +1743,7 @@ mod tests {
     #[test]
     fn low_level_owner_waits_for_the_profile_store_startup_barrier() {
         let base = temp("startup-barrier");
+        let _base_cleanup = TempCleanup::new(&base);
         let root = base.join(STATE_ROOT);
         let role_root = root.join("roles/host");
         let _ = fs::remove_dir_all(&base);
@@ -1779,6 +1794,7 @@ mod tests {
     fn concurrent_same_and_cross_name_launches_leave_exactly_one_owner() {
         for names in [["physical", "physical"], ["physical", "alternate"]] {
             let base = temp(&format!("concurrent-{}", names[1]));
+            let _base_cleanup = TempCleanup::new(&base);
             let root = base.join(STATE_ROOT);
             let role = "roles/host";
             let role_root = root.join(role);

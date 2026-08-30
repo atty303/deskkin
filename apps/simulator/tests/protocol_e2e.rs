@@ -18,9 +18,23 @@ use deskkin_simulator::ProtocolAdapter;
 use local_run_recorder::ResourceRole;
 use serde_json::Value;
 
+struct TempCleanup(std::path::PathBuf);
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+            && !std::thread::panicking()
+        {
+            panic!("failed to clean temporary test path: {error}");
+        }
+    }
+}
+
 #[test]
 fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     let base = std::env::temp_dir().join(format!("deskkin-protocol-e2e-{}", std::process::id()));
+    let _base_cleanup = TempCleanup(base.clone());
     let _ = fs::remove_dir_all(&base);
     let (host, device) = pair_and_verify(&base);
     let listener = bind_loopback("127.0.0.1:0".parse().unwrap()).unwrap();

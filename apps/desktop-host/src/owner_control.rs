@@ -1086,7 +1086,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IdentityStore;
+    use crate::{IdentityStore, TempCleanup};
     use std::os::unix::net::UnixStream;
     use std::thread;
     #[test]
@@ -1125,6 +1125,7 @@ mod tests {
             std::process::id(),
             crate::new_control_id().unwrap()
         ));
+        let _base_cleanup = TempCleanup::new(&base);
         let _ = fs::remove_dir_all(&base);
         let role_root = base.join(".deskkin/roles/simulator");
         let control = role_root.join("control");
@@ -1338,6 +1339,7 @@ mod tests {
     #[test]
     fn owner_info_and_reserved_shutdown_use_one_response_each() {
         let base = std::env::temp_dir().join(format!("deskkin-owner-{}", std::process::id()));
+        let _base_cleanup = TempCleanup::new(&base);
         let _ = fs::remove_dir_all(&base);
         let actor = IdentityActor::start(IdentityStore::new(base.join("identity")));
         let control = base.join("control");
@@ -1381,6 +1383,7 @@ mod tests {
             "deskkin-stale-owner-{}",
             crate::new_control_id().unwrap()
         ));
+        let _root_cleanup = TempCleanup::new(&root);
         fs::create_dir_all(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let socket = root.join("owner.sock");
@@ -1393,6 +1396,7 @@ mod tests {
     fn control_connection_capacity_is_four_partial_clients() {
         let base =
             std::env::temp_dir().join(format!("deskkin-owner-capacity-{}", std::process::id()));
+        let _base_cleanup = TempCleanup::new(&base);
         let _ = fs::remove_dir_all(&base);
         let actor = IdentityActor::start(IdentityStore::new(base.join("identity")));
         let control = base.join("control");
@@ -1450,6 +1454,7 @@ mod tests {
     fn accepted_mutation_is_idempotently_queryable() {
         let base =
             std::env::temp_dir().join(format!("deskkin-owner-mutation-{}", std::process::id()));
+        let _base_cleanup = TempCleanup::new(&base);
         let _ = fs::remove_dir_all(&base);
         let actor = IdentityActor::start(IdentityStore::new(base.join("identity")));
         let control = base.join("control");
@@ -1503,6 +1508,7 @@ mod tests {
             "deskkin-owner-response-loss-{}",
             std::process::id()
         ));
+        let _base_cleanup = TempCleanup::new(&base);
         let _ = fs::remove_dir_all(&base);
         let actor = IdentityActor::start(IdentityStore::new(base.join("identity")));
         let control = base.join("control");

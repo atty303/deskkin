@@ -139,11 +139,13 @@ impl IdentityActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TempCleanup;
 
     #[test]
     fn actor_serializes_identity_calls_and_joins() {
         let root =
             std::env::temp_dir().join(format!("deskkin-identity-actor-{}", std::process::id()));
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = std::fs::remove_dir_all(&root);
         let actor = IdentityActor::start(IdentityStore::new(root));
         let public = actor.init().unwrap();

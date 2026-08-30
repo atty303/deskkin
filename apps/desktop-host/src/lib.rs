@@ -41,6 +41,42 @@ use serde::{Deserialize, Serialize};
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(test)]
+pub(crate) struct TempCleanup(PathBuf);
+
+#[cfg(test)]
+impl TempCleanup {
+    pub(crate) fn new(path: &Path) -> Self {
+        remove_test_path(path).unwrap();
+        Self(path.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = remove_test_path(&self.0)
+            && !std::thread::panicking()
+        {
+            panic!("failed to clean temporary test path: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+fn remove_test_path(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
 pub fn new_control_id() -> Result<String, SessionError> {
@@ -3787,6 +3823,7 @@ mod tests {
     #[test]
     fn identity_is_explicit_private_and_exact_unpair() {
         let root = temp("identity");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let s = IdentityStore::new(root.clone());
         assert_eq!(s.public_key(), Err(StoreError::Missing));
@@ -3828,6 +3865,7 @@ mod tests {
     #[test]
     fn revoking_publication_recovers_exactly_without_generation_increment() {
         let root = temp("revoking-recovery");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = IdentityStore::new(root);
         store.init().unwrap();
@@ -3866,6 +3904,7 @@ mod tests {
     #[test]
     fn revoking_parent_sync_failure_invalidates_and_requires_exact_recovery() {
         let root = temp("revoked-recovery-required");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = IdentityStore::new(root.clone());
         store.init().unwrap();
@@ -3891,6 +3930,7 @@ mod tests {
             .unwrap();
         let invalidated = std::cell::Cell::new(false);
         let moved = root.with_extension("during-sync");
+        let _moved_cleanup = TempCleanup::new(&moved);
         let _ = fs::remove_dir_all(&moved);
         let result = store.unpair_with_hook(&remote, || {
             invalidated.set(true);
@@ -3907,6 +3947,7 @@ mod tests {
     #[test]
     fn identity_lock_timeout_does_not_enter_publication() {
         let root = temp("identity-lock-timeout");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = IdentityStore::new(root.clone());
         store.init().unwrap();
@@ -3927,6 +3968,8 @@ mod tests {
     fn real_loopback_noise_availability() {
         let host_root = temp("e2e-host");
         let client_root = temp("e2e-client");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _client_cleanup = TempCleanup::new(&client_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&client_root);
         let host = IdentityStore::new(host_root);
@@ -3965,6 +4008,8 @@ mod tests {
     fn stalled_recorder_lock_does_not_change_protocol_outcome() {
         let host_role = temp("recorder-stall-host-role");
         let client_role = temp("recorder-stall-client-role");
+        let _host_cleanup = TempCleanup::new(&host_role);
+        let _client_cleanup = TempCleanup::new(&client_role);
         let _ = fs::remove_dir_all(&host_role);
         let _ = fs::remove_dir_all(&client_role);
         let host = IdentityStore::new(host_role.join("identity"));
@@ -4016,6 +4061,9 @@ mod tests {
         let host_root = temp("changed-key-host");
         let client_root = temp("changed-key-client");
         let attacker_root = temp("changed-key-attacker");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _client_cleanup = TempCleanup::new(&client_root);
+        let _attacker_cleanup = TempCleanup::new(&attacker_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&client_root);
         let _ = fs::remove_dir_all(&attacker_root);
@@ -4062,6 +4110,7 @@ mod tests {
     #[test]
     fn failed_session_publishes_closed_privacy_safe_diagnostic() {
         let role = temp("failed-session-diagnostic");
+        let _role_cleanup = TempCleanup::new(&role);
         let _ = fs::remove_dir_all(&role);
         let store = IdentityStore::new(role.join("identity"));
         store.init().unwrap();
@@ -4122,6 +4171,7 @@ mod tests {
     #[test]
     fn diagnostic_span_is_durable_before_terminal_completion() {
         let role = temp("diagnostic-span-lifecycle");
+        let _role_cleanup = TempCleanup::new(&role);
         let _ = fs::remove_dir_all(&role);
         let store = IdentityStore::new(role.join("identity"));
         let span = store
@@ -4167,6 +4217,8 @@ mod tests {
     fn pairing_reject_and_window_expiry_persist_no_peer() {
         let host_root = temp("pair-reject-host");
         let client_root = temp("pair-reject-client");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _client_cleanup = TempCleanup::new(&client_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&client_root);
         let host = IdentityStore::new(host_root);
@@ -4194,6 +4246,8 @@ mod tests {
     fn pairing_window_deadline_prevents_pending_publication_after_confirmation() {
         let host_root = temp("pair-deadline-host");
         let device_root = temp("pair-deadline-device");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _device_cleanup = TempCleanup::new(&device_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&device_root);
         let host = IdentityStore::new(host_root);
@@ -4230,6 +4284,9 @@ mod tests {
         let host_root = temp("pairing-busy-host");
         let first_root = temp("pairing-busy-first");
         let second_root = temp("pairing-busy-second");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _first_cleanup = TempCleanup::new(&first_root);
+        let _second_cleanup = TempCleanup::new(&second_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&first_root);
         let _ = fs::remove_dir_all(&second_root);
@@ -4266,6 +4323,8 @@ mod tests {
     fn unpaired_noise_peer_cannot_start_application_session() {
         let host_root = temp("unpaired-host");
         let client_root = temp("unpaired-client");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _client_cleanup = TempCleanup::new(&client_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&client_root);
         let host = IdentityStore::new(host_root);
@@ -4283,6 +4342,8 @@ mod tests {
     fn simultaneous_pinned_hello_accepts_one_and_rejects_one_busy() {
         let host_root = temp("busy-host");
         let client_root = temp("busy-client");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _client_cleanup = TempCleanup::new(&client_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&client_root);
         let host = IdentityStore::new(host_root);
@@ -4340,6 +4401,8 @@ mod tests {
     fn active_session_cannot_read_after_exact_unpair() {
         let host_root = temp("unpair-active-host");
         let client_root = temp("unpair-active-client");
+        let _host_cleanup = TempCleanup::new(&host_root);
+        let _client_cleanup = TempCleanup::new(&client_root);
         let _ = fs::remove_dir_all(&host_root);
         let _ = fs::remove_dir_all(&client_root);
         let host = IdentityStore::new(host_root);
@@ -4373,6 +4436,8 @@ mod tests {
     fn owner_unpair_terminates_runtime_session_before_terminal_result() {
         let role_root = temp("owner-unpair-runtime-host");
         let client_root = temp("owner-unpair-runtime-client");
+        let _role_cleanup = TempCleanup::new(&role_root);
+        let _client_cleanup = TempCleanup::new(&client_root);
         let _ = fs::remove_dir_all(&role_root);
         let _ = fs::remove_dir_all(&client_root);
         let host = IdentityStore::new(role_root.join("identity"));
@@ -4463,6 +4528,7 @@ mod tests {
     #[test]
     fn long_lived_runtime_shutdown_is_owner_controlled_and_joined() {
         let role_root = temp("runtime");
+        let _role_cleanup = TempCleanup::new(&role_root);
         let _ = fs::remove_dir_all(&role_root);
         IdentityStore::new(role_root.join("identity"))
             .init()
@@ -4501,6 +4567,8 @@ mod tests {
     fn live_owners_pair_through_queryable_confirmation_commands() {
         let host_role = temp("live-pair-host-role");
         let simulator_role = temp("live-pair-simulator-role");
+        let _host_cleanup = TempCleanup::new(&host_role);
+        let _simulator_cleanup = TempCleanup::new(&simulator_role);
         let _ = fs::remove_dir_all(&host_role);
         let _ = fs::remove_dir_all(&simulator_role);
         let host_store = IdentityStore::new(host_role.join("identity"));
@@ -4955,6 +5023,7 @@ mod tests {
     #[test]
     fn structurally_valid_rejected_hello_still_completes_responder_trust() {
         let root = temp("pairing-hello-reject");
+        let _root_cleanup = TempCleanup::new(&root);
         let _ = fs::remove_dir_all(&root);
         let store = IdentityStore::new(root);
         store.init().unwrap();
@@ -5000,7 +5069,9 @@ mod tests {
     fn identity_rejects_symlink_and_non_private_temporary() {
         for (name, make) in [("symlink", 0_u8), ("mode", 1_u8)] {
             let root = temp(name);
+            let _root_cleanup = TempCleanup::new(&root);
             let outside = temp(&format!("{name}-outside"));
+            let _outside_cleanup = TempCleanup::new(&outside);
             let _ = fs::remove_dir_all(&root);
             let _ = fs::remove_file(&outside);
             fs::create_dir_all(&root).unwrap();
@@ -5025,6 +5096,7 @@ mod tests {
     #[test]
     fn identity_rejects_unknown_entry_and_inconsistent_public_key() {
         let unknown_root = temp("unknown-entry");
+        let _unknown_cleanup = TempCleanup::new(&unknown_root);
         let _ = fs::remove_dir_all(&unknown_root);
         fs::create_dir_all(&unknown_root).unwrap();
         fs::set_permissions(&unknown_root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -5035,6 +5107,7 @@ mod tests {
         );
 
         let corrupt_root = temp("inconsistent-key");
+        let _corrupt_cleanup = TempCleanup::new(&corrupt_root);
         let _ = fs::remove_dir_all(&corrupt_root);
         let store = IdentityStore::new(corrupt_root.clone());
         store.init().unwrap();
@@ -5047,6 +5120,7 @@ mod tests {
         assert_eq!(store.peer(), Err(StoreError::Invalid));
 
         let variant_root = temp("peer-variant-extra-field");
+        let _variant_cleanup = TempCleanup::new(&variant_root);
         let _ = fs::remove_dir_all(&variant_root);
         let variant_store = IdentityStore::new(variant_root.clone());
         variant_store.init().unwrap();

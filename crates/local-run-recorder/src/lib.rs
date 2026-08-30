@@ -1005,6 +1005,38 @@ mod tests {
 
     use super::*;
 
+    struct TempCleanup(PathBuf);
+
+    impl TempCleanup {
+        fn new(path: &Path) -> Self {
+            remove_test_path(path).unwrap();
+            Self(path.to_path_buf())
+        }
+    }
+
+    impl Drop for TempCleanup {
+        fn drop(&mut self) {
+            if let Err(error) = remove_test_path(&self.0)
+                && !std::thread::panicking()
+            {
+                panic!("failed to clean temporary test path: {error}");
+            }
+        }
+    }
+
+    fn remove_test_path(path: &Path) -> io::Result<()> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        }
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(new_run_id(name))
     }
@@ -1036,6 +1068,7 @@ mod tests {
     #[test]
     fn recording_off_creates_nothing() {
         let root = temp_root("off");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder {
             mode: RecordingMode::Off,
             root: root.clone(),
@@ -1053,6 +1086,7 @@ mod tests {
     #[test]
     fn phase2_resource_schema_without_role_remains_listable_and_retainable() {
         let root = temp_root("phase2-schema");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder::at_root(root.clone());
         let diagnostics = recorder.prepare_store().unwrap();
         let mut value = serde_json::to_value(run("phase2-run", RunOutcome::Success, 1)).unwrap();
@@ -1094,6 +1128,7 @@ mod tests {
     #[test]
     fn outcome_retention_and_explicit_pin_are_independent() {
         let root = temp_root("retention");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder {
             mode: RecordingMode::On,
             root: root.clone(),
@@ -1119,6 +1154,7 @@ mod tests {
     #[test]
     fn capacity_exhaustion_is_degraded_not_an_error() {
         let root = temp_root("capacity");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder {
             mode: RecordingMode::On,
             root: root.clone(),
@@ -1137,6 +1173,7 @@ mod tests {
     #[test]
     fn capacity_evicts_unretained_success_before_dropping() {
         let root = temp_root("capacity-evict");
+        let _root_cleanup = TempCleanup::new(&root);
         let sample_size = serde_json::to_vec(&run("old", RunOutcome::Success, 1))
             .unwrap()
             .len() as u64;
@@ -1162,6 +1199,7 @@ mod tests {
     #[test]
     fn storage_failure_is_non_interfering_degradation() {
         let root = temp_root("storage-failure");
+        let _root_cleanup = TempCleanup::new(&root);
         fs::write(&root, b"not-a-directory").unwrap();
         let recorder = Recorder {
             mode: RecordingMode::On,
@@ -1179,6 +1217,7 @@ mod tests {
     #[test]
     fn failed_run_publication_reports_correlated_partial_health() {
         let root = temp_root("partial");
+        let _root_cleanup = TempCleanup::new(&root);
         create_private_dir(&root).unwrap();
         fs::write(root.join("diagnostics"), b"not-a-directory").unwrap();
         let recorder = Recorder {
@@ -1201,6 +1240,7 @@ mod tests {
     #[test]
     fn symlink_run_is_rejected() {
         let root = temp_root("symlink");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder {
             mode: RecordingMode::On,
             root: root.clone(),
@@ -1218,6 +1258,7 @@ mod tests {
     #[test]
     fn broken_health_symlink_is_rejected_without_replacement() {
         let root = temp_root("broken-health-link");
+        let _root_cleanup = TempCleanup::new(&root);
         create_private_dir(&root).unwrap();
         fs::write(root.join("diagnostics"), b"blocks directory creation").unwrap();
         let health = root.join("recording-health.json");
@@ -1236,6 +1277,7 @@ mod tests {
     #[test]
     fn in_progress_run_is_recovered_as_partial_crash() {
         let root = temp_root("crash-recovery");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder::at_root(root.clone());
         let mut pending = in_progress_run("pending".into(), "scenario".into(), 1, 0);
         pending.owner = Some(ProcessOwner {
@@ -1258,6 +1300,7 @@ mod tests {
     #[test]
     fn live_process_marker_is_not_recovered() {
         let root = temp_root("live-owner");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder::at_root(root.clone());
         let mut pending = run("live", RunOutcome::Error, 1);
         pending.terminal = false;
@@ -1274,6 +1317,7 @@ mod tests {
     #[test]
     fn locked_private_live_marker_replaces_persisted_process_identity() {
         let root = temp_root("private-live-marker");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder::at_root(root.clone());
         let marker = recorder.begin_live_run("private-live").unwrap();
         let mut pending = in_progress_run("private-live".into(), "scenario".into(), 1, 0);
@@ -1298,6 +1342,7 @@ mod tests {
     #[test]
     fn publication_reports_existing_run_when_later_store_work_fails() {
         let root = temp_root("stored-truth");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder::at_root(root.clone());
         assert!(recorder.publish(run("same", RunOutcome::Success, 1)).stored);
         symlink(root.join("missing"), root.join("diagnostics/broken.json")).unwrap();
@@ -1310,6 +1355,8 @@ mod tests {
     fn symlink_store_ancestor_is_rejected() {
         let root = temp_root("symlink-parent");
         let outside = temp_root("outside");
+        let _root_cleanup = TempCleanup::new(&root);
+        let _outside_cleanup = TempCleanup::new(&outside);
         create_private_dir(&root).unwrap();
         create_private_dir(&outside).unwrap();
         symlink(&outside, root.join("linked")).unwrap();
@@ -1330,6 +1377,7 @@ mod tests {
     #[test]
     fn existing_non_private_root_is_rejected_without_chmod() {
         let root = temp_root("existing-mode");
+        let _root_cleanup = TempCleanup::new(&root);
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         let recorder = Recorder {
@@ -1357,6 +1405,7 @@ mod tests {
     #[test]
     fn retain_unretain_and_exact_delete_update_only_one_run() {
         let root = temp_root("controls");
+        let _root_cleanup = TempCleanup::new(&root);
         let diagnostics = root.join("diagnostics");
         create_private_dir(&diagnostics).unwrap();
         let first = run("first", RunOutcome::Success, 1);
@@ -1384,6 +1433,7 @@ mod tests {
     #[test]
     fn unretain_reapplies_outcome_limit_immediately() {
         let root = temp_root("unretain-limit");
+        let _root_cleanup = TempCleanup::new(&root);
         let diagnostics = root.join("diagnostics");
         create_private_dir(&diagnostics).unwrap();
         let recorder = Recorder {
@@ -1412,6 +1462,7 @@ mod tests {
     #[test]
     fn stale_atomic_temporary_file_is_recovered_under_lock() {
         let root = temp_root("stale-temp");
+        let _root_cleanup = TempCleanup::new(&root);
         create_private_dir(&root).unwrap();
         let diagnostics = root.join("diagnostics");
         create_private_dir(&diagnostics).unwrap();
@@ -1438,6 +1489,7 @@ mod tests {
     #[test]
     fn publication_uses_private_modes_and_leaves_no_temporary_file() {
         let root = temp_root("modes");
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder {
             mode: RecordingMode::On,
             root: root.clone(),
@@ -1465,6 +1517,7 @@ mod tests {
     #[test]
     fn rename_without_parent_sync_is_not_reported_as_success() {
         let root = temp_root("directory-sync");
+        let _root_cleanup = TempCleanup::new(&root);
         fs::create_dir_all(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let target = root.join("run.json");

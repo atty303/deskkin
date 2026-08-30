@@ -10,6 +10,19 @@ use serde_json::Value;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+struct TempCleanup(PathBuf);
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+            && !std::thread::panicking()
+        {
+            panic!("failed to clean temporary test path: {error}");
+        }
+    }
+}
+
 fn temp_root(label: &str) -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -50,6 +63,8 @@ fn recording_on_and_off_preserve_semantics_and_frames() {
     ] {
         let on_root = temp_root("recording-on");
         let off_root = temp_root("recording-off");
+        let _on_cleanup = TempCleanup(on_root.clone());
+        let _off_cleanup = TempCleanup(off_root.clone());
         let (_, on) = run(name, &on_root, false);
         let (_, off) = run(name, &off_root, true);
         assert_eq!(on["replay"], off["replay"]);

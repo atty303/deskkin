@@ -1085,6 +1085,7 @@ fn render(window: &Rc<MinimalSoftwareWindow>) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TempCleanup;
 
     #[test]
     fn fixed_scenarios_replay_identically_with_expected_timeline() {
@@ -1195,6 +1196,7 @@ mod tests {
     #[test]
     fn clean_scenario_failure_terminalizes_started_markers() {
         let root = std::env::temp_dir().join(new_run_id("scenario-failure"));
+        let _root_cleanup = TempCleanup::new(&root);
         let recorder = Recorder::at_root(root.clone());
         let mut application = Application::new();
         let read = application
