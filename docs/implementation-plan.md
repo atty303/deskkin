@@ -13,13 +13,20 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: portable application/protocol crates, Linux host and simulator, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: define a development-foundation checkpoint that shortens feedback loops and supports later character behavior; provider connectors, including the existing Unraid proposal, remain deferred
+Next action: review and approve Foundation A, the proposed repeatable physical profile and foreground host lifecycle; provider connectors remain deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
 cross-cutting decisions are immutable ADRs under `docs/decisions/`. Update this
 checkpoint when a phase is completed, but do not duplicate detailed contracts
 from the architecture or ADRs here.
+
+The proposed next checkpoint is
+[`foundation-a-repeatable-physical-profile-proposal.md`](foundation-a-repeatable-physical-profile-proposal.md).
+It makes the already qualified host path repeatable through a named,
+secret-free local profile and exact foreground owner lifecycle. Its status is
+proposed, so it authorizes no implementation, live profile, listener, or device
+access yet.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in
