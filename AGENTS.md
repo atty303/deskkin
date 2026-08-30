@@ -43,14 +43,16 @@ host and simulator, CoreS3 firmware, and their reproducible tooling. Treat the
 current source and tests as the implementation baseline. `docs/architecture.md`
 is the source of truth for product and component boundaries;
 `docs/core-s3.md` owns firmware tooling, persistent-state, and live-device
-constraints.
+constraints. `STATUS.md` owns the current work state, including any active or
+approved next slice; keep it current as work starts, changes, or completes.
 
 Do not begin a new product slice or add dependencies before its explicit scope
 and authority are approved. Update current documentation directly when an
 implemented change alters a public operation, architecture boundary, security
-contract, or supported limitation. Superseded designs and rationale belong in
-version-control history rather than retained proposal, checkpoint, status, or
-ADR files.
+contract, or supported limitation. Keep `STATUS.md` as a replace-in-place
+working-state handoff rather than an activity log. Superseded designs,
+completed work details, and rationale belong in version-control history rather
+than retained proposal, checkpoint, or ADR files.
 
 ## Development workflow
 

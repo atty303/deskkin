@@ -23,7 +23,8 @@ not implemented.
 
 See [the architecture](docs/architecture.md) for component and security
 boundaries and [CoreS3 operation](docs/core-s3.md) for firmware tooling,
-persistent state, and live-device constraints.
+persistent state, and live-device constraints. [Current status](STATUS.md)
+records the active work state and the next approved slice, if any.
 
 ## Setup
 
