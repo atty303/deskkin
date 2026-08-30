@@ -1,18 +1,14 @@
 # Phase 4 proposal: Unraid read-only infrastructure status
 
-Status: Superseded by
-[`first-provider-unraid-array-status-proposal.md`](first-provider-unraid-array-status-proposal.md)
+Status: Deferred; not the current approval boundary
 
 Date: 2026-08-29
 
-This exploratory proposal is retained as historical design input. It is not the
-current approval boundary and authorizes no implementation or access.
-
-This proposal is the approval boundary for the first provider-backed feature.
-It records no accepted decision and authorizes no implementation, dependency,
-credential creation, provider access, or device mutation. After approval, the
-accepted contract will be recorded in a new immutable ADR before source or
-dependency changes begin.
+This historical proposal records one possible first provider-backed feature.
+It is not the current approval boundary and records no accepted decision or
+authority for implementation, dependency, credential creation, provider
+access, or device mutation. It must be revised against the then-current
+foundations before any future provider approval.
 
 ## Goal and observable result
 

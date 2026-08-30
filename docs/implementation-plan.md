@@ -13,7 +13,7 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: three-crate portable application composition, host capability and connector composition, protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: review and approve or revise the proposed read-only Unraid array-status slice; implementation and provider access remain deferred
+Next action: review and approve or revise Foundation D's repeatable development loop; provider implementation and access remain deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -52,14 +52,13 @@ accepted in
 providers, credentials, dynamic connector loading, and new protocol features
 remain deferred.
 
-The first provider checkpoint is proposed in
-[`first-provider-unraid-array-status-proposal.md`](first-provider-unraid-array-status-proposal.md).
-It selects the already accepted Unraid/infrastructure direction and narrows the
-first vertical slice to a read-only `array.state` GraphQL query, one closed
-portable status feature, additive protocol-major-1 messages, and a host-only
-connector. The proposal is not yet accepted. It authorizes neither repository
-implementation nor live provider, credential, profile, or physical-device
-access until its separate approval boundaries are satisfied.
+The proposed Foundation D checkpoint is
+[`foundation-d-repeatable-development-loop-proposal.md`](foundation-d-repeatable-development-loop-proposal.md).
+It keeps `mise run test` as the complete reproducible boundary while separating
+a host/portable feedback lane from clean CoreS3 conformance and running those
+lanes independently in CI. It adds no product behavior or dependency. The
+proposal is not yet accepted and authorizes neither implementation nor cleanup
+of the current ignored workspace state.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in
@@ -512,22 +511,19 @@ plaintext-NVS state are recorded in
 The selected residual state retains demo firmware, Wi-Fi credentials, and Noise
 identity in device flash; cleanup is never implicit.
 
-## Proposed first provider: Unraid read-only array status
+## Deferred connector example: Unraid read-only feature
 
-The current unapproved contract is
-[`first-provider-unraid-array-status-proposal.md`](first-provider-unraid-array-status-proposal.md).
-It replaces the earlier exploratory
-[`phase-4-unraid-read-only-proposal.md`](phase-4-unraid-read-only-proposal.md)
-as the proposal to review. Do not add its ADR, source, dependencies,
-credentials, or provider access until its semantic mapping, TLS and credential
-boundary, protocol extension, bounds, dependencies, and observation contract
-are reviewed and accepted.
+The unapproved example contract is
+[`phase-4-unraid-read-only-proposal.md`](phase-4-unraid-read-only-proposal.md).
+It is retained as a possible future connector, not the next checkpoint. Do not
+add an ADR, source, dependencies, credentials, or provider access until its
+domain mapping, TLS trust, credential storage, protocol additions, bounds, and
+exact dependencies are reviewed and accepted.
 
-After approval, add the provider-neutral infrastructure feature and the
-host-only Unraid connector. Keep Unraid payloads and credentials in the host,
-normalize only `array.state` into the accepted semantic status, and prove the
-connector against the deterministic loopback boundary before any live system
-access.
+After approval, add an infrastructure-status feature and an Unraid connector.
+Keep Unraid payloads and credentials in the host. Normalize only the semantics
+needed by the accepted UI, and prove the connector against an isolated fake or
+test boundary before any live system access.
 
 Live Unraid inspection and control require a separate explicit authorization.
 Do not broaden credentials or mutation permissions after an access denial.
@@ -602,10 +598,9 @@ Start a future development session with:
 > the portable core/protocol, Linux host and simulator, and physically
 > qualified CoreS3 slice; completed Gate harnesses were removed while their
 > contracts and evidence remain in `docs/`. Review and approve or revise
-> `docs/first-provider-unraid-array-status-proposal.md` before adding its code,
-> ADR, or dependencies. Proposal approval authorizes only reproducible
-> implementation; live Unraid access remains a separate checkpoint. Do not
-> flash, provision, mutate device state, power-cycle, access a provider,
-> release, push, or publish without the corresponding explicit approval.
-> Preserve and report the selected plaintext-NVS residual state after any
-> approved device run.
+> `docs/foundation-d-repeatable-development-loop-proposal.md` before changing
+> verification tasks or CI. Keep `mise run test` complete and treat Unraid as a
+> deferred example, not the next action. Do not clean ignored state, flash,
+> provision, mutate device state, power-cycle, access a provider, release, push,
+> or publish without the corresponding explicit approval. Preserve and report
+> the selected plaintext-NVS residual state after any approved device run.
