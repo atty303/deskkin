@@ -48,6 +48,12 @@ jobs:
         with:
           version: 2026.8.6
 
+      - name: Cache CoreS3 SDK downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .deskkin/downloads
+          key: deskkin-core-s3-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap_core_s3.sh') }}
+
       - name: Bootstrap CoreS3 toolchain
         run: |
           mise run phase3:device:bootstrap

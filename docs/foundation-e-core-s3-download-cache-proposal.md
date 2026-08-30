@@ -1,6 +1,6 @@
 # Foundation E proposal: CoreS3 SDK download cache
 
-Status: Proposed; not the current implementation authority
+Status: Approved and implemented locally; remote qualification pending
 
 Date: 2026-08-30
 
@@ -42,9 +42,10 @@ Add one pinned `actions/cache` step to the CoreS3 job before bootstrap:
     key: deskkin-core-s3-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap_core_s3.sh') }}
 ```
 
-The exact action revision is selected and reviewed during implementation. The
-key has no branch, run, or commit identifier and uses no `restore-keys` prefix.
-A bootstrap change produces a new exact key.
+The implementation pins `actions/cache` v6.1.0 at commit
+`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`. The key has no branch, run, or
+commit identifier and uses no `restore-keys` prefix. A bootstrap change
+produces a new exact key.
 
 After restore, CI runs the same commands as today:
 
@@ -120,19 +121,20 @@ optimization counterproductive.
 
 ## Ordered checkpoints
 
-1. Review and approve or revise this proposal.
-2. In one repository-local implementation change, add the pinned cache step and
-   the smallest workflow assertion needed to keep its path and key in scope.
-3. Run `mise run test` locally without creating a remote cache.
+1. Review and approve the proposal. Completed on 2026-08-30.
+2. Add the pinned cache step and the smallest workflow assertion needed to keep
+   its path and key in scope. Implemented locally on 2026-08-30.
+3. Run `mise run test` locally without creating a remote cache. Completed on
+   2026-08-30.
 4. After one explicit authorization covering the push, its automatically
    triggered workflow, and remote cache creation, observe the remote miss run.
 5. After separate workflow authorization, observe a comparable hit run and
    retain or remove the cache from the measured result.
 
-Approval authorizes only checkpoint 2 and its local tests. It does not authorize
-a push or its automatic workflow and cache creation, a later workflow run,
-remote cache deletion, release, device operation, provider access, or other
-external-state change.
+The approval authorized checkpoints 2 and 3 only. It does not authorize a push
+or its automatic workflow and cache creation, a later workflow run, remote cache
+deletion, release, device operation, provider access, or other external-state
+change.
 
 ## Approval decision
 
