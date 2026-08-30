@@ -20,10 +20,15 @@ firmware. Completed feasibility harnesses are no
 longer part of the active development surface; their contracts and evidence
 remain in `docs/`.
 
-The proposed next checkpoint separates fast host feedback from clean CoreS3
-conformance without weakening the complete verification boundary. Its approval
-contract is in
-[`docs/foundation-d-repeatable-development-loop-proposal.md`](docs/foundation-d-repeatable-development-loop-proposal.md).
+Foundation D separates fast host feedback from clean CoreS3 conformance without
+weakening the complete verification boundary. Its accepted contract and remote
+qualification are in
+[`docs/foundation-d-repeatable-development-loop-proposal.md`](docs/foundation-d-repeatable-development-loop-proposal.md)
+and
+[`docs/foundation-d-repeatable-development-loop-qualification.md`](docs/foundation-d-repeatable-development-loop-qualification.md).
+The next unapproved development-efficiency checkpoint is the narrow,
+digest-validated CoreS3 SDK download cache proposed in
+[`docs/foundation-e-validated-core-s3-download-cache-proposal.md`](docs/foundation-e-validated-core-s3-download-cache-proposal.md).
 
 The agreed product boundary, architecture, decisions, evidence, and phased plan
 remain in [`docs/implementation-plan.md`](docs/implementation-plan.md). Phase 2

@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, and Foundations A-D locally complete
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, and Foundations A-D complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 Current provider connector: none
@@ -13,7 +13,7 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: three-crate portable application composition, host capability and connector composition, protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: qualify Foundation D's independent CI lanes after an explicitly requested push; provider implementation and access remain deferred
+Next action: review and approve or revise Foundation E's validated CoreS3 toolchain-cache proposal; cache implementation, provider implementation, and provider access remain deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -57,9 +57,19 @@ The implemented Foundation D checkpoint is
 It keeps `mise run test` as the complete reproducible boundary while separating
 a host/portable feedback lane from clean CoreS3 conformance and running those
 lanes independently in CI. It adds no product behavior or dependency. The
-implementation is locally qualified. Remote CI qualification remains separate
-because no push was authorized. The legacy ignored Gate build cleanup was
-separately authorized and was not part of Foundation D.
+implementation and separately authorized remote CI qualification are complete.
+The observed same-commit lane results and timings are recorded in
+[`foundation-d-repeatable-development-loop-qualification.md`](foundation-d-repeatable-development-loop-qualification.md).
+The legacy ignored Gate build cleanup was separately authorized and was not
+part of Foundation D.
+
+The proposed Foundation E checkpoint is
+[`foundation-e-validated-core-s3-download-cache-proposal.md`](foundation-e-validated-core-s3-download-cache-proposal.md).
+It would cache only the two digest-pinned public CoreS3 SDK archives in CI while
+rebuilding and verifying every installed toolchain tree through the ordinary
+bootstrap. Clean firmware builds and the complete Foundation D lane contract
+remain unchanged. The proposal is not yet accepted and authorizes no workflow
+change, cache creation, dependency, product behavior, or external state change.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in

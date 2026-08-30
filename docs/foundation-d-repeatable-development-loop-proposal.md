@@ -1,6 +1,6 @@
 # Foundation D proposal: repeatable development loop
 
-Status: Accepted and implemented locally; remote CI qualification awaits an explicit push
+Status: Accepted, implemented, and qualified locally and in remote CI
 
 Date: 2026-08-30
 
@@ -264,3 +264,8 @@ any other ignored state; the completed cleanup was a separate instruction after
 exact readback of the target and protected siblings. It also did not authorize
 dependencies, caches, product changes, physical-device operations, provider
 access, push, release, or publication.
+
+The separately authorized push and remote qualification completed on
+2026-08-30. The same-commit lane conclusions, elapsed times, and retained
+boundaries are recorded in
+[`foundation-d-repeatable-development-loop-qualification.md`](foundation-d-repeatable-development-loop-qualification.md).
