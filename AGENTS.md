@@ -60,6 +60,10 @@ not rewrite accepted ADRs to hide superseded decisions.
 - Pass paths after `--` to limit check or fix to selected files.
 - Keep tool versions in `mise.toml` and commit the generated `mise.lock`.
 - Treat `hk.pkl` as the source of truth for fast checks and Git hooks.
+- Tests may use the operating system's temporary directory, but must establish
+  panic-safe scope cleanup before creating or mutating every temporary file,
+  symlink, or directory. Terminate and join owned child processes before
+  removing paths they can recreate.
 
 ## Agent feedback
 
