@@ -26,10 +26,13 @@ qualification are in
 [`docs/foundation-d-repeatable-development-loop-proposal.md`](docs/foundation-d-repeatable-development-loop-proposal.md)
 and
 [`docs/foundation-d-repeatable-development-loop-qualification.md`](docs/foundation-d-repeatable-development-loop-qualification.md).
-Foundation E adds a standard CoreS3 SDK download cache without changing the
-ordinary bootstrap or conformance boundary. Its local implementation and
-pending remote qualification contract are in
-[`docs/foundation-e-core-s3-download-cache-proposal.md`](docs/foundation-e-core-s3-download-cache-proposal.md).
+Foundation E evaluated a standard CoreS3 SDK download cache without changing
+the ordinary bootstrap or conformance boundary. Comparable remote miss and hit
+runs showed no bootstrap speedup, so the cache was removed. Its accepted
+contract and measured result are in
+[`docs/foundation-e-core-s3-download-cache-proposal.md`](docs/foundation-e-core-s3-download-cache-proposal.md)
+and
+[`docs/foundation-e-core-s3-download-cache-qualification.md`](docs/foundation-e-core-s3-download-cache-qualification.md).
 
 The agreed product boundary, architecture, decisions, evidence, and phased plan
 remain in [`docs/implementation-plan.md`](docs/implementation-plan.md). Phase 2

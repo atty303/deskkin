@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, and Foundations A-D complete
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, and Foundations A-E complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 Current provider connector: none
@@ -13,7 +13,7 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: three-crate portable application composition, host capability and connector composition, protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: after explicit authorization for push, automatic CI, and remote cache creation, qualify Foundation E's cache miss and later separately authorized hit; provider implementation and provider access remain deferred
+Next action: select the next development-efficiency checkpoint from current repository evidence; provider implementation and provider access remain deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -63,13 +63,15 @@ The observed same-commit lane results and timings are recorded in
 The legacy ignored Gate build cleanup was separately authorized and was not
 part of Foundation D.
 
-The implemented Foundation E checkpoint is
+The completed Foundation E checkpoint is
 [`foundation-e-core-s3-download-cache-proposal.md`](foundation-e-core-s3-download-cache-proposal.md).
-It uses the standard GitHub Actions cache for the two public CoreS3 SDK archives
-already owned and verified by the ordinary bootstrap. Clean firmware builds and
-the complete Foundation D lane contract remain unchanged. The local
-implementation is complete; push, automatic CI, remote cache creation, and the
-later hit qualification remain separately authorized external-state changes.
+It evaluated the standard GitHub Actions cache for the two public CoreS3 SDK
+archives already owned and verified by the ordinary bootstrap. Comparable miss
+and hit runs passed the same clean conformance boundary, but the hit did not
+reduce bootstrap duration, so the cache step and its dedicated assertion were
+removed. The measured evidence is recorded in
+[`foundation-e-core-s3-download-cache-qualification.md`](foundation-e-core-s3-download-cache-qualification.md).
+The complete Foundation D lane contract remains unchanged.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in

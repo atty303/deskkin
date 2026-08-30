@@ -1,6 +1,6 @@
 # Foundation E proposal: CoreS3 SDK download cache
 
-Status: Approved and implemented locally; remote qualification pending
+Status: Qualified and removed after no material speedup
 
 Date: 2026-08-30
 
@@ -128,16 +128,22 @@ optimization counterproductive.
    2026-08-30.
 4. After one explicit authorization covering the push, its automatically
    triggered workflow, and remote cache creation, observe the remote miss run.
+   Completed on 2026-08-30.
 5. After separate workflow authorization, observe a comparable hit run and
-   retain or remove the cache from the measured result.
+   retain or remove the cache from the measured result. Completed on 2026-08-30;
+   the cache was removed because the hit did not reduce bootstrap duration.
 
-The approval authorized checkpoints 2 and 3 only. It does not authorize a push
-or its automatic workflow and cache creation, a later workflow run, remote cache
-deletion, release, device operation, provider access, or other external-state
-change.
+The implementation, miss run, and later hit run each proceeded only after their
+required authorization. The retained remote cache entry remains under GitHub's
+ordinary retention and eviction behavior; no remote cache deletion, release,
+device operation, or provider access was performed.
 
-## Approval decision
+## Approval and measured decision
 
-Approve or revise Foundation E as the standard `.deskkin/downloads` cache above.
-The recommended decision is one pinned cache action, one exact key, and no
-cache-specific validation or lifecycle code.
+The approved evaluation used one pinned cache action, one exact key, and no
+cache-specific validation or lifecycle code. The later retain-or-remove
+qualification found no material bootstrap speedup, so that evaluated cache
+configuration was removed.
+
+The measured decision and run evidence are recorded in
+[`foundation-e-core-s3-download-cache-qualification.md`](foundation-e-core-s3-download-cache-qualification.md).

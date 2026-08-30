@@ -152,8 +152,6 @@ class DevelopmentWorkflowTests(unittest.TestCase):
         self.assertEqual(names, ["host", "core-s3"])
         checkout = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
         setup_mise = "jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518"
-        cache = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
-
         host, core_s3 = jobs.split("  core-s3:\n", 1)
         host_uses = re.findall(
             r"^\s+uses: (\S+)(?:\s+#.*)?$", host, flags=re.MULTILINE
@@ -162,7 +160,7 @@ class DevelopmentWorkflowTests(unittest.TestCase):
             r"^\s+uses: (\S+)(?:\s+#.*)?$", core_s3, flags=re.MULTILINE
         )
         self.assertEqual(host_uses, [checkout, setup_mise])
-        self.assertEqual(core_s3_uses, [checkout, setup_mise, cache])
+        self.assertEqual(core_s3_uses, [checkout, setup_mise])
 
         self.assertIn("run: mise run test:host", host)
         self.assertNotIn("Reclaim runner disk", host)
@@ -175,18 +173,6 @@ class DevelopmentWorkflowTests(unittest.TestCase):
 
         self.assertIn("mise run phase3:device:bootstrap", core_s3)
         self.assertIn("run: mise run test:core-s3", core_s3)
-        self.assertRegex(core_s3, r"(?m)^          path: \.deskkin/downloads$")
-        self.assertRegex(
-            core_s3,
-            r"(?m)^"
-            + re.escape(
-                "          key: deskkin-core-s3-downloads-v1-${{ runner.os }}-"
-                "${{ runner.arch }}-"
-                "${{ hashFiles('scripts/bootstrap_core_s3.sh') }}"
-            )
-            + "$",
-        )
-        self.assertNotIn("restore-keys:", core_s3)
         self.assertNotRegex(
             core_s3,
             r"(?m)^    (?:if|needs):",
