@@ -35,8 +35,9 @@ The next proposed checkpoint is
 [`foundation-b-multi-feature-application-composition-proposal.md`](foundation-b-multi-feature-application-composition-proposal.md).
 It defines compile-time feature composition, namespaced application effects,
 shared session invalidation, deterministic surface arbitration, and a presenter
-shell while preserving the existing availability and protocol contracts. Its
-proposal is not yet accepted and authorizes no implementation.
+shell across a feature-neutral core, one current-feature crate, and one concrete
+composition crate while preserving the existing availability and protocol
+contracts. Its proposal is not yet accepted and authorizes no implementation.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in

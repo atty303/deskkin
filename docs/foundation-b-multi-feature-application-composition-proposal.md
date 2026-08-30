@@ -52,6 +52,8 @@ Foundation B includes:
 - one shared session-invalidation event for session-derived feature state;
 - deterministic surface requests and arbitration;
 - one typed presenter model and shared Slint presenter shell;
+- one feature-neutral `application-core`, one current-feature implementation
+  crate, and one concrete application composition crate;
 - deterministic multi-feature scenarios and existing-platform builds; and
 - observation of composition decisions without recording notice content.
 
@@ -67,8 +69,7 @@ It does not include:
 - daemonization, autostart, discovery, multi-device management, or OTA;
 - pairing, provisioning, flashing, NVS mutation, power cycling, or a live host
   launch; or
-- a new crate, package, dependency version, generated lockfile, or licensing
-  boundary.
+- a new external package, dependency version, tool, or licensing boundary.
 
 Host capability and connector composition remains Foundation C. Protocol
 feature routing is deferred until a real second wire feature establishes its
@@ -76,13 +77,53 @@ message and permission requirements.
 
 ## Portable application composition
 
-Keep `application-core` pure `no_std`, allocation-free, runtime-neutral, and
-free of unsafe code. Retain closed Rust enums and concrete feature modules; do
-not introduce a dynamic plugin ABI or a trait hierarchy for hypothetical
-features.
+Keep every portable application crate pure `no_std`, allocation-free,
+runtime-neutral, and free of unsafe code. Retain closed Rust enums and concrete
+feature modules; do not introduce a dynamic plugin ABI or a trait hierarchy for
+hypothetical features.
 
-The top-level portable owner is `Application`. Its compile-time registry is
-closed for this checkpoint:
+The portable application is split into exactly three workspace crates for this
+checkpoint:
+
+```text
+application-core
+    shared feature-neutral contracts
+        ↑
+application-features
+    availability + synthetic notice
+        ↑
+deskkin-application
+    concrete registry + routing + arbitration + presenter model
+```
+
+`application-core` owns only feature-neutral primitives used across crate
+boundaries: lifecycle vocabulary, local effect identity, bounded transition
+contracts, and semantic surface classes. It owns no concrete feature state,
+feature name, application registry, protocol adapter, presenter model, or
+Slint type.
+
+`application-features` depends only on `application-core` and contains the two
+current concrete feature modules, `availability` and `synthetic_notice`. Each
+module owns its typed state, input, effect request, completion, and semantic
+surface. The two small features intentionally share this crate; Foundation B
+does not create one crate per feature.
+
+`deskkin-application` depends on `application-core` and
+`application-features`. It is the concrete composition root and owns the closed
+registry, application-level input and view, namespaced effect wrapper, routing,
+surface arbitration, and presenter model. Neither feature module depends on
+`deskkin-application` or on the other feature.
+
+Future features remain in `application-features` by default. Split a feature
+into its own crate only after it has a materially independent domain contract,
+effect family, dependency boundary, reuse boundary, or evolution lifecycle.
+Within the portable application graph, such a crate depends only on
+`application-core`; it does not depend on `application-features`, another
+feature implementation crate, or `deskkin-application`.
+`deskkin-application` may then register it alongside `application-features`.
+
+The top-level portable owner is `deskkin_application::Application`. Its
+compile-time registry is closed for this checkpoint:
 
 ```text
 Application
@@ -92,11 +133,13 @@ Application
 └── SurfaceArbiter
 ```
 
-`FeatureId` is a closed application-internal enum with `Availability` and
-`SyntheticNotice`. Each feature owns only its typed state, inputs, effects, and
-surface request. The application routes an input to exactly one feature or
-broadcasts an explicitly defined lifecycle event. It then recomputes the
-presented surface from all feature requests.
+`FeatureId` is a closed enum owned by `deskkin-application`, with
+`Availability` and `SyntheticNotice`. It is not part of the feature-neutral
+crate contract. Each feature owns only its typed state, inputs, effects, and
+feature-local semantic surface. The application routes an input to exactly one
+feature or broadcasts an explicitly defined lifecycle event. It wraps each
+active feature-local surface in a composition-owned request and then recomputes
+the presented surface from all such requests.
 
 Feature transitions remain transactional: validate the complete input and
 effect identity against a copied candidate state, then publish state, effects,
@@ -112,10 +155,12 @@ The existing availability state machine keeps these semantics:
 - source/session invalidation immediately displays `Unknown`; and
 - stale or mismatched completions are rejected without mutation.
 
-Moving that state machine into `AvailabilityFeature` is an internal ownership
-change, not a behavior-compatibility layer. Remove the old single-feature
-top-level shape once all callers use `Application`; do not retain aliases or a
-parallel legacy core.
+Moving that state machine into
+`application_features::availability::AvailabilityFeature` is an internal
+ownership change, not a behavior-compatibility layer. Remove the old
+single-feature top-level shape once all callers use
+`deskkin_application::Application`; do not retain aliases or a parallel legacy
+core.
 
 ## Feature lifecycle and session invalidation
 
@@ -136,10 +181,13 @@ existing unavailable-read transition and arms the next refresh, while
 `ArmingRefresh` and `Waiting` retain their current timer identity and schedule.
 A stale notice expiry is rejected and cannot restore or clear another surface.
 
-The existing protocol client remains the authority for detecting session loss.
-Its current availability invalidation is adapted to the one top-level
-`SessionInvalidated` input. Foundation B does not add a session generation to
-the protocol or change reconnect behavior.
+The existing protocol client remains the authority for detecting session loss,
+but it no longer mutates an application feature directly. It returns its own
+closed semantic availability and invalidation events; each platform adapter
+maps those events to `deskkin_application::ApplicationInput`. The protocol
+client depends on neither `application-features` nor `deskkin-application`.
+Foundation B does not add a session generation to the protocol or change
+reconnect behavior.
 
 ## Namespaced effects and deterministic routing
 
@@ -179,15 +227,17 @@ supplies arbitrary text, markup, image, URL, identifier, or payload. At most one
 notice is active. Showing a new notice replaces the previous notice state in one
 transition; a stale expiry cannot clear a newer notice.
 
-The feature is compiled into every application-core target so portable
-composition is not simulator-only. Product runtimes do not expose a user or
-network command that activates it. The deterministic simulator driver is its
-only activation source in Foundation B.
+The feature is compiled from `application-features` into every
+`deskkin-application` target so portable composition is not simulator-only.
+Product runtimes do not expose a user or network command that activates it. The
+deterministic simulator driver is its only activation source in Foundation B.
 
 ## Surface request and arbitration
 
-Features return semantic surfaces, not Slint properties. One feature may own at
-most one active `SurfaceRequest`:
+Features return feature-local semantic surfaces and their `SurfaceClass`, not
+Slint properties or composition-owned types. A feature may expose at most one
+active local surface. `deskkin-application` wraps it with the registered
+`FeatureId` and the application-level `FeatureSurface` variant to form:
 
 ```text
 SurfaceRequest {
@@ -215,10 +265,10 @@ contracts.
 
 ## Presenter shell and shared UI
 
-`ApplicationView` is the only portable presenter input. It is a closed enum for
-`Empty`, availability status, and the fixed synthetic notice. Platform code
-maps it to one shared Slint shell; it cannot inspect feature state or rerun
-arbitration.
+`deskkin_application::ApplicationView` is the only portable presenter input. It
+is a closed enum for `Empty`, availability status, and the fixed synthetic
+notice. Platform code maps it to one shared Slint shell; it cannot inspect
+feature state or rerun arbitration.
 
 The shell remains the single UI owner. It contains the existing shared status
 surface and one notice surface, displays exactly the selected model, and emits
@@ -255,17 +305,19 @@ retain their fields and meanings.
 
 Foundation B implementation passes only when all of the following hold:
 
-1. Pure application-core tests prove exact feature routing, transactional
+1. Pure `deskkin-application` tests prove exact feature routing, transactional
    rejection, namespaced effect completion, bounded batch behavior, identity
    exhaustion, registry-order startup, and stopped-lifecycle rejection.
-2. Surface-arbiter tests prove `Information` over `Ambient`, deterministic
-   equal-class resolution, immediate underlying-surface restoration, `Empty`,
-   and order independence for equivalent current requests.
-3. Synthetic notice tests prove bounded activation, replacement, explicit
-   clear, expiry, stale-expiry rejection, and session invalidation.
-4. Availability tests preserve every current state, view, effect, refresh,
-   failure, invalidation, and stale-completion result after its ownership moves
-   below `Application`.
+2. `application-core` contract tests and `deskkin-application` surface-arbiter
+   tests prove `Information` over `Ambient`, deterministic equal-class
+   resolution, immediate underlying-surface restoration, `Empty`, and order
+   independence for equivalent current requests.
+3. `application-features` synthetic-notice tests prove bounded activation,
+   replacement, explicit clear, expiry, stale-expiry rejection, and session
+   invalidation.
+4. `application-features` availability tests preserve every current state,
+   view, effect, refresh, failure, invalidation, and stale-completion result
+   after its ownership moves below `deskkin-application`.
 5. A deterministic scenario proves availability visible, notice preemption,
    availability changing while covered, notice withdrawal revealing the latest
    value, session invalidation clearing both features, and reconnect restoring
@@ -280,8 +332,12 @@ Foundation B implementation passes only when all of the following hold:
 9. Protocol major 1 bytes, availability feature/permission negotiation,
    identity stores, pairing, reconnect, host profile lifecycle, and retained
    Phase 3P device tooling remain unchanged in behavior.
-10. Portable dependency inspection, `mise run fix`, `mise run test`, and fresh
-    durable review succeed.
+10. Static dependency inspection proves that `application-core` is
+    feature-neutral, `application-features` depends only on it, its two feature
+    modules do not call each other, `deskkin-application` is the sole composition
+    root, and the protocol client depends on neither feature nor composition
+    crate.
+11. `mise run fix`, `mise run test`, and fresh durable review succeed.
 
 The reproducible checkpoint uses deterministic fakes, virtual time, loopback,
 and temporary state only. It does not read the retained physical profile or
@@ -289,12 +345,18 @@ identity, bind the private LAN, contact the CoreS3, or access a provider.
 
 ## Dependencies, licensing, and distribution
 
-Foundation B adds no dependency, crate, tool, or lockfile change. It reuses the
+Foundation B adds the internal workspace crates `application-features` and
+`deskkin-application`, plus their local path dependency edges. It adds no
+external package, dependency version, or tool. Regenerate and commit the root
+and device lockfiles when Cargo changes their workspace-package records; do not
+hand-edit them.
+
+All three portable crates remain MIT, `no_std`, allocation-free, and free of
+Slint, runtime, transport, and provider dependencies. Foundation B reuses the
 current Rust workspace, Slint toolchain, deterministic simulator, local run
-recorder, and existing application/runtime adapters. `application-core` remains
-MIT, `no_std`, allocation-free, and free of Slint or runtime dependencies.
-Existing GPL-bearing simulator/device binary boundaries remain unchanged. No
-binary, package, release, or published artifact is produced.
+recorder, and existing application/runtime adapters. Existing GPL-bearing
+simulator/device binary boundaries remain unchanged. No binary, package,
+release, or published artifact is produced.
 
 ## Ordered checkpoints
 
@@ -303,7 +365,8 @@ binary, package, release, or published artifact is produced.
    reproducible builds, and documentation defined above.
 2. After approval, record the long-lived application composition and surface
    ownership decision in a new ADR without rewriting ADR-0003 or ADR-0004.
-3. Implement the portable application, synthetic conformance feature,
+3. Refactor `application-core`, add `application-features` and
+   `deskkin-application`, then implement the synthetic conformance feature,
    presenter shell, adapters, observation records, and deterministic scenarios
    as one reviewed local checkpoint.
 4. Run `mise run fix`, `mise run test`, portable dependency inspection, and a
@@ -316,8 +379,13 @@ unless separately requested.
 ## Approval choices proposed
 
 - Composition is a closed compile-time registry, not a dynamic plugin ABI.
+- `application-core` owns feature-neutral contracts,
+  `application-features` contains both current concrete feature modules, and
+  `deskkin-application` is the sole concrete composition root.
+- Small features remain modules in `application-features`; only a materially
+  independent future feature is promoted to its own crate.
 - Concrete closed feature modules and enums are used instead of a speculative
-  feature trait hierarchy.
+  feature trait hierarchy or one crate per feature.
 - Feature-local effect identities are paired with `FeatureId`; protocol request
   identities and wire bytes do not change.
 - Session invalidation is one application lifecycle input and atomically clears
