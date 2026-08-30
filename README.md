@@ -87,10 +87,20 @@ mise run phase3:device:build
 ```sh
 mise run check
 mise run fix
+mise run test:host
+mise run test:core-s3
 mise run test
 ```
 
 `mise run fix` applies available fixes without staging the changed files.
+
+`mise run test:host` is the fast feedback lane for host, portable, protocol,
+simulator, Python, and dependency-boundary checks. It does not require the
+CoreS3 SDK or Zephyr workspace. After the explicit CoreS3 bootstrap,
+`mise run test:core-s3` verifies the pinned toolchain and performs clean product
+and inert firmware builds. These child tasks are feedback entrypoints;
+`mise run test` remains the complete reproducible acceptance command and runs
+both lanes in order.
 
 Pass selected files after `--`, for example `mise run check -- README.md`.
 

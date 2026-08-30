@@ -1516,6 +1516,7 @@ mod tests {
         let base = temp("mismatch");
         let root = base.join(STATE_ROOT);
         let _ = fs::remove_dir_all(&base);
+        prepare_private_directory(&root).unwrap();
         let role = "roles/mismatch";
         let role_root = root.join(role);
         IdentityStore::new(role_root.join("identity"))

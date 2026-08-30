@@ -53,6 +53,9 @@ not rewrite accepted ADRs to hide superseded decisions.
 - Use `mise run check` for explicitly requested non-mutating repository checks.
 - Use `mise run fix` for safe formatter and linter fixes without staging
   changes.
+- Use `mise run test:host` for host and portable feedback without CoreS3 state.
+- Use `mise run test:core-s3` for clean CoreS3 conformance after the explicit
+  toolchain bootstrap.
 - Use `mise run test` for all reproducible tests before completing a change.
 - Pass paths after `--` to limit check or fix to selected files.
 - Keep tool versions in `mise.toml` and commit the generated `mise.lock`.
@@ -68,8 +71,8 @@ only when autofix fails, leaves diagnostics, reports a parser warning, or may
 have applied a partial change; repair the issue and run fix again. Use
 `start_safe_check` or `mise run check` only when non-mutating verification is
 explicitly requested or fix cannot be used diagnostically. Never bypass a safe
-refusal with unrestricted MCP execution or a direct `hk` command. Run
-`mise run test` once as the final verification.
+refusal with unrestricted MCP execution or a direct `hk` command. Child test
+tasks provide feedback only; run `mise run test` once as the final verification.
 
 ## Agent bootstrap
 

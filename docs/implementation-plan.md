@@ -3,7 +3,7 @@
 ## Current checkpoint
 
 ```text
-Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, and Foundations A-C complete
+Status: Phase 0, Phase 1 Gates 1A-1E, Phase 2, Phase 3, Phase 3P, and Foundations A-D locally complete
 Product name: Deskkin
 First device: StackChan on M5Stack CoreS3
 Current provider connector: none
@@ -13,7 +13,7 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: three-crate portable application composition, host capability and connector composition, protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: review and approve or revise Foundation D's repeatable development loop; provider implementation and access remain deferred
+Next action: qualify Foundation D's independent CI lanes after an explicitly requested push; provider implementation and access remain deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -52,13 +52,14 @@ accepted in
 providers, credentials, dynamic connector loading, and new protocol features
 remain deferred.
 
-The proposed Foundation D checkpoint is
+The implemented Foundation D checkpoint is
 [`foundation-d-repeatable-development-loop-proposal.md`](foundation-d-repeatable-development-loop-proposal.md).
 It keeps `mise run test` as the complete reproducible boundary while separating
 a host/portable feedback lane from clean CoreS3 conformance and running those
 lanes independently in CI. It adds no product behavior or dependency. The
-proposal is not yet accepted and authorizes neither implementation nor cleanup
-of the current ignored workspace state.
+implementation is locally qualified. Remote CI qualification remains separate
+because no push was authorized. The legacy ignored Gate build cleanup was
+separately authorized and was not part of Foundation D.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in
@@ -557,6 +558,8 @@ The repository entrypoints remain:
 ```text
 mise run check   non-mutating fast validation
 mise run fix     safe formatting and lint repair
+mise run test:host     host and portable feedback without CoreS3 state
+mise run test:core-s3  clean CoreS3 conformance after bootstrap
 mise run test    complete reproducible validation
 ```
 
@@ -597,9 +600,9 @@ Start a future development session with:
 > checkpoint in `docs/implementation-plan.md`. The maintained implementation is
 > the portable core/protocol, Linux host and simulator, and physically
 > qualified CoreS3 slice; completed Gate harnesses were removed while their
-> contracts and evidence remain in `docs/`. Review and approve or revise
-> `docs/foundation-d-repeatable-development-loop-proposal.md` before changing
-> verification tasks or CI. Keep `mise run test` complete and treat Unraid as a
+> contracts and evidence remain in `docs/`. Follow
+> `docs/foundation-d-repeatable-development-loop-proposal.md` as the accepted
+> verification-lane contract. Keep `mise run test` complete and treat Unraid as a
 > deferred example, not the next action. Do not clean ignored state, flash,
 > provision, mutate device state, power-cycle, access a provider, release, push,
 > or publish without the corresponding explicit approval. Preserve and report

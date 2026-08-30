@@ -45,11 +45,20 @@ exec hk fix --all --safe --no-stage
 '''
 
 [tasks.test]
-description = "Run all reproducible checks"
-depends = ["check"]
+description = "Run the complete reproducible host and CoreS3 verification"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
+mise run test:host
+mise run test:core-s3
+'''
+
+[tasks."test:host"]
+description = "Run host, portable, protocol, simulator, and dependency checks"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+mise run check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo run --locked --quiet --bin deskkin-scenario -- periodic-success --recording-off
@@ -63,13 +72,16 @@ cargo check --locked -p deskkin-protocol --target thumbv7m-none-eabi
 cargo check --locked -p deskkin-protocol-client --target thumbv7m-none-eabi
 cargo check --locked -p deskkin-core-s3 --target thumbv7m-none-eabi
 DESKKIN_TEST_AGE=1 python -m unittest discover -s tests
-python scripts/phase3_device.py build
 cargo tree --locked -p application-core --edges normal
 cargo tree --locked -p application-features --edges normal
 cargo tree --locked -p deskkin-application --edges normal
 cargo tree --locked -p deskkin-host-capabilities --edges normal
 cargo tree --locked -p deskkin-protocol --edges normal
 '''
+
+[tasks."test:core-s3"]
+description = "Verify the prepared CoreS3 toolchain and perform clean firmware builds"
+run = "python scripts/phase3_device.py build"
 
 [tasks."simulator:desktop"]
 description = "Run the native Linux periodic status simulator"

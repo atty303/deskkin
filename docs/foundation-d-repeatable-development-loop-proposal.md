@@ -1,6 +1,6 @@
 # Foundation D proposal: repeatable development loop
 
-Status: Proposed; implementation and local cleanup are not authorized
+Status: Accepted and implemented locally; remote CI qualification awaits an explicit push
 
 Date: 2026-08-30
 
@@ -35,18 +35,27 @@ seconds. The latest successful `main` CI run took about 13 minutes. CI performs
 disk reclamation and the full CoreS3 toolchain bootstrap before it can report a
 Rust format, lint, host test, protocol, or simulator failure.
 
-The local repository also currently contains about 206 GiB below `.deskkin`
-and 35 GiB below `target`; about 196 GiB of `.deskkin` is ignored output from
-removed Gate build paths. The filesystem was 93 percent full at inspection.
+Before the separately authorized cleanup, the local repository contained about
+206 GiB below `.deskkin` and 35 GiB below `target`; about 196 GiB of `.deskkin`
+was ignored output from removed Gate build paths. The filesystem was 93 percent
+full at inspection. The explicit cleanup removed only `.deskkin/build`, leaving
+about 11 GiB below `.deskkin` and increasing free space from 139 GiB to 333 GiB.
 These figures are one-workstation observations, not portable thresholds.
 
-The obsolete ignored Gate output is a one-time local cleanup concern. No active
-task recreates it, so Foundation D does not add a permanent cleanup framework
-for it. Removing that existing data remains a separate explicit operation after
-the exact paths and protected product state are read back. In particular,
-profiles, identities, Wi-Fi material, diagnostic records, qualification
-results, current firmware output, and unknown `.deskkin` entries are never
-cleanup targets in this proposal.
+The obsolete ignored Gate output was a one-time local cleanup concern. No active
+task recreates it, so Foundation D adds no permanent cleanup framework for it.
+That cleanup was separately authorized and executed only after the exact paths
+and protected product state were read back. Profiles, identities, Wi-Fi
+material, diagnostic records, qualification results, current firmware output,
+and unknown `.deskkin` entries were not cleanup targets.
+
+The warm local implementation run produced the host result in 15.7 seconds.
+With `.deskkin/sdk`, `.deskkin/west`, `.deskkin/rustup`, and `.deskkin/venv`
+temporarily absent, the same lane passed in 12.2 seconds and all four directories
+were restored afterward. The independent clean CoreS3 conformance lane passed in
+about 42 seconds. These observations replace one approximately 50-second serial
+wait with an independently available host result; they are not performance
+thresholds.
 
 ## Scope
 
@@ -245,13 +254,13 @@ Foundation D is complete only when:
 
 ## Approval boundary
 
-Approval of this proposal authorizes repository-only changes to `mise.toml`,
+Approval of this proposal authorized repository-only changes to `mise.toml`,
 the CI workflow, dependency-free drift tests, README, implementation-plan, and
 agent workflow documentation needed to implement the two lanes. It authorizes
 local reproducible tests but not a push or remote CI run.
 
-Approval does not authorize deletion of the observed 196 GiB legacy Gate build
-tree or any other ignored state. That cleanup requires a separate instruction
-after exact readback of the target and protected siblings. It also does not
-authorize dependencies, caches, product changes, physical-device operations,
-provider access, push, release, or publication.
+Approval did not authorize deletion of the observed legacy Gate build tree or
+any other ignored state; the completed cleanup was a separate instruction after
+exact readback of the target and protected siblings. It also did not authorize
+dependencies, caches, product changes, physical-device operations, provider
+access, push, release, or publication.
