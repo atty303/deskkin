@@ -26,9 +26,9 @@ qualification are in
 [`docs/foundation-d-repeatable-development-loop-proposal.md`](docs/foundation-d-repeatable-development-loop-proposal.md)
 and
 [`docs/foundation-d-repeatable-development-loop-qualification.md`](docs/foundation-d-repeatable-development-loop-qualification.md).
-The next unapproved development-efficiency checkpoint is the narrow,
-digest-validated CoreS3 SDK download cache proposed in
-[`docs/foundation-e-validated-core-s3-download-cache-proposal.md`](docs/foundation-e-validated-core-s3-download-cache-proposal.md).
+The next unapproved development-efficiency checkpoint is the standard CoreS3
+SDK download cache proposed in
+[`docs/foundation-e-core-s3-download-cache-proposal.md`](docs/foundation-e-core-s3-download-cache-proposal.md).
 
 The agreed product boundary, architecture, decisions, evidence, and phased plan
 remain in [`docs/implementation-plan.md`](docs/implementation-plan.md). Phase 2
