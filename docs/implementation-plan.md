@@ -73,6 +73,13 @@ removed. The measured evidence is recorded in
 [`foundation-e-core-s3-download-cache-qualification.md`](foundation-e-core-s3-download-cache-qualification.md).
 The complete Foundation D lane contract remains unchanged.
 
+Subsequent development-surface maintenance removed the CoreS3 CI runner disk
+reclamation step after the qualified runner started with 86 GiB free and the
+bootstrap consumed about 10 GiB. Active mise entrypoints now use responsibility
+names: `protocol:*` for the authenticated host/simulator path and `core-s3:*`
+for physical-device tooling. Historical accepted proposals retain the task
+names that were current when they were qualified.
+
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in
 [`phase-0-feasibility-proposal.md`](phase-0-feasibility-proposal.md). It is the

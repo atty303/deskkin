@@ -87,8 +87,8 @@ Prepare the pinned CoreS3 Zephyr SDK, Xtensa compiler, Rust toolchain, and west
 workspace before the first firmware build:
 
 ```sh
-mise run phase3:device:bootstrap
-mise run phase3:device:build
+mise run core-s3:bootstrap
+mise run core-s3:build
 ```
 
 ## Development
@@ -148,12 +148,12 @@ authentication string at both ends; the running simulator reconnects with the
 pinned identity after the pairing operation completes:
 
 ```sh
-mise run phase3:host -- identity-init
-mise run phase3:simulator -- identity-init
-mise run phase3:host -- run 127.0.0.1:39032 available
-mise run phase3:simulator -- run 127.0.0.1:39032
-mise run phase3:host -- pairing-window-open
-mise run phase3:simulator -- pair-start 127.0.0.1:39032
+mise run protocol:host -- identity-init
+mise run protocol:simulator -- identity-init
+mise run protocol:host -- run 127.0.0.1:39032 available
+mise run protocol:simulator -- run 127.0.0.1:39032
+mise run protocol:host -- pairing-window-open
+mise run protocol:simulator -- pair-start 127.0.0.1:39032
 ```
 
 Pairing and runtime commands reject non-loopback network scope. The fake host
@@ -162,8 +162,8 @@ through the live process owner; exact unpair requires the peer public-key ID
 reported by `identity-list`. Role-local diagnostics remain private and bounded:
 
 ```sh
-mise run phase3:diagnostics -- --root .deskkin/phase3/host list
-mise run phase3:diagnostics -- --root .deskkin/phase3/device-simulator list
+mise run protocol:diagnostics -- --root .deskkin/phase3/host list
+mise run protocol:diagnostics -- --root .deskkin/phase3/device-simulator list
 ```
 
 For repeatable physical-host operation, store only the secret-free launch
@@ -195,9 +195,9 @@ CoreS3 development uses explicit, separate bootstrap, build, device-mutation,
 and read-only status tasks. Mutation tasks do not run as part of tests:
 
 ```sh
-mise run phase3:device:bootstrap
-mise run phase3:device:build
-mise run phase3:device:status
+mise run core-s3:bootstrap
+mise run core-s3:build
+mise run core-s3:status
 ```
 
 See [`docs/phase-3p-physical-slice-proposal.md`](docs/phase-3p-physical-slice-proposal.md)

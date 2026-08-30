@@ -58,6 +58,10 @@ def task_commands(task: dict) -> tuple[str, ...]:
 class DevelopmentWorkflowTests(unittest.TestCase):
     def test_resolved_tasks_have_exactly_one_lane_owner(self):
         tasks = resolved_tasks()
+        self.assertFalse(
+            [name for name in tasks if name.startswith("phase3:")],
+            "active tasks must use responsibility-based names",
+        )
         self.assertEqual(task_commands(tasks["test:host"]), HOST_COMMANDS)
         self.assertEqual(task_commands(tasks["test:core-s3"]), CORE_S3_COMMANDS)
         self.assertEqual(task_commands(tasks["test"]), AGGREGATE_COMMANDS)
@@ -164,14 +168,16 @@ class DevelopmentWorkflowTests(unittest.TestCase):
 
         self.assertIn("run: mise run test:host", host)
         self.assertNotIn("Reclaim runner disk", host)
-        self.assertNotIn("phase3:device:bootstrap", host)
+        self.assertNotIn("core-s3:bootstrap", host)
         self.assertNotRegex(
             host,
             r"(?m)^    (?:if|needs):",
             msg="host lane must start independently",
         )
 
-        self.assertIn("mise run phase3:device:bootstrap", core_s3)
+        self.assertNotIn("Reclaim runner disk", core_s3)
+        self.assertNotIn("sudo rm -rf", core_s3)
+        self.assertIn("run: mise run core-s3:bootstrap", core_s3)
         self.assertIn("run: mise run test:core-s3", core_s3)
         self.assertNotRegex(
             core_s3,

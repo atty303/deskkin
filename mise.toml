@@ -95,8 +95,8 @@ run = "cargo run --locked --quiet --bin deskkin-scenario --"
 description = "Administer bounded local simulator diagnostic runs"
 run = "cargo run --locked --quiet --bin deskkin-diagnostics --"
 
-[tasks."phase3:host"]
-description = "Run one explicit Phase 3 desktop-host command"
+[tasks."protocol:host"]
+description = "Run one authenticated desktop-host protocol command"
 run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host --"
 
 [tasks."deskkin:profile"]
@@ -115,46 +115,46 @@ run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-
 description = "Stop the matching generation of one physical-host profile"
 run = "cargo run --locked --quiet -p deskkin-desktop-host --bin deskkin-desktop-host -- profile-stop"
 
-[tasks."phase3:simulator"]
-description = "Run one explicit Phase 3 device-simulator command"
+[tasks."protocol:simulator"]
+description = "Run one authenticated device-simulator protocol command"
 run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-desktop --"
 
-[tasks."phase3:diagnostics"]
-description = "Administer one exact Phase 3 role diagnostic store"
+[tasks."protocol:diagnostics"]
+description = "Administer one exact authenticated-protocol diagnostic store"
 run = "cargo run --locked --quiet -p deskkin-simulator --bin deskkin-diagnostics --"
 
-[tasks."phase3:device:profile"]
-description = "Create the ignored age-encrypted Phase 3P Wi-Fi profile"
+[tasks."core-s3:profile"]
+description = "Create the ignored age-encrypted CoreS3 Wi-Fi profile"
 run = "python scripts/phase3_device.py profile"
 
-[tasks."phase3:device:bootstrap"]
+[tasks."core-s3:bootstrap"]
 description = "Prepare the repository-local CoreS3 Zephyr and Rust toolchains"
 run = "./scripts/bootstrap_core_s3.sh"
 
-[tasks."phase3:device:build"]
-description = "Build the Phase 3P CoreS3 firmware without touching a device"
+[tasks."core-s3:build"]
+description = "Build the CoreS3 firmware without touching a device"
 run = "python scripts/phase3_device.py build"
 
-[tasks."phase3:device:flash"]
-description = "Flash the approved Phase 3P firmware after a live checkpoint"
+[tasks."core-s3:flash"]
+description = "Flash the approved CoreS3 firmware after a live checkpoint"
 run = "python scripts/phase3_device.py flash"
 
-[tasks."phase3:device:identity"]
+[tasks."core-s3:identity"]
 description = "Run one explicit CoreS3 identity control command"
 run = "python scripts/phase3_device.py identity"
 
-[tasks."phase3:device:provision"]
+[tasks."core-s3:provision"]
 description = "Provision one CoreS3 Wi-Fi profile after a live checkpoint"
 run = "python scripts/phase3_device.py provision"
 
-[tasks."phase3:device:status"]
+[tasks."core-s3:status"]
 description = "Read the CoreS3 boot and application status without mutation"
 run = "python scripts/phase3_device.py status"
 
-[tasks."phase3:device:run"]
+[tasks."core-s3:run"]
 description = "Start the already configured CoreS3 application"
 run = "python scripts/phase3_device.py run"
 
-[tasks."phase3:device:recover"]
+[tasks."core-s3:recover"]
 description = "Erase CoreS3 storage and restore inert firmware after a live checkpoint"
 run = "python scripts/phase3_device.py recover"

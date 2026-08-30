@@ -37,21 +37,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - name: Reclaim runner disk
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-
       - name: Setup mise
         uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
         with:
           version: 2026.8.6
 
       - name: Bootstrap CoreS3 toolchain
-        run: |
-          mise run phase3:device:bootstrap
-          df -h /
+        run: mise run core-s3:bootstrap
 
       - name: Test CoreS3 conformance
         run: mise run test:core-s3
