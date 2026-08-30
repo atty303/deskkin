@@ -9,7 +9,7 @@ cmake = "3.28.6"
 hk = "1.55.0"
 ninja = "1.13.2"
 python = "3.12.14"
-rust = { version = "1.95.0", components = "clippy,rustfmt", targets = "thumbv7m-none-eabi,riscv32i-unknown-none-elf" }
+rust = { version = "1.95.0", components = "clippy,rust-analyzer,rustfmt", targets = "thumbv7m-none-eabi,riscv32i-unknown-none-elf" }
 taplo = "0.10.0"
 "cargo:espup" = "0.17.1"
 
