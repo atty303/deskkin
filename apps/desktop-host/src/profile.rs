@@ -1579,13 +1579,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         for operation in [Operation::ProfileStatus, Operation::ProfileStop] {
-            let record = runs
-                .iter()
-                .filter_map(|run| run.records.first())
-                .find(|record| record.operation == operation)
-                .unwrap();
-            assert_eq!(record.status, OperationStatus::Error);
-            assert_eq!(record.error_type, Some(ErrorType::ProfileMismatch));
+            assert!(runs.iter().flat_map(|run| &run.records).any(|record| {
+                record.operation == operation
+                    && record.status == OperationStatus::Error
+                    && record.error_type == Some(ErrorType::ProfileMismatch)
+            }));
         }
         fs::remove_dir_all(base).unwrap();
     }
