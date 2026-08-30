@@ -1,305 +1,209 @@
 # Deskkin architecture
 
-## Purpose
+## Product boundary
 
-Deskkin is a modular platform for embodied desktop companions. A companion
-device presents character, status, notifications, conversation, and user
-actions. A desktop host integrates external services and grants each paired
-device bounded capabilities.
+Deskkin is a platform for embodied desktop companions. The first device is
+StackChan on M5Stack CoreS3, but device-specific code remains below portable
+application and protocol boundaries.
 
-StackChan on M5Stack CoreS3 is the first device target. It is a proving ground,
-not an architectural boundary. Unraid is the first planned connector, not a
-platform dependency.
-
-## System context
+The desktop host is the external-authority boundary. It owns provider
+credentials, connector state, authorization policy, desktop access, and broad
+network access. A companion device holds only its paired identity, the network
+configuration needed to reach its host, and capabilities granted for the
+current session. Provider APIs and credentials never enter device firmware.
 
 ```text
-                         external services
-                  Unraid / AI / notifications / future
-                                  |
-                                  v
-+----------------------+   +-----------------------------+
-| desktop applications |-->| Deskkin desktop host        |
-+----------------------+   | connectors / policy / state |
-                           +--------------+--------------+
-                                          |
-                                  Deskkin protocol
-                                          |
-                           +--------------v--------------+
-                           | companion device             |
-                           | application / Slint / input  |
-                           +--------------+--------------+
-                                          |
-                           +--------------v--------------+
-                           | Zephyr / drivers / hardware  |
-                           +-----------------------------+
+external services
+       |
+       v
+desktop host  <---- authenticated semantic protocol ---->  companion device
+connectors / policy                                      application / Slint
+credentials / state                                     Zephyr / Embassy
 ```
 
-The desktop host is the external-authority boundary. Provider credentials,
-desktop sessions, durable connector state, authorization policy, and broad
-network access remain there. A companion device holds only its paired identity,
-the minimum transport configuration needed to reach its host, and the
-capabilities needed for its current session. Provider credentials remain on
-the host; the transport configuration may include a Wi-Fi credential.
+The current implementation has no external provider connector. Availability
+is served by a deterministic host connector.
 
 ## Dependency direction
 
 ```text
-device platform adapters ---+
-desktop platform adapters ---+--> application runtime --> application core
-simulator adapters ----------+
+application-core
+       ^
+       |
+application-features
+       ^
+       |
+deskkin-application <---- platform presenters and effect executors
 
-Slint presenter -----------------------------------------> application core
-connectors --> desktop host --> protocol ----------------> application core
+deskkin-protocol <---- deskkin-protocol-client <---- host/device adapters
+
+deskkin-host-capabilities <---- desktop-host adapter <---- future connectors
 ```
 
-The portable core must not depend on a platform adapter, runtime, UI toolkit,
-transport, connector, or board.
+Portable crates do not depend on Slint, Zephyr, Embassy, desktop APIs,
+filesystems, sockets, provider types, or runtime executors.
 
-## Logical components
+## Portable application
 
-### Application core
+`application-core` is allocation-free `no_std` Rust. It owns only
+feature-neutral lifecycle values, local effect identities, and surface-class
+vocabulary.
 
-The application core is pure `no_std` Rust. It owns domain values, state
-transitions, commands, events, effect requests, and feature-independent policy.
-It does not perform I/O or read ambient time, randomness, environment, or
-global runtime state.
+`application-features` depends only on `application-core`. It contains the
+availability state machine and a bounded synthetic-notice feature used for
+composition conformance. Features own typed state, inputs, semantic surfaces,
+and effect requests. They do not call one another or access UI, transport,
+connectors, or platform APIs.
 
-A useful target shape is an event-driven state machine:
+`deskkin-application` is the sole concrete composition root. It owns the closed
+compile-time feature registry, registry-order lifecycle broadcast, namespaced
+effect identities, exact completion routing, and deterministic surface
+selection. `Information` surfaces precede `Ambient`; equal classes use fixed
+registry order. Rejected input, capacity exhaustion, and identity exhaustion
+are transactional and publish no partial state or effect.
 
-```text
-current state + input event --> new state + requested effects
-```
+The same composition and presenter model run on the simulator and CoreS3.
+Small features remain modules in `application-features`; a feature receives a
+separate crate only when it has a materially independent dependency or reuse
+boundary. Dynamic device plugins are not supported.
 
-This shape supports synchronous unit tests, virtual time, record and replay,
-and alternate device and desktop runtimes without emulating Zephyr.
+## User interface and runtime
 
-### Application runtime
+Slint is the shared declarative UI. One owner controls each Slint instance.
+Runtime tasks and callbacks exchange typed application inputs and views with
+that owner rather than mutating UI state directly.
 
-The application runtime executes requested effects, schedules work, delivers
-completion events, and owns concurrency. On a device, async orchestration uses
-Embassy in one or more Zephyr threads. Synchronous paths do not need to become
-Embassy tasks. On desktop, the runtime may use a hosted executor or a
-deterministic scenario driver.
+The simulator uses a hosted runtime and deterministic virtual-time scenario
+driver. CoreS3 uses one Rust/Embassy UI owner and one Rust service worker hosted
+by Zephyr threads. Embassy is a runtime adapter, not part of the portable core.
 
-Embassy is not part of the portable core contract. In particular, direct calls
-to Embassy timers, task macros, executor state, and platform drivers remain in
-the runtime adapter.
+Zephyr owns CoreS3 device discovery, hardware topology, drivers, networking,
+storage, scheduling, and system services. Unsafe Rust, C FFI, and raw Zephyr
+types end at narrow platform adapters. Board quirks belong in devicetree,
+drivers, or board support rather than portable application branches.
 
-### Device platform
+## Desktop host and connectors
 
-Zephyr owns hardware topology, device discovery, drivers, system services,
-thread scheduling, networking, storage, power management, logging, and
-firmware-management facilities selected for the product.
+`deskkin-host-capabilities` is the host-only capability and connector
+composition root. It owns a closed compile-time registry, connector lifecycle,
+semantic requests and results, namespaced effect identities, and exact
+completion validation. It is independent of protocol, provider, runtime,
+filesystem, credential, and diagnostic implementations.
 
-Rust adapters expose the narrow application semantics needed above Zephyr.
-Unsafe Rust, C FFI, and raw Zephyr types end at this boundary. Board-specific
-initialization belongs in devicetree, board support, or drivers rather than in
-application conditionals.
+The desktop host adapts between host semantics and protocol messages. Connector
+failures remain distinct inside the host even where protocol major 1 collapses
+them to `ReadFailed`. Stale or mismatched completions cannot update capability
+state.
 
-### User interface
+The current registry contains only availability read and a deterministic
+availability connector. A provider connector must define semantic mapping,
+credential ownership, authority, failure classification, and observation at
+the host boundary. Provider payloads are never forwarded directly to a device.
 
-Slint is the shared declarative UI. The Slint presenter maps application view
-models to Slint properties and models, and maps Slint callbacks to typed
-application commands.
+The host accepts one authenticated device session. Its ordinary mode binds an
+explicit loopback address. Physical mode binds one exact assigned RFC1918 IPv4
+address on port `39042`; wildcard, public, link-local, IPv6, unassigned, and
+other-port binds are rejected. Deskkin does not modify firewall or interface
+configuration.
 
-One owner controls a Slint instance. Runtime tasks, drivers, and callbacks do
-not mutate it directly. They send messages to the owner. The same UI and
-presenter run with a Zephyr software-renderer adapter and a native desktop
-backend.
+A single session writer owns encrypted frames and TCP writes. Bounded
+application and reserved-control queues make overload and shutdown explicit.
+Identity filesystem work is isolated in a blocking actor. While a runtime is
+alive, identity mutation passes through its private generation-bound Unix owner
+socket instead of racing another store writer.
 
-The device adapter must preserve Slint dirty rendering through the display
-boundary. Rendering less while transferring a full frame does not satisfy the
-performance contract. Future work must measure dirty pixels, render duration,
-transfer duration, and missed frame deadlines.
+Named physical-host profiles are ignored schema-1 JSON below
+`.deskkin/profiles/`. A profile contains only a canonical role root, bind mode
+and address, deterministic availability selection, and recording choice. It
+contains no identity, pairing, Wi-Fi, or provider credential. Launch remains
+foreground-only; status compares exact launch metadata and stop is
+generation-bound.
 
-### Desktop host
+## Protocol
 
-The desktop host owns paired device sessions, connector lifecycle, provider
-credentials, persistent integration state, authorization, confirmation policy,
-and translation from provider-specific data into Deskkin semantics.
+Protocol major 1 carries semantic messages rather than UI properties, Zephyr
+events, provider payloads, or hardware operations.
 
-The host is Linux-only and accepts one authenticated device session. Its
-default command binds an explicitly selected IPv4 or IPv6 loopback address. A
-separate physical-slice command binds one exact assigned RFC1918 IPv4 address
-on fixed port `39042`; it refuses wildcard, public, link-local, IPv6, and
-unassigned addresses and never changes firewall or interface configuration. A
-single session writer owns encrypted framing and TCP writes; bounded
-application and reserved control queues make overload and shutdown explicit.
-Identity filesystem work is isolated in a blocking store actor. Mutations while
-the runtime is alive pass through a private, generation-bound Unix owner
-control socket rather than racing a second standalone store writer.
+The initiator sends the six-byte prelude `44 53 4b 4e 00 01`. Both peers bind
+it as the prologue for `Noise_XX_25519_ChaChaPoly_BLAKE2s`. Encrypted bootstrap
+schema 1 independently negotiates protocol majors, required and optional
+feature bits, requested permission bits, selected features, and granted
+permissions.
 
-Connectors do not send provider payloads to a device. For example, an Unraid
-connector converts an Unraid response into infrastructure status and declared
-actions. A future conversational connector converts provider streaming output
-into conversation events.
+`deskkin-protocol` is an allocation-free `no_std` codec with closed canonical
+messages, caller-provided buffers, one-byte message tags, and two-byte
+big-endian bounded frame lengths. It owns no socket, authentication,
+persistence, runtime, or application type.
 
-Host semantic requests pass through the compile-time capability and connector
-composition defined by
-[`ADR-0008`](decisions/0008-host-capability-connector-composition.md). The
-composition root owns lifecycle, routing, connector identity, and completion
-correlation without depending on protocol or provider types. Protocol mapping
-remains at the desktop-host adapter, and provider execution remains behind the
-selected connector.
+The implemented feature is `availability.read.v1`; its permission is
+`availability.read`. Hardware capability, application capability, protocol
+capability, and granted permission are distinct. Opaque transaction, session,
+and operation identities correlate requests and diagnostics without making a
+late result from a closed session valid.
 
-### Simulator
+`deskkin-protocol-client` owns the portable reconnect and request-correlation
+state. Disconnect invalidates availability to `Unknown`; it never fabricates
+`Unavailable`. Terminal incompatibility, missing required features, and
+authorization denial require an explicit new connect. Transient busy and
+transport failures use bounded reconnect.
 
-The simulator runs the application core, presenter, and Slint UI with fake
-ports and virtual time. It must support deterministic scenarios, injected
-failures, and recorded semantic inputs. A desktop device simulator may also
-connect to a real desktop host for end-to-end integration development.
-
-## Feature model
-
-Features own their state and exchange typed commands, events, view models, and
-effect requests. They do not call connectors, Zephyr APIs, or Slint objects.
-
-The device initially uses a compile-time feature registry. Modularity does not
-require a stable dynamic Rust ABI. Dynamic desktop connector loading remains a
-separate future decision.
-
-Shared UI surfaces should cover common cases such as notifications, status,
-progress, actions, confirmation, and conversation. A feature-specific Slint
-component is allowed when a common surface would erase important semantics,
-but navigation and global shell policy remain outside the feature.
-
-## Protocol boundary
-
-The Deskkin protocol carries semantic messages rather than implementation
-details. Its conceptual families are:
-
-- session establishment and peer identity;
-- protocol and feature capability negotiation;
-- application commands and completion events;
-- notifications, conversation updates, and status views;
-- proposed actions and explicit confirmations;
-- device health and bounded diagnostic summaries.
-
-Protocol major 1 uses a fixed prelude, Noise XX with
-X25519, ChaChaPoly, and BLAKE2s, and encrypted bootstrap schema 1. A portable
-`no_std` codec owns canonical closed messages and two-byte big-endian bounded
-framing without owning sockets, authentication state, persistence, runtime, or
-application types. The exact protocol-major-1 wire contract is fixed by
-[ADR-0004](decisions/0004-paired-host-protocol.md).
-The original loopback-only transport consequence is superseded only for the
-exact RFC1918 physical mode by
-[ADR-0005](decisions/0005-core-s3-paired-availability.md).
-
-Bootstrap negotiates supported protocol majors, required and optional feature
-bits, requested peer permission bits, selected features, and granted
-permissions independently. The first feature is `availability.read.v1`; its
-permission is `availability.read`. Session and operation context identities
-correlate requests and diagnostics without making a closed session's late
-result valid.
-
-Hardware capability, application capability, protocol capability, and granted
-permission are distinct:
-
-```text
-hardware capability     what the board physically provides
-application capability  what this firmware can do
-protocol capability     what this peer can exchange
-permission              what this paired device may request
-```
-
-## Security boundary
-
-External service credentials must not be provisioned to a companion device.
-Read capabilities and mutation capabilities are separate. A mutation request
-must carry an action identity and the policy-required confirmation result; the
-desktop host remains responsible for final authorization immediately before
-calling a connector.
+## Identity and persistent state
 
 Each peer has an explicitly initialized X25519 static identity. Noise XX
 pairing derives the same six-digit local authentication string on both peers;
-the string is never accepted from the remote peer or persisted. Only the
-durable `paired` state permits an application session. Pairing publication and
-exact unpair use generation-bound, crash-recoverable state machines and
-fail-closed validation. Hosted peers use private filesystem modes and atomic
-replacement. The CoreS3 uses separate two-slot NVS records with publication
-sequence, CRC, write/readback verification, and conflict rejection.
+the string is never accepted from the remote peer or persisted. Both peers
+must explicitly confirm it. Only durable `paired` state permits an application
+session.
 
-The CoreS3 physical slice stores its pairing identity and one Wi-Fi profile in
-separate two-slot Zephyr NVS namespaces. This state is intentionally plaintext:
-the slice does not enable flash encryption, secure boot, or eFuse mutation.
-Provider credentials and provider authority still never enter the device.
+Pairing and exact unpair are generation-bound, crash-recoverable state
+machines. Hosted stores use private modes, atomic replacement, bounded files,
+and fail-closed validation of symlinks, unknown entries, corrupt state, and
+ambiguous recovery.
 
-Disconnect invalidates current availability to `Unknown`; it never fabricates
-`Unavailable`. Terminal version, required-feature, and authorization failures
-require an explicit new connect, while transient busy or transport failures
-use the bounded reconnect policy. Provider mutations and replay protection for
-them remain future decisions.
+CoreS3 stores one pairing identity and one WPA2-Personal 2.4 GHz Wi-Fi profile
+in separate two-slot Zephyr NVS namespaces. Records contain schema and state,
+publication sequence, generation, bounded payloads, and CRC. A write becomes
+canonical only after readback; corrupt, unknown, ambiguous, or equally ranked
+conflicting records fail closed.
 
-## Observation boundary
+CoreS3 NVS is plaintext. Wi-Fi material and the Noise private identity are
+recoverable from flash. Deskkin does not enable flash encryption, secure boot,
+or eFuse mutation, and logical clear does not claim forensic erasure of prior
+cells.
 
-Hosted external and asynchronous paths expose separate result, owner-control,
-and local diagnostic surfaces. The reusable recorder publishes bounded atomic
-runs and never changes semantic results when disabled, full, or unhealthy.
-Phase 3 correlates pairing, session, availability read, and identity control by
-opaque transaction, session, and operation identities.
+## Observation
 
-Diagnostics contain only the accepted closed operation, outcome, error,
-duration, protocol/feature/permission, queue, completeness, and health fields.
-They exclude authentication strings, raw keys, addresses, wire data, payloads,
-paths, machine/user/process identity, environment, and provider data. Host and
-simulator stores are separately locked and capped at 16 MiB each, with no
-remote exporter.
+External, asynchronous, state-changing, and multi-stage paths expose separate
+result, owner-control, and local diagnostic surfaces. The reusable recorder
+publishes bounded atomic runs and never changes semantic results when disabled,
+full, or unhealthy.
 
-For the CoreS3 slice, a USB-connected host runner consumes only allowlisted
-device records and uses the same opaque correlations. Device and host roots are
-independently capped at 16 MiB. Wi-Fi credentials, pairing authentication
-strings, keys, LAN addresses, serial payloads, and NVS contents are never
-diagnostic fields; absence or failure of the runner cannot alter device
+Hosted diagnostics contain closed operation, outcome, error, duration,
+protocol/feature/permission, queue, correlation, completeness, and recording
+health fields. They exclude authentication strings, raw keys, credentials,
+addresses, wire bytes, payloads, arbitrary errors, paths, environment, and
+machine/user/process identity. Host and simulator stores are separately locked
+and capped at 16 MiB with no remote exporter.
+
+CoreS3 diagnostics are recorded by the USB-connected host runner from
+allowlisted device records. Device and host diagnostic roots are independently
+capped at 16 MiB. Runner absence or recording failure cannot alter firmware
 behavior.
 
-## Expected workspace shape
+## Current limitations
 
-This is a boundary map, not authorization to create the crates now:
+- Linux is the only hosted platform.
+- Availability is the only production application feature.
+- There is no external provider connector or provider credential store.
+- Device features and host connectors are compile-time registered.
+- Physical mode supports one exact IPv4 listener and one device session; there
+  is no discovery, hostname, wildcard bind, IPv6, daemon, or autostart.
+- CoreS3 supports one Wi-Fi profile and plaintext NVS only.
+- There is no OTA, rollback, firmware compatibility, packaging, release, or
+  migration policy.
+- Mutation capabilities, confirmation, authorization replay protection, UI
+  navigation, and conversation semantics are not implemented.
 
-```text
-crates/
-  application-core/
-  application-embassy/
-  feature-api/
-  protocol/
-  slint-presenter/
-  platform-zephyr/
-  platform-desktop/
-  desktop-core/
-  simulator/
-features/
-  character/
-  notifications/
-  conversation/
-  infrastructure/
-connectors/
-  unraid/
-  notifications/
-  conversational-ai/
-apps/
-  device/
-  desktop-host/
-  desktop-device-simulator/
-  scenario-runner/
-boards/
-  m5stack_cores3/
-```
-
-Crates and directories should be added only when their first accepted vertical
-slice needs them. The final source layout may become smaller than this map.
-
-## Accepted decisions
-
-- [ADR-0001](decisions/0001-platform-roles.md): Platform roles
-- [ADR-0002](decisions/0002-host-device-boundary.md): Desktop host and device
-  boundary
-- [ADR-0003](decisions/0003-portable-application.md): Portable application and
-  feature model
-- [ADR-0004](decisions/0004-paired-host-protocol.md): Paired loopback host
-  protocol
-- [ADR-0005](decisions/0005-core-s3-paired-availability.md): Exact private-LAN
-  CoreS3 transport, runtime, and persistent state
-
-The current implementation checkpoint and unresolved questions are maintained
-in [`implementation-plan.md`](implementation-plan.md).
+Resolve a limitation only when a concrete vertical slice needs it. Update this
+document to describe the resulting current architecture; use version-control
+history for superseded designs and decision rationale.

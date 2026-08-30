@@ -4,7 +4,7 @@
 
 Deskkin is a platform for embodied desktop companions, not a CoreS3-specific
 firmware and not an Unraid client. The first device is StackChan on M5Stack
-CoreS3. No provider connector is the current checkpoint; Unraid is one future
+CoreS3. No provider connector is implemented; Unraid is only a future
 candidate. Preserve boundaries that allow additional devices and integrations
 without changing the portable application core.
 
@@ -36,17 +36,21 @@ Unraid, ChatGPT, desktop-notification, or other provider APIs.
   read capabilities, mutation capabilities, and confirmation policy
   separately.
 
-## Current checkpoint
+## Current baseline
 
 The repository contains the portable application and protocol crates, Linux
-host and simulator, CoreS3 firmware, and their reproducible tooling. Completed
-feasibility-gate harnesses have been removed; their accepted contracts and
-evidence remain under `docs/`.
+host and simulator, CoreS3 firmware, and their reproducible tooling. Treat the
+current source and tests as the implementation baseline. `docs/architecture.md`
+is the source of truth for product and component boundaries;
+`docs/core-s3.md` owns firmware tooling, persistent-state, and live-device
+constraints.
 
-Treat `docs/implementation-plan.md` as the source of truth for current status
-and next work. Do not begin a new product slice or add dependencies before its
-approval checkpoint. Record long-lived architectural changes as a new ADR; do
-not rewrite accepted ADRs to hide superseded decisions.
+Do not begin a new product slice or add dependencies before its explicit scope
+and authority are approved. Update current documentation directly when an
+implemented change alters a public operation, architecture boundary, security
+contract, or supported limitation. Superseded designs and rationale belong in
+version-control history rather than retained proposal, checkpoint, status, or
+ADR files.
 
 ## Development workflow
 
