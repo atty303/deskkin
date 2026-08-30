@@ -13,7 +13,7 @@ Selected application language: no_std Rust
 Selected async role: Embassy above the portable core, hosted by Zephyr threads
 Implementation: portable application/protocol crates, Linux host and simulator, repeatable physical-host profiles, and the physically qualified CoreS3 firmware/tooling slice
 Application dependencies: approved product dependencies resolved in the root and device lockfiles
-Next action: review the exact retained physical profile and separately approve its private-LAN host launch and CoreS3 reconnect qualification; provider connectors remain deferred
+Next action: review and approve or revise the proposed Foundation B multi-feature application composition contract; provider connectors remain deferred
 ```
 
 This document is the source of truth for resuming development. Accepted
@@ -26,10 +26,17 @@ The implemented Foundation A checkpoint is
 It makes the already qualified host path repeatable through a named,
 secret-free local profile and exact foreground owner lifecycle. Its architecture
 is accepted in
-[`ADR-0006`](decisions/0006-repeatable-physical-profile.md). Isolated loopback
-implementation does not authorize creating the retained profile, launching its
-private-LAN listener, or accessing the CoreS3; those remain the next live
-approval checkpoint.
+[`ADR-0006`](decisions/0006-repeatable-physical-profile.md). The separately
+authorized retained-profile qualification completed on 2026-08-30; its
+observed reconnect and lifecycle evidence is recorded in
+[`foundation-a-repeatable-physical-profile-qualification.md`](foundation-a-repeatable-physical-profile-qualification.md).
+
+The next proposed checkpoint is
+[`foundation-b-multi-feature-application-composition-proposal.md`](foundation-b-multi-feature-application-composition-proposal.md).
+It defines compile-time feature composition, namespaced application effects,
+shared session invalidation, deterministic surface arbitration, and a presenter
+shell while preserving the existing availability and protocol contracts. Its
+proposal is not yet accepted and authorizes no implementation.
 
 The proposed foundation pins, dependency effects, spike matrix, observation
 contract, patch boundary, and removal criteria are in
