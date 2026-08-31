@@ -19,6 +19,7 @@ export component DeviceWindow inherits Window {
     in-out property <int> pet-animation-row: 0;
     in-out property <int> pet-frame-index: 0;
     in-out property <bool> pet-benchmark-active: false;
+    in-out property <int> benchmark-frame: 0;
     property <bool> companion-visible: root.pet-benchmark-active || (root.shell-state == "Paired" && root.authentication-string == "");
     callback pair();
     callback confirm();
@@ -30,6 +31,8 @@ export component DeviceWindow inherits Window {
         visible: root.companion-visible;
         animation-row: root.pet-animation-row;
         frame-index: root.pet-frame-index;
+        benchmark-active: root.pet-benchmark-active;
+        benchmark-frame: root.benchmark-frame;
     }
 
     Rectangle {

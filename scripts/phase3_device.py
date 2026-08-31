@@ -41,6 +41,7 @@ COMMANDS = {
 
 PET_BENCHMARK_DURATION_SECONDS = 60.0
 PET_BENCHMARK_REQUESTS = 1_200
+AMP_GATE_TIMEOUT_SECONDS = 15.0
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -541,6 +542,133 @@ def build(root: Path) -> None:
     )
 
 
+def build_amp(root: Path) -> None:
+    state, environment = device_environment(root)
+    environment["DESKKIN_STATE_DIR"] = str(state)
+    subprocess.run(
+        [str(root / "scripts/bootstrap_core_s3.sh"), "--verify-only"],
+        check=True,
+        cwd=root,
+        env=environment,
+        stdout=sys.stderr,
+    )
+    device_state = state / "phase3-device"
+    ensure_private_directory(device_state)
+    subprocess.run(
+        [
+            str(state / "venv/bin/west"),
+            "build",
+            "--sysbuild",
+            "--pristine",
+            "always",
+            "--board",
+            "m5stack_cores3/esp32s3/procpu",
+            "--build-dir",
+            str(device_state / "amp-build"),
+            str(root / "apps/core-s3-amp"),
+        ],
+        check=True,
+        cwd=state / "west",
+        env=environment,
+        stdout=sys.stderr,
+    )
+
+
+def flash_amp(root: Path, device_arg: str | None) -> None:
+    device = discover_device(device_arg)
+    state, environment = device_environment(root)
+    build_dir = state / "phase3-device/amp-build"
+    if not (build_dir / "domains.yaml").is_file():
+        raise DeviceError("firmware_build_required")
+    west = state / "venv/bin/west"
+    subprocess.run(
+        [
+            str(west),
+            "flash",
+            "--no-rebuild",
+            "--build-dir",
+            str(build_dir),
+            "--runner",
+            "esp32",
+            "--",
+            "--esp-device",
+            str(device),
+            "--esp-baud-rate",
+            "460800",
+        ],
+        check=True,
+        cwd=state / "west",
+        env=environment,
+        stdout=sys.stderr,
+    )
+
+
+def reset_amp(root: Path, device_arg: str | None) -> None:
+    device = discover_device(device_arg)
+    state, environment = device_environment(root)
+    subprocess.run(
+        [str(state / "venv/bin/esptool"), "--port", str(device), "run"],
+        check=True,
+        env=environment,
+        stdout=sys.stderr,
+    )
+
+
+def amp_fault_isolation_gate(device_arg: str | None) -> dict[str, object]:
+    gate_started = time.monotonic()
+    deadline = gate_started + AMP_GATE_TIMEOUT_SECONDS
+    responses = 0
+    live_generation: int | None = None
+    last_generation = 0
+    max_response_ms = 0
+    first_request = True
+    while time.monotonic() < deadline:
+        started = time.monotonic()
+        try:
+            status = run_control("status", device_arg, recover_status_transport=first_request)
+        except DeviceError:
+            if live_generation is not None:
+                raise DeviceError("amp_supervisor_unresponsive")
+            first_request = False
+            continue
+        first_request = False
+        response_ms = int((time.monotonic() - started) * 1000)
+        max_response_ms = max(max_response_ms, response_ms)
+        responses += 1
+        generation = int.from_bytes(status[28:32], "big")
+        availability = status[27]
+        if availability == 1 and generation > 0:
+            live_generation = generation
+            last_generation = generation
+        elif live_generation is not None and availability == 2:
+            if generation != last_generation:
+                raise DeviceError("amp_generation_changed_after_fault")
+            summary: dict[str, object] = {
+                "operation": "amp_fault_isolation",
+                "operation_id": 1,
+                "parent_operation_id": None,
+                "status": "success",
+                "error_type": None,
+                "effect_id": None,
+                "virtual_time_ms": 0,
+                "end_virtual_time_ms": int(AMP_GATE_TIMEOUT_SECONDS * 1000),
+                "duration_ms": int((time.monotonic() - gate_started) * 1000),
+                "render_width": None,
+                "render_height": None,
+                "value": "pass",
+                "status_responses": responses,
+                "live_generation": live_generation,
+                "stalled_generation": generation,
+                "max_status_response_ms": max_response_ms,
+            }
+            print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
+            return summary
+        time.sleep(0.25)
+    if live_generation is None:
+        raise DeviceError("amp_heartbeat_not_observed")
+    raise DeviceError("amp_fault_not_observed")
+
+
 def flash(root: Path, device_arg: str | None) -> None:
     device = discover_device(device_arg)
     state, environment = device_environment(root)
@@ -813,7 +941,7 @@ def decode_pet_benchmark(status: bytes) -> dict[str, int]:
         "stalls_over_250ms": unsigned(62, 64),
         "deadline_misses": unsigned(64, 66),
         "max_consecutive_misses": unsigned(66, 68),
-        "dirty_lines": unsigned(68, 72),
+        "transferred_lines": unsigned(68, 72),
         "transferred_bytes": unsigned(72, 76),
         "frame_digest_updates": unsigned(76, 80),
     }
@@ -831,6 +959,8 @@ def pet_benchmark_passed(summary: dict[str, int]) -> bool:
         and summary["allocation_failures"] == 0
         and summary["display_transfer_failures"] == 0
         and summary["frame_digest_updates"] > 0
+        and summary["transferred_lines"] == completed * 240
+        and summary["transferred_bytes"] == completed * 320 * 240 * 2
     )
 
 
@@ -873,6 +1003,9 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
     operation = {
         "profile": "control_route",
         "build": "control_route",
+        "amp-build": "control_route",
+        "amp-flash": "device_ui",
+        "amp-gate": "amp_fault_isolation",
         "flash": "device_ui",
         "identity": "identity_init",
         "provision": "nvs_publication",
@@ -899,7 +1032,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
+    parser.add_argument("action", choices=("profile", "build", "amp-build", "amp-flash", "amp-gate", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
     parser.add_argument("identity_action", nargs="?")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--age-identity", type=Path)
@@ -923,6 +1056,13 @@ def main() -> int:
             create_profile(profile, identity)
         elif args.action == "build":
             build(root)
+        elif args.action == "amp-build":
+            build_amp(root)
+        elif args.action == "amp-flash":
+            flash_amp(root, args.device)
+        elif args.action == "amp-gate":
+            reset_amp(root, args.device)
+            records = [amp_fault_isolation_gate(args.device)]
         elif args.action == "flash":
             flash(root, args.device)
         elif args.action == "recover":

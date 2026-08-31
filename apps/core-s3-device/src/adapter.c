@@ -20,6 +20,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 
 #include "dhcp_wait.h"
 
@@ -46,6 +47,22 @@ K_THREAD_STACK_DEFINE(service_stack, 24576);
 static struct k_thread service_thread;
 K_THREAD_STACK_DEFINE(control_stack, 4096);
 static struct k_thread control_thread;
+K_THREAD_STACK_DEFINE(display_stack, 4096);
+static struct k_thread display_thread;
+
+struct display_request {
+	uint8_t buffer_index;
+};
+
+struct display_completion {
+	uint8_t buffer_index;
+	int8_t result;
+	uint32_t duration_us;
+	uint64_t completed_at_us;
+};
+
+K_MSGQ_DEFINE(display_requests, sizeof(struct display_request), 1, 4);
+K_MSGQ_DEFINE(display_completions, sizeof(struct display_completion), 1, 4);
 
 static const struct device *const display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
@@ -57,16 +74,16 @@ static int32_t touch_x;
 static int32_t touch_y;
 static uint32_t touch_generation;
 static uint32_t consumed_touch_generation;
-static uint16_t *framebuffer;
-static uint16_t *staging;
+static uint16_t *framebuffers[2];
 static atomic_t allocation_failures;
+static atomic_t control_trace;
 
 extern void rust_main(void);
 extern void deskkin_rust_service_worker(void);
 extern void deskkin_rust_set_boot_status(uint8_t stage, uint8_t error);
 extern size_t deskkin_rust_control_snapshot(const uint8_t *input, size_t input_length,
 						   uint8_t *output);
-uint16_t *deskkin_framebuffer_alloc(void);
+uint16_t *deskkin_framebuffer_alloc(uint8_t index);
 uint8_t deskkin_allocation_failures(void);
 static void display_boot_stage(uint8_t stage, uint8_t error);
 
@@ -94,12 +111,12 @@ static void display_boot_color(uint16_t color)
 	if (!device_is_ready(display)) {
 		return;
 	}
-	uint16_t *pixels = deskkin_framebuffer_alloc();
+	uint16_t *pixels = deskkin_framebuffer_alloc(0);
 	if (pixels == NULL) {
 		return;
 	}
 	for (size_t index = 0; index < 320U * 240U; ++index) {
-		pixels[index] = color;
+		pixels[index] = sys_cpu_to_be16(color);
 	}
 	const struct display_buffer_descriptor descriptor = {
 		.buf_size = FRAMEBUFFER_BYTES,
@@ -122,7 +139,7 @@ static void display_boot_stage(uint8_t stage, uint8_t error)
 	if (stage < 4U || stage > 8U || !device_is_ready(display)) {
 		return;
 	}
-	uint16_t *pixels = deskkin_framebuffer_alloc();
+	uint16_t *pixels = deskkin_framebuffer_alloc(0);
 	if (pixels == NULL) {
 		return;
 	}
@@ -131,7 +148,7 @@ static void display_boot_stage(uint8_t stage, uint8_t error)
 			const size_t block = x / 32U;
 			const bool filled = block < stage;
 			const bool separator = x % 32U >= 28U;
-			pixels[y * 320U + x] = filled && !separator ? 0xFFFF : 0x0000;
+			pixels[y * 320U + x] = sys_cpu_to_be16(filled && !separator ? 0xFFFF : 0x0000);
 		}
 	}
 	const struct display_buffer_descriptor descriptor = {
@@ -159,30 +176,21 @@ static void touch_callback(struct input_event *event, void *user_data)
 }
 INPUT_CALLBACK_DEFINE(touch, touch_callback, NULL);
 
-uint16_t *deskkin_framebuffer_alloc(void)
+uint16_t *deskkin_framebuffer_alloc(uint8_t index)
 {
-	if (framebuffer == NULL) {
-		framebuffer = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32,
-							      FRAMEBUFFER_BYTES);
-		if (framebuffer != NULL) {
-			memset(framebuffer, 0, FRAMEBUFFER_BYTES);
+	if (index >= ARRAY_SIZE(framebuffers)) {
+		return NULL;
+	}
+	if (framebuffers[index] == NULL) {
+		framebuffers[index] = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32,
+								     FRAMEBUFFER_BYTES);
+		if (framebuffers[index] != NULL) {
+			memset(framebuffers[index], 0, FRAMEBUFFER_BYTES);
 		} else {
 			record_allocation_failure();
 		}
 	}
-	return framebuffer;
-}
-
-uint16_t *deskkin_staging_alloc(void)
-{
-	if (staging == NULL) {
-		staging = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32,
-							  FRAMEBUFFER_BYTES);
-		if (staging == NULL) {
-			record_allocation_failure();
-		}
-	}
-	return staging;
+	return framebuffers[index];
 }
 
 uint8_t deskkin_allocation_failures(void)
@@ -190,16 +198,66 @@ uint8_t deskkin_allocation_failures(void)
 	return (uint8_t)atomic_get(&allocation_failures);
 }
 
-int deskkin_display_write(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
-			  uint16_t pitch, const uint16_t *pixels)
+uint8_t deskkin_control_trace(void)
+{
+	return (uint8_t)atomic_get(&control_trace);
+}
+
+static int display_full_frame(const uint16_t *pixels)
 {
 	const struct display_buffer_descriptor descriptor = {
-		.buf_size = (size_t)pitch * height * sizeof(uint16_t),
-		.pitch = pitch,
-		.width = width,
-		.height = height,
+		.buf_size = FRAMEBUFFER_BYTES,
+		.pitch = 320,
+		.width = 320,
+		.height = 240,
 	};
-	return display_write(display, x, y, &descriptor, pixels);
+	return display_write(display, 0, 0, &descriptor, pixels);
+}
+
+static void display_entry(void *first, void *second, void *third)
+{
+	ARG_UNUSED(first);
+	ARG_UNUSED(second);
+	ARG_UNUSED(third);
+	for (;;) {
+		struct display_request request;
+		if (k_msgq_get(&display_requests, &request, K_FOREVER) != 0) {
+			continue;
+		}
+		const uint64_t started_cycles = k_cycle_get_64();
+		const int result = display_full_frame(framebuffers[request.buffer_index]);
+		const uint64_t completed_cycles = k_cycle_get_64();
+		const struct display_completion completion = {
+			.buffer_index = request.buffer_index,
+			.result = result == 0 ? 0 : -1,
+			.duration_us = (uint32_t)MIN(k_cyc_to_us_floor64(completed_cycles - started_cycles),
+						    UINT32_MAX),
+			.completed_at_us = k_ticks_to_us_floor64(k_uptime_ticks()),
+		};
+		(void)k_msgq_put(&display_completions, &completion, K_FOREVER);
+	}
+}
+
+int deskkin_display_submit(uint8_t buffer_index)
+{
+	if (buffer_index >= ARRAY_SIZE(framebuffers) || framebuffers[buffer_index] == NULL) {
+		return -EINVAL;
+	}
+	const struct display_request request = {.buffer_index = buffer_index};
+	return k_msgq_put(&display_requests, &request, K_NO_WAIT);
+}
+
+int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us,
+				    uint64_t *completed_at_us)
+{
+	struct display_completion completion;
+	if (k_msgq_get(&display_completions, &completion, K_NO_WAIT) != 0) {
+		return 0;
+	}
+	*buffer_index = completion.buffer_index;
+	*duration_us = completion.duration_us;
+	*completed_at_us = completion.completed_at_us;
+	return completion.result == 0 ? 1 : -EIO;
 }
 
 int deskkin_display_enable(void)
@@ -403,6 +461,7 @@ static void control_entry(void *first, void *second, void *third)
 		if (uart_read_frame(&frame) != 0) {
 			continue;
 		}
+		atomic_set(&control_trace, 1);
 		struct k_msgq *queue = frame.bytes[1] == 9 ? &reserved_control : &application_commands;
 		if (frame.bytes[1] == 2 || frame.bytes[1] == 5 || frame.bytes[1] == 8 ||
 		    frame.bytes[1] == 11) {
@@ -412,7 +471,10 @@ static void control_entry(void *first, void *second, void *third)
 			if (completion.length == 0 || completion.length > sizeof(completion.bytes)) {
 				continue;
 			}
-			(void)uart_write_completion(&completion);
+			atomic_set(&control_trace, 2);
+			if (uart_write_completion(&completion) == 0) {
+				atomic_set(&control_trace, 3);
+			}
 			memset(&frame, 0, sizeof(frame));
 			memset(&completion, 0, sizeof(completion));
 			continue;
@@ -687,7 +749,7 @@ bool deskkin_devices_ready(void)
 	}
 	display_get_capabilities(display, &capabilities);
 	return capabilities.x_resolution == 320 && capabilities.y_resolution == 240 &&
-	       capabilities.current_pixel_format == PIXEL_FORMAT_RGB_565;
+	       capabilities.current_pixel_format == PIXEL_FORMAT_RGB_565X;
 }
 
 int main(void)
@@ -712,6 +774,11 @@ int main(void)
 	}
 	publish_boot_status(3, 0);
 	display_boot_color(0x001F); /* blue: platform devices ready */
+	if (k_thread_create(&display_thread, display_stack, K_THREAD_STACK_SIZEOF(display_stack),
+			    display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT) == NULL) {
+		display_boot_color(0xF800);
+		return 1;
+	}
 	rust_main();
 	return 0;
 }

@@ -18,6 +18,7 @@ manifest:
           - hal_espressif
           - hal_xtensa
           - mbedtls
+          - mcuboot
           - tf-psa-crypto
     - name: zephyr-lang-rust
       remote: zephyrproject-rtos

@@ -16,26 +16,6 @@ pub const PET_BENCHMARK_REQUESTS: u32 = 1_200;
 pub const PET_BENCHMARK_FRAME_BUDGET_US: u32 = 50_000;
 pub const PET_BENCHMARK_STALL_US: u32 = 250_000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DirtyRange {
-    pub start: u16,
-    pub end: u16,
-}
-
-impl DirtyRange {
-    pub const EMPTY: Self = Self { start: 0, end: 0 };
-
-    pub fn include(&mut self, start: u16, end: u16) {
-        if self.start == self.end {
-            self.start = start;
-            self.end = end;
-        } else {
-            self.start = self.start.min(start);
-            self.end = self.end.max(end);
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PetBenchmarkSummary {
     pub duration_ms: u32,
@@ -49,7 +29,7 @@ pub struct PetBenchmarkSummary {
     pub stalls: u16,
     pub deadline_misses: u16,
     pub max_consecutive_misses: u16,
-    pub dirty_lines: u32,
+    pub transferred_lines: u32,
     pub transferred_bytes: u32,
     pub digest_updates: u32,
     pub allocation_failures: u8,
@@ -67,7 +47,7 @@ impl PetBenchmarkSummary {
         &mut self,
         render_us: u32,
         transfer_us: u32,
-        dirty_lines: u32,
+        transferred_lines: u32,
         transferred_bytes: u32,
         digest_changed: bool,
         deadline_missed: bool,
@@ -83,7 +63,7 @@ impl PetBenchmarkSummary {
         if render_us.saturating_add(transfer_us) > PET_BENCHMARK_STALL_US {
             self.stalls = self.stalls.saturating_add(1);
         }
-        self.dirty_lines = self.dirty_lines.saturating_add(dirty_lines);
+        self.transferred_lines = self.transferred_lines.saturating_add(transferred_lines);
         self.transferred_bytes = self.transferred_bytes.saturating_add(transferred_bytes);
         self.digest_updates = self
             .digest_updates
@@ -529,26 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn dirty_range_unions_every_callback_order() {
-        let mut separated = DirtyRange::EMPTY;
-        separated.include(10, 20);
-        separated.include(30, 40);
-        assert_eq!(separated, DirtyRange { start: 10, end: 40 });
-
-        let mut reversed = DirtyRange::EMPTY;
-        reversed.include(30, 40);
-        reversed.include(10, 20);
-        assert_eq!(reversed, separated);
-
-        let mut overlapping = DirtyRange::EMPTY;
-        overlapping.include(10, 30);
-        overlapping.include(20, 40);
-        assert_eq!(overlapping, separated);
-
-        assert_eq!(DirtyRange::EMPTY, DirtyRange { start: 0, end: 0 });
-    }
-
-    #[test]
     fn pet_benchmark_summary_tracks_budget_misses_and_bounded_counters() {
         let mut summary = PetBenchmarkSummary::default();
         summary.request_updates(3);
@@ -563,7 +523,7 @@ mod tests {
         assert_eq!(summary.deadline_misses, 3);
         assert_eq!(summary.max_consecutive_misses, 3);
         assert_eq!(summary.stalls, 1);
-        assert_eq!(summary.dirty_lines, 361);
+        assert_eq!(summary.transferred_lines, 361);
         assert_eq!(summary.transferred_bytes, 230_402);
         assert_eq!(summary.digest_updates, 2);
         assert_eq!(summary.transfer_failures, 1);

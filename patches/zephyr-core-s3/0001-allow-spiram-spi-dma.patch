@@ -1,0 +1,59 @@
+diff --git a/drivers/spi/spi_esp32_spim.c b/drivers/spi/spi_esp32_spim.c
+index 4b1e549ea3b..e6272af02d5 100644
+--- a/drivers/spi/spi_esp32_spim.c
++++ b/drivers/spi/spi_esp32_spim.c
+@@ -41,6 +41,19 @@ LOG_MODULE_REGISTER(esp32_spi, CONFIG_SPI_LOG_LEVEL);
+ #define SPI_DMA_RX 0
+ #define SPI_DMA_TX 1
+ 
++static bool spi_esp32_dma_capable(const void *buffer)
++{
++	if (esp_ptr_dma_capable(buffer)) {
++		return true;
++	}
++#if defined(CONFIG_ESP_SPIRAM) &&                                                     \
++	(defined(CONFIG_SOC_SERIES_ESP32S3) || defined(CONFIG_SOC_SERIES_ESP32S2))
++	return esp_ptr_dma_ext_capable(buffer);
++#else
++	return false;
++#endif
++}
++
+ static bool spi_esp32_transfer_ongoing(struct spi_esp32_data *data)
+ {
+ 	return spi_context_tx_on(&data->ctx) || spi_context_rx_on(&data->ctx);
+@@ -184,7 +197,7 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	if (cfg->dma_enabled) {
+ 		/* bit_len needs to be at least one byte long when using DMA */
+ 		bit_len = !bit_len ? 8 : bit_len;
+-		if (ctx->tx_buf && !esp_ptr_dma_capable((uint32_t *)&ctx->tx_buf[0])) {
++		if (ctx->tx_buf && !spi_esp32_dma_capable(&ctx->tx_buf[0])) {
+ 			LOG_DBG("Tx buffer not DMA capable");
+ 			tx_temp = k_malloc(dma_len_tx);
+ 			if (!tx_temp) {
+@@ -203,7 +216,7 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 				return -ENOMEM;
+ 			}
+ 		}
+-		if (ctx->rx_buf && (!esp_ptr_dma_capable((uint32_t *)&ctx->rx_buf[0]) ||
++		if (ctx->rx_buf && (!spi_esp32_dma_capable(&ctx->rx_buf[0]) ||
+ 				    ((int)&ctx->rx_buf[0] % 4 != 0) || (dma_len_rx % 4 != 0))) {
+ 			/* The rx buffer need to be length of
+ 			 * multiples of 32 bits to avoid heap
+@@ -254,6 +267,16 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	}
+ 
+ 	if (cfg->dma_enabled && hal_trans->send_buffer) {
++#if defined(CONFIG_ESP_SPIRAM) &&                                                     \
++	(defined(CONFIG_SOC_SERIES_ESP32S3) || defined(CONFIG_SOC_SERIES_ESP32S2))
++		if (esp_ptr_dma_ext_capable(hal_trans->send_buffer) &&
++		    esp_cache_msync(hal_trans->send_buffer, transfer_len_bytes,
++				    ESP_CACHE_MSYNC_FLAG_DIR_C2M |
++					    ESP_CACHE_MSYNC_FLAG_UNALIGNED) != ESP_OK) {
++			err = -EIO;
++			goto free;
++		}
++#endif
+ 		err = spi_esp32_gdma_config(dev, SPI_DMA_TX, hal_trans->send_buffer,
+ 					    transfer_len_bytes);
+ 		if (err) {

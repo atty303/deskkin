@@ -15,21 +15,30 @@ baseline. See [`docs/architecture.md`](docs/architecture.md) and
 The shared Pet-presentation baseline includes a normalized embedded Koyori
 atlas, a pure `no_std` animation model for `Idle`, `MoveLeft`, `MoveRight`, and
 `Attend`, and one Slint Pet surface used by the simulator and CoreS3 firmware.
-The CoreS3 firmware and host runner now include a fixed 60-second, 20 FPS
-Pet-only rendering benchmark with bounded timing and counter diagnostics. The
-clean CoreS3 build and host conformance tests pass, but no physical-device
-animation or display-transfer performance has been established.
+The CoreS3 product firmware and host runner include a fixed 60-second, 20 FPS
+Pet-only rendering benchmark with bounded timing and counter diagnostics. A
+separate atlas-free AMP harness now boots MCUboot, a PROCPU USB supervisor, and
+an APPCPU renderer stub from non-overlapping flash partitions. Its physical
+fault-injection gate confirms that PROCPU status remains responsive after the
+APPCPU enters an infinite loop.
 
 No external provider connector is implemented. The deterministic availability
 connector does not access an external service.
 
 ## Active work
 
-None.
+The first physical CoreS3 Pet benchmark completed only 487 of 1,200 requested
+frames in 60.138 seconds. Rather than optimize that single-core dirty-transfer
+baseline, current work is establishing the AMP ownership boundary first. The
+physical device currently runs the bounded fault harness: APPCPU emits a 100 ms
+heartbeat for 10 seconds and then stalls permanently; PROCPU reports the same
+generation as stale while continuing to answer USB status requests.
 
 ## Next work
 
-After naming and inspecting the target device, obtain explicit approval to
-flash the benchmark-capable firmware. Obtain a separate explicit approval to
-run the 60-second Pet benchmark. Fixed-world, parallax, Notice, IMU, and servo
-work remain behind the physical performance gate.
+Move LCD power/reset/backlight initialization to the PROCPU supervisor and
+move exclusive SPI2/display ownership to APPCPU. Then add double framebuffers
+and full-screen RGB565 transfer without restoring the atlas yet. The next
+physical gate must inject render, display-transfer, and infinite-loop faults
+independently while PROCPU USB status remains responsive. Fixed-world,
+parallax, Notice, IMU, servo, and atlas work remain behind that foundation.

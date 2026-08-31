@@ -1,0 +1,113 @@
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};
+
+&bus_5v {
+	status = "disabled";
+};
+
+&bus_out_reg {
+	status = "disabled";
+};
+
+&aw9523b {
+	status = "disabled";
+};
+
+&aw9523b_gpio {
+	status = "disabled";
+};
+
+&avdd {
+	status = "disabled";
+};
+
+&axp2101_led {
+	status = "disabled";
+};
+
+&bm8563_rtc {
+	status = "disabled";
+};
+
+&bmi270 {
+	status = "disabled";
+};
+
+&bmm150 {
+	status = "disabled";
+};
+
+&charger {
+	status = "disabled";
+};
+
+&dvdd {
+	status = "disabled";
+};
+
+&ft6336_touch {
+	status = "disabled";
+};
+
+&fuel_gauge {
+	status = "disabled";
+};
+
+&ltr553 {
+	status = "disabled";
+};
+
+&regulator {
+	status = "disabled";
+};
+
+&vcc_3v3 {
+	status = "disabled";
+};
+
+&vcc_bl {
+	status = "disabled";
+};
+
+&vdd_1v8 {
+	status = "disabled";
+};
+
+&vdd_3v3 {
+	status = "disabled";
+};
+
+&vdd_3v3_sd {
+	status = "disabled";
+};
+
+&vddcam_3v3 {
+	status = "disabled";
+};
+
+&vdda_3v3 {
+	status = "disabled";
+};
+
+&i2c0 {
+	axp2101@34 {
+		status = "disabled";
+	};
+
+	status = "disabled";
+};
+
+&i2c1 {
+	status = "disabled";
+};
+
+&mipi_dbi {
+	status = "disabled";
+};
+
+&usb_otg_reg {
+	status = "disabled";
+};

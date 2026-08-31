@@ -52,6 +52,85 @@ class Phase3DeviceTests(unittest.TestCase):
         for call in run.call_args_list:
             self.assertEqual(call.kwargs["env"]["DESKKIN_STATE_DIR"], expected_state)
 
+    def test_amp_build_is_one_pristine_sysbuild(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".deskkin"
+            with mock.patch.object(device, "device_environment", return_value=(state, {})), mock.patch.object(
+                device.subprocess, "run"
+            ) as run:
+                device.build_amp(root)
+
+        self.assertEqual(run.call_count, 2)
+        build_command = run.call_args_list[1].args[0]
+        self.assertIn("--sysbuild", build_command)
+        self.assertEqual(build_command.count("--pristine"), 1)
+        self.assertIn(str(root / "apps/core-s3-amp"), build_command)
+
+    def test_amp_flash_uses_sysbuild_flash_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".deskkin"
+            build = state / "phase3-device/amp-build"
+            build.mkdir(parents=True)
+            (build / "domains.yaml").write_text("default: core-s3-amp\n", encoding="utf-8")
+            with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
+                device, "device_environment", return_value=(state, {})
+            ), mock.patch.object(device.subprocess, "run") as run:
+                device.flash_amp(root, "/dev/fake")
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertNotIn("--domain", command)
+        self.assertIn(str(build), command)
+
+    def test_amp_reset_uses_the_pinned_esptool_before_the_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / ".deskkin"
+            with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
+                device, "device_environment", return_value=(state, {})
+            ), mock.patch.object(device.subprocess, "run") as run:
+                device.reset_amp(root, "/dev/fake")
+
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(state / "venv/bin/esptool"), "--port", "/dev/fake", "run"],
+        )
+
+    def test_amp_fault_gate_observes_live_then_stale_heartbeat(self):
+        live = bytearray(80)
+        live[27] = 1
+        live[28:32] = (17).to_bytes(4, "big")
+        stale = bytearray(live)
+        stale[27] = 2
+        clock = mock.Mock()
+        clock.now = 0.0
+        clock.monotonic.side_effect = lambda: clock.now
+        clock.sleep.side_effect = lambda seconds: setattr(clock, "now", clock.now + seconds)
+        with mock.patch.object(device, "time", clock), mock.patch.object(
+            device, "run_control", side_effect=[bytes(live), bytes(stale)]
+        ) as run_control:
+            summary = device.amp_fault_isolation_gate("/dev/fake")
+
+        self.assertEqual(summary["value"], "pass")
+        self.assertEqual(summary["live_generation"], 17)
+        self.assertEqual(summary["stalled_generation"], 17)
+        self.assertEqual(summary["status_responses"], 2)
+        self.assertTrue(run_control.call_args_list[0].kwargs["recover_status_transport"])
+        self.assertFalse(run_control.call_args_list[1].kwargs["recover_status_transport"])
+
+    def test_amp_fault_gate_rejects_supervisor_loss_after_live_heartbeat(self):
+        live = bytearray(80)
+        live[27] = 1
+        live[28:32] = (3).to_bytes(4, "big")
+        with mock.patch.object(
+            device, "run_control", side_effect=[bytes(live), device.DeviceError("control_timeout")]
+        ), mock.patch.object(device.time, "sleep"):
+            with self.assertRaisesRegex(device.DeviceError, "amp_supervisor_unresponsive"):
+                device.amp_fault_isolation_gate("/dev/fake")
+
     def test_profile_schema_is_exact_and_rfc1918(self):
         self.assertEqual(device.validate_profile(self.profile()), self.profile())
         for change in ({"extra": 1}, {"host_ipv4": "8.8.8.8"}, {"password": "short"}, {"schema_version": 2}):

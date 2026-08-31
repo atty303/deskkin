@@ -14,11 +14,13 @@ Rust/Cargo/libclang digests, and the local patch series before a build.
 ```sh
 mise run core-s3:bootstrap
 mise run core-s3:build
+mise run core-s3:amp-build
 ```
 
-`core-s3:build` is non-mutating with respect to a physical device. It performs
-clean product and inert firmware builds against one verified
-`DESKKIN_STATE_DIR`. `mise run test:core-s3` uses the same build boundary.
+`core-s3:build` and `core-s3:amp-build` are non-mutating with respect to a
+physical device. The former performs clean product and inert builds; the latter
+performs one clean sysbuild containing MCUboot, PROCPU, and APPCPU images.
+`mise run test:core-s3` reproduces both build boundaries.
 
 ## Task authority
 
@@ -28,6 +30,9 @@ CoreS3 tasks deliberately separate build, observation, and mutation.
 | --- | --- |
 | `core-s3:bootstrap` | Prepare and verify repository-local toolchains. |
 | `core-s3:build` | Build product and inert firmware without device access. |
+| `core-s3:amp-build` | Build the atlas-free AMP fault-isolation harness. |
+| `core-s3:amp-flash` | Flash all AMP domains in sysbuild order. |
+| `core-s3:amp-gate` | Verify USB supervision survives the injected APPCPU stall. |
 | `core-s3:status` | Read boot and application status without mutation. |
 | `core-s3:profile` | Create or replace the ignored age-encrypted Wi-Fi profile. |
 | `core-s3:flash` | Flash the product firmware. |
@@ -159,6 +164,33 @@ explicit application run:
 ```sh
 mise run core-s3:run -- --device /dev/ttyACM0
 ```
+
+## AMP fault-isolation harness
+
+The separate AMP harness contains no Pet atlas, Slint renderer, display
+transfer, network worker, NVS mutation, or servo path. MCUboot occupies flash
+offset `0x0`, the signed PROCPU supervisor image occupies `0x20000`, and the
+signed APPCPU image occupies `0x2c0000`. Flashing is one multi-domain west
+operation so the sysbuild dependency order is authoritative.
+
+PROCPU exclusively owns the USB status surface. APPCPU sends only a bounded
+heartbeat containing magic, generation, and uptime through IPM. After ten
+seconds APPCPU deliberately enters a non-yielding loop. PROCPU marks the last
+generation stale after 500 ms and must still answer status. The gate resets the
+device first so live and stale observations belong to one bounded boot. The host stores
+only timing, response count, and heartbeat generations; it records no frame,
+pixel, asset, raw IPM data, or raw USB packet.
+
+```sh
+mise run core-s3:amp-build
+mise run core-s3:amp-flash -- --device /dev/ttyACM0
+mise run core-s3:amp-gate -- --device /dev/ttyACM0
+```
+
+This harness proves control-plane isolation, not rendering throughput. Its
+APPCPU partition is intentionally too small for the current raw atlas. LCD
+ownership, double buffering, full-screen transfer, and the renderer are later
+slices and must retain the same supervisor-survival gate.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

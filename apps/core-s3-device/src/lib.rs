@@ -6,13 +6,11 @@ extern crate alloc;
 
 use alloc::{boxed::Box, rc::Rc};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
-use core::{
-    cell::RefCell, ffi::c_int, marker::PhantomData, ops::Range, ptr::NonNull, time::Duration,
-};
+use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
 use deskkin_presentation::PetAnimator;
 use embassy_time::Instant;
 use slint::platform::software_renderer::{
-    LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
+    MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, Rgb565Pixel, TargetPixel,
 };
 use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
@@ -53,7 +51,7 @@ static PET_BENCHMARK_WITHIN_BUDGET: AtomicU32 = AtomicU32::new(0);
 static PET_BENCHMARK_STALLS: AtomicU32 = AtomicU32::new(0);
 static PET_BENCHMARK_DEADLINE_MISSES: AtomicU32 = AtomicU32::new(0);
 static PET_BENCHMARK_MAX_CONSECUTIVE_MISSES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_DIRTY_LINES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_TRANSFERRED_LINES: AtomicU32 = AtomicU32::new(0);
 static PET_BENCHMARK_TRANSFERRED_BYTES: AtomicU32 = AtomicU32::new(0);
 static PET_BENCHMARK_DIGEST_UPDATES: AtomicU32 = AtomicU32::new(0);
 static PET_BENCHMARK_TRANSFER_FAILURES: AtomicU32 = AtomicU32::new(0);
@@ -77,16 +75,14 @@ unsafe extern "C" {
     fn deskkin_nvs_read(record_id: u16, output: *mut u8, capacity: usize) -> c_int;
     fn deskkin_nvs_write_readback(record_id: u16, input: *const u8, length: usize) -> c_int;
     fn deskkin_nvs_delete(record_id: u16) -> c_int;
-    fn deskkin_framebuffer_alloc() -> *mut u16;
-    fn deskkin_staging_alloc() -> *mut u16;
+    fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
     fn deskkin_allocation_failures() -> u8;
-    fn deskkin_display_write(
-        x: u16,
-        y: u16,
-        width: u16,
-        height: u16,
-        pitch: u16,
-        pixels: *const u16,
+    fn deskkin_control_trace() -> u8;
+    fn deskkin_display_submit(buffer_index: u8) -> c_int;
+    fn deskkin_display_take_completion(
+        buffer_index: *mut u8,
+        duration_us: *mut u32,
+        completed_at_us: *mut u64,
     ) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_take_touch(x: *mut i32, y: *mut i32) -> bool;
@@ -182,7 +178,7 @@ fn reset_pet_benchmark() {
         &PET_BENCHMARK_STALLS,
         &PET_BENCHMARK_DEADLINE_MISSES,
         &PET_BENCHMARK_MAX_CONSECUTIVE_MISSES,
-        &PET_BENCHMARK_DIRTY_LINES,
+        &PET_BENCHMARK_TRANSFERRED_LINES,
         &PET_BENCHMARK_TRANSFERRED_BYTES,
         &PET_BENCHMARK_DIGEST_UPDATES,
         &PET_BENCHMARK_TRANSFER_FAILURES,
@@ -207,7 +203,7 @@ fn publish_pet_benchmark(summary: &deskkin_core_s3::PetBenchmarkSummary, state: 
     PET_BENCHMARK_DEADLINE_MISSES.store(u32::from(summary.deadline_misses), Ordering::Relaxed);
     PET_BENCHMARK_MAX_CONSECUTIVE_MISSES
         .store(u32::from(summary.max_consecutive_misses), Ordering::Relaxed);
-    PET_BENCHMARK_DIRTY_LINES.store(summary.dirty_lines, Ordering::Relaxed);
+    PET_BENCHMARK_TRANSFERRED_LINES.store(summary.transferred_lines, Ordering::Relaxed);
     PET_BENCHMARK_TRANSFERRED_BYTES.store(summary.transferred_bytes, Ordering::Relaxed);
     PET_BENCHMARK_DIGEST_UPDATES.store(summary.digest_updates, Ordering::Relaxed);
     PET_BENCHMARK_TRANSFER_FAILURES.store(u32::from(summary.transfer_failures), Ordering::Relaxed);
@@ -247,7 +243,10 @@ fn encode_pet_benchmark(output: &mut [u8]) {
             PET_BENCHMARK_TRANSFER_MAX_US.load(Ordering::Relaxed),
         ),
         (58..62, PET_BENCHMARK_WITHIN_BUDGET.load(Ordering::Relaxed)),
-        (68..72, PET_BENCHMARK_DIRTY_LINES.load(Ordering::Relaxed)),
+        (
+            68..72,
+            PET_BENCHMARK_TRANSFERRED_LINES.load(Ordering::Relaxed),
+        ),
         (
             72..76,
             PET_BENCHMARK_TRANSFERRED_BYTES.load(Ordering::Relaxed),
@@ -315,29 +314,67 @@ struct DevicePlatform {
     window: Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>,
 }
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Default)]
+struct Rgb565BePixel(u16);
+
+impl TargetPixel for Rgb565BePixel {
+    fn blend(&mut self, color: PremultipliedRgbaColor) {
+        let mut native = Rgb565Pixel(u16::from_be(self.0));
+        native.blend(color);
+        self.0 = native.0.to_be();
+    }
+
+    fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
+        let native = <Rgb565Pixel as TargetPixel>::from_rgb(red, green, blue);
+        Self(native.0.to_be())
+    }
+}
+
 struct Framebuffer {
-    pixels: NonNull<u16>,
-    staging: NonNull<u16>,
+    pixels: [NonNull<u16>; 2],
+    back: usize,
     _single_threaded: PhantomData<Rc<()>>,
 }
 
 impl Framebuffer {
     fn new() -> Option<Self> {
         Some(Self {
-            pixels: NonNull::new(unsafe { deskkin_framebuffer_alloc() })?,
-            staging: NonNull::new(unsafe { deskkin_staging_alloc() })?,
+            pixels: [
+                NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
+                NonNull::new(unsafe { deskkin_framebuffer_alloc(1) })?,
+            ],
+            back: 0,
             _single_threaded: PhantomData,
         })
     }
 
-    fn line_pointer(&self, line: usize, column: usize) -> *const u16 {
-        unsafe { self.pixels.as_ptr().add(line * WIDTH + column) }
+    fn pixels_mut(&mut self) -> &mut [Rgb565BePixel] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.pixels[self.back].as_ptr().cast::<Rgb565BePixel>(),
+                WIDTH * HEIGHT,
+            )
+        }
     }
 
-    fn digest(&self) -> u32 {
+    fn back_index(&self) -> u8 {
+        self.back as u8
+    }
+
+    fn swap(&mut self) {
+        self.back ^= 1;
+    }
+
+    fn digest(&self, buffer_index: u8) -> u32 {
         let mut digest = 2_166_136_261_u32;
         for index in 0..WIDTH * HEIGHT {
-            let pixel = unsafe { self.pixels.as_ptr().add(index).read() };
+            let pixel = unsafe {
+                self.pixels[usize::from(buffer_index)]
+                    .as_ptr()
+                    .add(index)
+                    .read()
+            };
             digest ^= u32::from(pixel);
             digest = digest.wrapping_mul(16_777_619);
         }
@@ -345,99 +382,32 @@ impl Framebuffer {
     }
 }
 
-struct Capture<'a> {
-    line: [Rgb565Pixel; WIDTH],
-    ranges: &'a mut [deskkin_core_s3::DirtyRange; HEIGHT],
-    framebuffer: &'a Framebuffer,
+struct RenderedFrame {
+    buffer_index: u8,
+    render_us: u32,
+    digest: u32,
+    benchmark_deadline_us: Option<u64>,
+    benchmark_digest_changed: bool,
 }
 
-impl LineBufferProvider for &mut Capture<'_> {
-    type TargetPixel = Rgb565Pixel;
-
-    fn process_line(
-        &mut self,
-        line: usize,
-        range: Range<usize>,
-        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
-    ) {
-        let destination = &mut self.line[range.clone()];
-        render_fn(destination);
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                destination.as_ptr().cast::<u16>(),
-                self.framebuffer
-                    .pixels
-                    .as_ptr()
-                    .add(line * WIDTH + range.start),
-                destination.len(),
-            );
-        }
-        self.ranges[line].include(range.start as u16, range.end as u16);
-    }
-}
-
-fn transfer_dirty(
-    framebuffer: &Framebuffer,
-    ranges: &[deskkin_core_s3::DirtyRange; HEIGHT],
+fn submit_ready_frame(
+    framebuffer: &mut Framebuffer,
+    ready: &mut Option<RenderedFrame>,
+    in_flight: &mut Option<RenderedFrame>,
 ) -> Result<(), ()> {
-    let mut line = 0;
-    while line < HEIGHT {
-        let range = ranges[line];
-        if range.start == range.end {
-            line += 1;
-            continue;
-        }
-        let start_line = line;
-        line += 1;
-        while line < HEIGHT && ranges[line].start == range.start && ranges[line].end == range.end {
-            line += 1;
-        }
-        let height = line - start_line;
-        let width = usize::from(range.end - range.start);
-        for row in 0..height {
-            for column in 0..width {
-                unsafe {
-                    framebuffer
-                        .staging
-                        .as_ptr()
-                        .add(row * width + column)
-                        .write(
-                            framebuffer
-                                .line_pointer(start_line + row, usize::from(range.start) + column)
-                                .read()
-                                .swap_bytes(),
-                        );
-                }
-            }
-        }
-        if unsafe {
-            deskkin_display_write(
-                range.start,
-                start_line as u16,
-                range.end - range.start,
-                height as u16,
-                width as u16,
-                framebuffer.staging.as_ptr(),
-            )
-        } != 0
-        {
-            return Err(());
-        }
+    if in_flight.is_some() {
+        return Ok(());
     }
+    let Some(frame) = ready.take() else {
+        return Ok(());
+    };
+    if unsafe { deskkin_display_submit(frame.buffer_index) } != 0 {
+        *ready = Some(frame);
+        return Err(());
+    }
+    framebuffer.swap();
+    *in_flight = Some(frame);
     Ok(())
-}
-
-fn dirty_measurement(ranges: &[deskkin_core_s3::DirtyRange; HEIGHT]) -> (u32, u32) {
-    ranges.iter().fold((0_u32, 0_u32), |(lines, bytes), range| {
-        if range.start == range.end {
-            (lines, bytes)
-        } else {
-            (
-                lines.saturating_add(1),
-                bytes.saturating_add(u32::from(range.end - range.start).saturating_mul(2)),
-            )
-        }
-    })
 }
 
 fn elapsed_us(start: u64, end: u64) -> u32 {
@@ -446,7 +416,7 @@ fn elapsed_us(start: u64, end: u64) -> u32 {
 
 impl Platform for DevicePlatform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
         self.window.replace(Some(window.clone()));
         Ok(window)
     }
@@ -2046,7 +2016,7 @@ async fn run_ui() {
         return;
     }
     set_boot_stage(BootStage::UiComponentReady);
-    let Some(framebuffer) = Framebuffer::new() else {
+    let Some(mut framebuffer) = Framebuffer::new() else {
         fail_boot(BootError::Framebuffer);
         return;
     };
@@ -2063,7 +2033,71 @@ async fn run_ui() {
     let mut benchmark_frame_pending = false;
     let mut benchmark_previous_digest = 0_u32;
     let mut benchmark_was_active = false;
+    let mut next_render_at_us = 0_u64;
+    let mut ready_frame: Option<RenderedFrame> = None;
+    let mut in_flight: Option<RenderedFrame> = None;
     loop {
+        let mut completed_buffer_index = 0_u8;
+        let mut transfer_us = 0_u32;
+        let mut completed_at_us = 0_u64;
+        let completion = unsafe {
+            deskkin_display_take_completion(
+                &mut completed_buffer_index,
+                &mut transfer_us,
+                &mut completed_at_us,
+            )
+        };
+        if completion != 0 {
+            let Some(frame) = in_flight.take() else {
+                fail_boot(BootError::DisplayTransfer);
+                return;
+            };
+            if completion < 0 || completed_buffer_index != frame.buffer_index {
+                if frame.benchmark_deadline_us.is_some() {
+                    benchmark_summary.record_transfer_failure();
+                    benchmark_summary.duration_ms =
+                        elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
+                    publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Failed);
+                }
+                fail_boot(BootError::DisplayTransfer);
+                return;
+            }
+            UI_FRAME_DIGEST.store(frame.digest, Ordering::Release);
+            if let Some(deadline_us) = frame.benchmark_deadline_us {
+                benchmark_summary.complete_frame(
+                    frame.render_us,
+                    transfer_us,
+                    HEIGHT as u32,
+                    (WIDTH * HEIGHT * core::mem::size_of::<u16>()) as u32,
+                    frame.benchmark_digest_changed,
+                    completed_at_us
+                        > deadline_us
+                            .saturating_add(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
+                );
+            }
+            if VALID_RESULT.load(Ordering::Acquire) == 1 {
+                FRAME_ATTEMPT.store(RESULT_ATTEMPT.load(Ordering::Acquire), Ordering::Release);
+                LAST_STAGE.store(8, Ordering::Release);
+            }
+            if first_frame {
+                if unsafe { deskkin_display_enable() } != 0 {
+                    fail_boot(BootError::DisplayEnable);
+                    return;
+                }
+                first_frame = false;
+                set_boot_stage(BootStage::FirstFrameReady);
+            }
+        }
+        if submit_ready_frame(&mut framebuffer, &mut ready_frame, &mut in_flight).is_err() {
+            if benchmark_was_active {
+                benchmark_summary.record_transfer_failure();
+                benchmark_summary.duration_ms =
+                    elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
+                publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Failed);
+            }
+            fail_boot(BootError::DisplayTransfer);
+            return;
+        }
         slint::platform::update_timers_and_animations();
         let benchmark_active =
             PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Active as u8;
@@ -2078,6 +2112,7 @@ async fn run_ui() {
                 benchmark_scheduled_frames = 0;
                 benchmark_frame_pending = false;
                 benchmark_previous_digest = UI_FRAME_DIGEST.load(Ordering::Acquire);
+                component.set_benchmark_frame(0);
                 let frame = benchmark_animator
                     .set_state(deskkin_presentation::PetAnimationState::MoveRight);
                 component.set_pet_animation_row(i32::from(frame.row));
@@ -2110,6 +2145,9 @@ async fn run_ui() {
                     u64::from(due).saturating_mul(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
                 );
                 benchmark_scheduled_frames = benchmark_scheduled_frames.saturating_add(due);
+                component.set_benchmark_frame(
+                    i32::try_from(benchmark_scheduled_frames).unwrap_or(i32::MAX),
+                );
                 benchmark_frame_pending = true;
             }
         } else {
@@ -2162,6 +2200,12 @@ async fn run_ui() {
                 component.set_status_color(slint::Color::from_rgb_u8(0xf3, 0xb3, 0x3d));
             }
         }
+        match unsafe { deskkin_control_trace() } {
+            1 => component.set_status_text("USB RX".into()),
+            2 => component.set_status_text("USB SNAP".into()),
+            3 => component.set_status_text("USB TX".into()),
+            _ => {}
+        }
         let mut x = 0;
         let mut y = 0;
         if unsafe { deskkin_take_touch(&mut x, &mut y) } {
@@ -2175,20 +2219,36 @@ async fn run_ui() {
                 button: PointerEventButton::Left,
             });
         }
-        let mut ranges = [deskkin_core_s3::DirtyRange::EMPTY; HEIGHT];
-        let render_started_us = Instant::now().as_micros();
-        let rendered = window.draw_if_needed(|renderer| {
-            renderer.render_by_line(&mut Capture {
-                line: [Rgb565Pixel(0); WIDTH],
-                ranges: &mut ranges,
-                framebuffer: &framebuffer,
+        let now_us = Instant::now().as_micros();
+        if ready_frame.is_none() && now_us >= next_render_at_us {
+            let render_started_us = Instant::now().as_micros();
+            let rendered = window.draw_if_needed(|renderer| {
+                let _ = renderer.render(framebuffer.pixels_mut(), WIDTH);
             });
-        });
-        let render_ended_us = Instant::now().as_micros();
-        let changed = ranges.iter().any(|range| range.start != range.end);
-        let (dirty_lines, transferred_bytes) = dirty_measurement(&ranges);
-        let transfer_started_us = Instant::now().as_micros();
-        if transfer_dirty(&framebuffer, &ranges).is_err() {
+            let render_ended_us = Instant::now().as_micros();
+            next_render_at_us =
+                render_started_us.saturating_add(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US);
+            if rendered {
+                let buffer_index = framebuffer.back_index();
+                let digest = framebuffer.digest(buffer_index);
+                let benchmark_deadline_us =
+                    benchmark_frame_pending.then_some(benchmark_frame_deadline_us);
+                let benchmark_digest_changed =
+                    benchmark_deadline_us.is_some() && digest != benchmark_previous_digest;
+                if benchmark_deadline_us.is_some() {
+                    benchmark_previous_digest = digest;
+                    benchmark_frame_pending = false;
+                }
+                ready_frame = Some(RenderedFrame {
+                    buffer_index,
+                    render_us: elapsed_us(render_started_us, render_ended_us),
+                    digest,
+                    benchmark_deadline_us,
+                    benchmark_digest_changed,
+                });
+            }
+        }
+        if submit_ready_frame(&mut framebuffer, &mut ready_frame, &mut in_flight).is_err() {
             if benchmark_active {
                 benchmark_summary.record_transfer_failure();
                 benchmark_summary.duration_ms =
@@ -2198,47 +2258,23 @@ async fn run_ui() {
             fail_boot(BootError::DisplayTransfer);
             return;
         }
-        let transfer_ended_us = Instant::now().as_micros();
-        if changed {
-            let digest = framebuffer.digest();
-            UI_FRAME_DIGEST.store(digest, Ordering::Release);
-            if benchmark_active && benchmark_frame_pending && rendered {
-                benchmark_summary.complete_frame(
-                    elapsed_us(render_started_us, render_ended_us),
-                    elapsed_us(transfer_started_us, transfer_ended_us),
-                    dirty_lines,
-                    transferred_bytes,
-                    digest != benchmark_previous_digest,
-                    transfer_ended_us
-                        > benchmark_frame_deadline_us
-                            .saturating_add(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
-                );
-                benchmark_previous_digest = digest;
-                benchmark_frame_pending = false;
-            }
-            if VALID_RESULT.load(Ordering::Acquire) == 1 {
-                FRAME_ATTEMPT.store(RESULT_ATTEMPT.load(Ordering::Acquire), Ordering::Release);
-                LAST_STAGE.store(8, Ordering::Release);
-            }
-        }
-        if first_frame {
-            if unsafe { deskkin_display_enable() } != 0 {
-                fail_boot(BootError::DisplayEnable);
-                return;
-            }
-            first_frame = false;
-            set_boot_stage(BootStage::FirstFrameReady);
-        }
         if benchmark_active
             && Instant::now().as_micros()
                 >= benchmark_started_at_us
                     .saturating_add(u64::from(deskkin_core_s3::PET_BENCHMARK_DURATION_MS) * 1_000)
             && benchmark_scheduled_frames == deskkin_core_s3::PET_BENCHMARK_REQUESTS
+            && !benchmark_frame_pending
+            && ready_frame
+                .as_ref()
+                .is_none_or(|frame| frame.benchmark_deadline_us.is_none())
+            && in_flight
+                .as_ref()
+                .is_none_or(|frame| frame.benchmark_deadline_us.is_none())
         {
             benchmark_summary.duration_ms =
                 elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
             publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Complete);
         }
-        embassy_time::Timer::after_millis(10).await;
+        embassy_time::Timer::after_millis(1).await;
     }
 }

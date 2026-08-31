@@ -119,14 +119,17 @@ revisions = {
     "west/modules/hal/xtensa": "0495a1afd300b644d3ec8dd2c3bd11007e69a892",
     "west/modules/crypto/mbedtls": "a3e190fe44c78d1ba67f55979e1257328cc7d0d8",
     "west/modules/crypto/tf-psa-crypto": "dc575a2ddcc8cb16275d24c42a52eaf79ebe2231",
+    "west/bootloader/mcuboot": "6d3b3d2c38ab20c242e5b9abb04d050086383eb2",
 }
 rust_module = "west/modules/lang/rust"
+zephyr_module = "west/zephyr"
 expected_rust_status = [
     " M CMakeLists.txt",
     " M Kconfig",
     " M dt-rust.yaml",
     " M zephyr-build/src/lib.rs",
 ]
+expected_zephyr_status = [" M drivers/spi/spi_esp32_spim.c"]
 for relative, expected in revisions.items():
     project = state / relative
     actual = subprocess.run(
@@ -143,7 +146,12 @@ for relative, expected in revisions.items():
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    expected_status = expected_rust_status if relative == rust_module else []
+    if relative == rust_module:
+        expected_status = expected_rust_status
+    elif relative == zephyr_module:
+        expected_status = expected_zephyr_status
+    else:
+        expected_status = []
     if status != expected_status:
         raise SystemExit(f"CoreS3 west tree mismatch: {relative}")
 
@@ -153,7 +161,15 @@ patch_diff = subprocess.run(
     capture_output=True,
 ).stdout
 if hashlib.sha256(patch_diff).hexdigest() != "3a16ecd15058a4ceb80245fcc0ba5ef89087183b428f718c8ce8890e5559f186":
-    raise SystemExit("CoreS3 patch series mismatch")
+    raise SystemExit("CoreS3 Rust patch series mismatch")
+
+zephyr_patch_diff = subprocess.run(
+    ["git", "-C", state / zephyr_module, "diff", "--binary", "HEAD"],
+    check=True,
+    capture_output=True,
+).stdout
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "b1211235027018b5bf65570460fcd7397a2bd3a7e859df434edbe2973b7f07e3":
+    raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 toolchain = state / "rustup/toolchains/deskkin-esp"
 tools = {
@@ -257,6 +273,14 @@ for patch_file in "$repo_root"/patches/zephyr-lang-rust-core-s3/*.patch; do
   fi
 done
 
+module="$state_dir/west/zephyr"
+for patch_file in "$repo_root"/patches/zephyr-core-s3/*.patch; do
+  if ! git -C "$module" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+    git -C "$module" apply --check "$patch_file"
+    git -C "$module" apply "$patch_file"
+  fi
+done
+
 (
   cd -- "$state_dir"
   venv/bin/west blobs fetch hal_espressif
@@ -265,7 +289,7 @@ done
 validate_installed_sdk
 verify_product_installation
 
-for project in zephyr zephyr-lang-rust cmsis cmsis_6 hal_espressif; do
+for project in zephyr zephyr-lang-rust cmsis cmsis_6 hal_espressif mcuboot; do
   (cd "$state_dir" && "$venv_dir/bin/west" list "$project" -f '{name} {revision} {sha}')
 done
 "$rustup_dir/toolchains/$toolchain_name/bin/rustc" --version

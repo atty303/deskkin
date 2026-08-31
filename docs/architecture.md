@@ -93,8 +93,18 @@ content, pixels, asset paths, raw device packets, and digest values are outside
 the benchmark diagnostic contract.
 
 The simulator uses a hosted runtime and deterministic virtual-time scenario
-driver. CoreS3 uses one Rust/Embassy UI owner and one Rust service worker hosted
-by Zephyr threads. Embassy is a runtime adapter, not part of the portable core.
+driver. The current CoreS3 product firmware uses one Rust/Embassy UI owner and
+one Rust service worker hosted by Zephyr threads. Embassy is a runtime adapter,
+not part of the portable core.
+
+The replacement CoreS3 runtime is being established as two Zephyr AMP images.
+PROCPU owns USB control, boot/status supervision, and eventually persistent
+state. APPCPU will exclusively own Slint, software rendering, framebuffers,
+SPI2, and LCD transfer. The kernels exchange bounded control metadata through
+IPM and shared memory; framebuffers are not message payloads. A checked-in
+atlas-free harness already proves the first invariant: an intentional APPCPU
+infinite loop does not prevent PROCPU USB status responses. It does not yet
+claim display ownership or rendering performance.
 
 Zephyr owns CoreS3 device discovery, hardware topology, drivers, networking,
 storage, scheduling, and system services. Unsafe Rust, C FFI, and raw Zephyr
