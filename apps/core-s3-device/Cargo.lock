@@ -1043,6 +1043,7 @@ dependencies = [
  "critical-section",
  "deskkin-application",
  "deskkin-core-s3",
+ "deskkin-presentation",
  "deskkin-protocol",
  "deskkin-protocol-client",
  "embassy-executor",
@@ -1054,6 +1055,10 @@ dependencies = [
  "zephyr",
  "zeroize",
 ]
+
+[[package]]
+name = "deskkin-presentation"
+version = "0.1.0"
 
 [[package]]
 name = "deskkin-protocol"

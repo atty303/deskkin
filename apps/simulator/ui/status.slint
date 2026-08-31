@@ -1,4 +1,5 @@
 import { ApplicationSurface } from "../../../ui/application-surface.slint";
+import { PetSurface } from "../../../ui/pet-surface.slint";
 
 export component StatusWindow inherits Window {
     width: 320px;
@@ -21,5 +22,21 @@ export component StatusWindow inherits Window {
         status-color: root.status-color;
         notice-visible: root.notice-visible;
         notice-text: root.notice-text;
+    }
+}
+
+export component PetWindow inherits Window {
+    width: 320px;
+    height: 240px;
+    title: "Deskkin Pet";
+
+    in property <int> pet-animation-row: 0;
+    in property <int> pet-frame-index: 0;
+
+    PetSurface {
+        width: 100%;
+        height: 100%;
+        animation-row: root.pet-animation-row;
+        frame-index: root.pet-frame-index;
     }
 }

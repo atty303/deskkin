@@ -28,7 +28,7 @@ const HEIGHT: u32 = 240;
 
 thread_local! {
     static HEADLESS_WINDOW: Rc<MinimalSoftwareWindow> =
-        MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
 }
 
 struct HeadlessPlatform;
@@ -1085,7 +1085,73 @@ fn render(window: &Rc<MinimalSoftwareWindow>) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TempCleanup;
+    use crate::{PetWindow, TempCleanup};
+    use deskkin_presentation::{PetAnimationState, PetAnimator};
+
+    const PET_FRAME_DIGESTS: [u64; 28] = [
+        14_687_385_864_845_524_433,
+        5_562_516_069_755_349_323,
+        8_101_781_211_550_032_918,
+        7_420_346_489_153_983_131,
+        6_185_961_854_379_269_854,
+        12_717_056_505_558_348_592,
+        11_373_717_821_434_533_950,
+        5_803_372_181_647_886_288,
+        7_940_133_702_743_685_941,
+        9_980_645_116_797_572_521,
+        14_658_336_578_396_954_785,
+        14_841_622_078_026_762_330,
+        12_987_496_908_846_417_344,
+        4_870_752_553_796_094_693,
+        6_893_797_683_055_022_967,
+        1_122_249_740_752_949_450,
+        7_867_757_084_932_094_448,
+        5_016_907_229_345_486_064,
+        12_804_319_403_772_782_538,
+        13_451_547_104_358_714_670,
+        15_981_039_280_974_682_234,
+        12_206_909_590_514_358_738,
+        17_966_119_251_363_920_742,
+        8_276_371_206_493_267_061,
+        14_827_167_926_787_619_048,
+        9_732_590_528_733_038_416,
+        17_983_436_770_542_055_826,
+        13_826_263_421_516_039_515,
+    ];
+
+    fn rgb565_digest(pixels: &[u8]) -> u64 {
+        pixels.iter().fold(0xcbf2_9ce4_8422_2325, |digest, byte| {
+            (digest ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[test]
+    fn shared_pet_surface_renders_every_normalized_state() {
+        let window = setup_headless();
+        let ui = PetWindow::new().unwrap();
+        ui.show().unwrap();
+        let mut animator = PetAnimator::new();
+        let mut frame_digests = Vec::new();
+
+        for state in [
+            PetAnimationState::Idle,
+            PetAnimationState::MoveRight,
+            PetAnimationState::MoveLeft,
+            PetAnimationState::Attend,
+        ] {
+            let mut frame = animator.set_state(state);
+            for _ in 0..state.frame_count() {
+                ui.set_pet_animation_row(i32::from(frame.row));
+                ui.set_pet_frame_index(i32::from(frame.column));
+                let pixels = render(&window).unwrap();
+                assert_eq!(pixels, render(&window).unwrap());
+                frame_digests.push(rgb565_digest(&pixels));
+                frame = animator.advance(state.frame_period_ms());
+            }
+        }
+        assert_eq!(frame_digests, PET_FRAME_DIGESTS);
+        ui.hide().unwrap();
+    }
 
     #[test]
     fn fixed_scenarios_replay_identically_with_expected_timeline() {

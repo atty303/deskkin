@@ -21,6 +21,7 @@ critical-section = "=1.2.0"
 deskkin-core-s3 = { path = "../../crates/deskkin-core-s3" }
 deskkin-protocol = { path = "../../crates/deskkin-protocol" }
 deskkin-protocol-client = { path = "../../crates/deskkin-protocol-client" }
+deskkin-presentation = { path = "../../crates/deskkin-presentation" }
 embassy-time = { version = "=0.4.0", features = ["tick-hz-10_000"] }
 slint = { version = "=1.17.1", default-features = false, features = ["compat-1-2", "renderer-software", "unsafe-single-threaded", "libm"] }
 snow = { version = "=0.10.0", default-features = false, features = ["default-resolver", "use-blake2", "use-chacha20poly1305", "use-curve25519"] }

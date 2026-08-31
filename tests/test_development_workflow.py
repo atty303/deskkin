@@ -21,6 +21,7 @@ HOST_COMMANDS = (
     "cargo check --locked -p application-core --target thumbv7m-none-eabi",
     "cargo check --locked -p application-features --target thumbv7m-none-eabi",
     "cargo check --locked -p deskkin-application --target thumbv7m-none-eabi",
+    "cargo check --locked -p deskkin-presentation --target thumbv7m-none-eabi",
     "cargo check --locked -p deskkin-protocol --target thumbv7m-none-eabi",
     "cargo check --locked -p deskkin-protocol-client --target thumbv7m-none-eabi",
     "cargo check --locked -p deskkin-core-s3 --target thumbv7m-none-eabi",
@@ -28,6 +29,7 @@ HOST_COMMANDS = (
     "cargo tree --locked -p application-core --edges normal",
     "cargo tree --locked -p application-features --edges normal",
     "cargo tree --locked -p deskkin-application --edges normal",
+    "cargo tree --locked -p deskkin-presentation --edges normal",
     "cargo tree --locked -p deskkin-host-capabilities --edges normal",
     "cargo tree --locked -p deskkin-protocol --edges normal",
 )

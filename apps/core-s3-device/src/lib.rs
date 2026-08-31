@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use core::{
     cell::RefCell, ffi::c_int, marker::PhantomData, ops::Range, ptr::NonNull, time::Duration,
 };
+use deskkin_presentation::PetAnimator;
 use embassy_time::Instant;
 use slint::platform::software_renderer::{
     LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
@@ -1876,8 +1877,17 @@ async fn run_ui() {
     };
     set_boot_stage(BootStage::FramebufferReady);
     let mut first_frame = true;
+    let mut pet_animator = PetAnimator::new();
+    let mut pet_updated_at_ms = Instant::now().as_millis();
     loop {
         slint::platform::update_timers_and_animations();
+        let now_ms = Instant::now().as_millis();
+        let elapsed_ms =
+            u32::try_from(now_ms.saturating_sub(pet_updated_at_ms)).unwrap_or(u32::MAX);
+        pet_updated_at_ms = now_ms;
+        let pet_frame = pet_animator.advance(elapsed_ms);
+        component.set_pet_animation_row(i32::from(pet_frame.row));
+        component.set_pet_frame_index(i32::from(pet_frame.column));
         let sas = UI_SAS.load(Ordering::Acquire);
         if sas == u32::MAX {
             component.set_authentication_string("".into());

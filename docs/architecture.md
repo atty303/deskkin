@@ -35,6 +35,8 @@ application-features
        |
 deskkin-application <---- platform presenters and effect executors
 
+deskkin-presentation <---- simulator and device UI owners
+
 deskkin-protocol <---- deskkin-protocol-client <---- host/device adapters
 
 deskkin-host-capabilities <---- desktop-host adapter <---- future connectors
@@ -67,11 +69,22 @@ Small features remain modules in `application-features`; a feature receives a
 separate crate only when it has a materially independent dependency or reuse
 boundary. Dynamic device plugins are not supported.
 
+`deskkin-presentation` is allocation-free `no_std` Rust. It owns only the
+presentation-time Pet animation state and normalized atlas coordinates. It is
+not a character domain model and does not own application semantics, assets,
+Slint properties, clocks, or hardware motion. UI owners supply elapsed time and
+adapt its closed frame result to the shared Slint Pet surface.
+
 ## User interface and runtime
 
 Slint is the shared declarative UI. One owner controls each Slint instance.
 Runtime tasks and callbacks exchange typed application inputs and views with
 that owner rather than mutating UI state directly.
+
+The embedded Koyori skin is a normalized four-state presentation asset. Its
+Codex Pet JSON and WebP source are not runtime inputs. The simulator and CoreS3
+compile the same Slint crop geometry; only a physical CoreS3 benchmark can make
+claims about sustained rendering rate or display-transfer latency.
 
 The simulator uses a hosted runtime and deterministic virtual-time scenario
 driver. CoreS3 uses one Rust/Embassy UI owner and one Rust service worker hosted
@@ -203,6 +216,8 @@ behavior.
   migration policy.
 - Mutation capabilities, confirmation, authorization replay protection, UI
   navigation, and conversation semantics are not implemented.
+- Pet animation is presentation-only. Fixed-world projection, parallax,
+  information cues, pose observation, and physical motion are not implemented.
 
 Resolve a limitation only when a concrete vertical slice needs it. Update this
 document to describe the resulting current architecture; use version-control

@@ -8,6 +8,7 @@ members = [
   "crates/deskkin-host-capabilities",
   "crates/deskkin-protocol",
   "crates/deskkin-protocol-client",
+  "crates/deskkin-presentation",
   "crates/deskkin-noise-interop-tests",
   "crates/deskkin-core-s3",
   "crates/local-run-recorder",

@@ -1,0 +1,36 @@
+export component PetSurface inherits Rectangle {
+    in property <int> animation-row: 0;
+    in property <int> frame-index: 0;
+
+    background: #151b26;
+    clip: true;
+
+    Rectangle {
+        x: 0px;
+        y: parent.height - 44px;
+        width: 100%;
+        height: 44px;
+        background: #202c3d;
+    }
+
+    Rectangle {
+        x: 0px;
+        y: parent.height - 44px;
+        width: 100%;
+        height: 2px;
+        background: #51647f;
+    }
+
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 192px;
+        height: 208px;
+        source: @image-url("../assets/pets/koyori/atlas.png");
+        source-clip-x: root.frame-index * 144;
+        source-clip-y: root.animation-row * 156;
+        source-clip-width: 144;
+        source-clip-height: 156;
+        image-fit: contain;
+    }
+}

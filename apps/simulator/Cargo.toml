@@ -11,6 +11,7 @@ deskkin-application = { path = "../../crates/deskkin-application" }
 deskkin-desktop-host = { path = "../desktop-host" }
 deskkin-protocol = { path = "../../crates/deskkin-protocol" }
 deskkin-protocol-client = { path = "../../crates/deskkin-protocol-client" }
+deskkin-presentation = { path = "../../crates/deskkin-presentation" }
 local-run-recorder = { path = "../../crates/local-run-recorder" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"

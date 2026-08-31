@@ -1061,6 +1061,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "deskkin-presentation"
+version = "0.1.0"
+
+[[package]]
 name = "deskkin-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1081,6 +1085,7 @@ version = "0.1.0"
 dependencies = [
  "deskkin-application",
  "deskkin-desktop-host",
+ "deskkin-presentation",
  "deskkin-protocol",
  "deskkin-protocol-client",
  "local-run-recorder",
