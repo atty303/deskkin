@@ -86,6 +86,12 @@ Codex Pet JSON and WebP source are not runtime inputs. The simulator and CoreS3
 compile the same Slint crop geometry; only a physical CoreS3 benchmark can make
 claims about sustained rendering rate or display-transfer latency.
 
+The CoreS3 Pet benchmark is a fixed 60-second device operation. It stops the
+application worker, schedules 1,200 Pet updates at 20 FPS, and publishes one
+bounded timing-and-counter summary after measurement. Simulator timing, image
+content, pixels, asset paths, raw device packets, and digest values are outside
+the benchmark diagnostic contract.
+
 The simulator uses a hosted runtime and deterministic virtual-time scenario
 driver. CoreS3 uses one Rust/Embassy UI owner and one Rust service worker hosted
 by Zephyr threads. Embassy is a runtime adapter, not part of the portable core.

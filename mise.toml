@@ -157,6 +157,10 @@ run = "python scripts/phase3_device.py status"
 description = "Start the already configured CoreS3 application"
 run = "python scripts/phase3_device.py run"
 
+[tasks."core-s3:benchmark"]
+description = "Run the fixed 60-second CoreS3 Pet rendering benchmark"
+run = "python scripts/phase3_device.py benchmark"
+
 [tasks."core-s3:recover"]
 description = "Erase CoreS3 storage and restore inert firmware after a live checkpoint"
 run = "python scripts/phase3_device.py recover"

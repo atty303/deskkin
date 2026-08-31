@@ -19,6 +19,26 @@ class Phase3DeviceTests(unittest.TestCase):
     def profile(self):
         return {"schema_version": 1, "ssid": "fixture", "password": "fake-password", "host_ipv4": "192.168.10.2"}
 
+    def pet_benchmark_status(self):
+        status = bytearray(80)
+        status[0] = 1
+        status[26] = 2
+        for start, length, value in (
+            (30, 4, 60_010),
+            (34, 4, 1_200),
+            (38, 4, 1_200),
+            (42, 4, 12_000_000),
+            (46, 4, 24_000_000),
+            (50, 4, 20_000),
+            (54, 4, 30_000),
+            (58, 4, 1_140),
+            (68, 4, 288_000),
+            (72, 4, 184_320_000),
+            (76, 4, 1_200),
+        ):
+            status[start : start + length] = value.to_bytes(length, "big")
+        return bytes(status)
+
     def test_build_verifies_the_same_state_directory_it_uses(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -317,6 +337,65 @@ int main(void) {
             self.assertFalse(device.run_succeeded([record | {key: invalid}], 7))
         for key in ("run_attempt", "result_attempt", "frame_attempt"):
             self.assertFalse(device.run_succeeded([record | {key: 6}], 7))
+
+    def test_pet_benchmark_gate_decodes_only_bounded_timing_and_counters(self):
+        summary = device.decode_pet_benchmark(self.pet_benchmark_status())
+        self.assertTrue(device.pet_benchmark_passed(summary))
+        self.assertEqual(summary["animation_update_requests"], 1_200)
+        self.assertEqual(summary["completed_frames"], 1_200)
+        self.assertEqual(summary["frames_within_50ms"], 1_140)
+        self.assertEqual(summary["frame_digest_updates"], 1_200)
+        self.assertNotIn("rgb565_digest", summary)
+        self.assertNotIn("asset_path", summary)
+
+        for key, value in (
+            ("state", 3),
+            ("duration_ms", 60_501),
+            ("animation_update_requests", 1_199),
+            ("completed_frames", 1_199),
+            ("frames_within_50ms", 1_139),
+            ("stalls_over_250ms", 1),
+            ("allocation_failures", 1),
+            ("display_transfer_failures", 1),
+            ("frame_digest_updates", 0),
+        ):
+            self.assertFalse(device.pet_benchmark_passed(summary | {key: value}), key)
+
+    def test_pet_benchmark_wait_avoids_usb_polling_during_measurement(self):
+        with mock.patch.object(device.time, "sleep") as sleep, mock.patch.object(
+            device, "run_control", return_value=self.pet_benchmark_status()
+        ) as run_control:
+            summary = device.await_pet_benchmark("/dev/fake")
+        self.assertTrue(device.pet_benchmark_passed(summary))
+        sleep.assert_called_once_with(60.5)
+        run_control.assert_called_once_with(
+            "pet-benchmark-status", "/dev/fake", recover_status_transport=False
+        )
+
+    def test_pet_benchmark_action_stops_application_before_start(self):
+        calls = []
+
+        def control(command, *args, **kwargs):
+            calls.append(command)
+            return bytes(80)
+
+        summary = device.decode_pet_benchmark(self.pet_benchmark_status())
+        with mock.patch.object(device.sys, "argv", ["phase3_device.py", "benchmark", "--device", "/dev/fake"]), mock.patch.object(
+            device, "run_control", side_effect=control
+        ), mock.patch.object(device, "await_pet_benchmark", return_value=summary), mock.patch.object(
+            device, "publish_diagnostic"
+        ) as publish_diagnostic, mock.patch.object(
+            device, "publish_result", return_value=Path("/tmp/benchmark.json")
+        ), mock.patch.object(device.sys, "stdout", io.StringIO()), mock.patch.object(
+            device.sys, "stderr", io.StringIO()
+        ):
+            self.assertEqual(device.main(), 0)
+        self.assertEqual(calls, ["shutdown", "pet-benchmark-start"])
+        record = publish_diagnostic.call_args.args[3][0]
+        self.assertEqual(record["operation"], "pet_render_benchmark")
+        self.assertEqual(record["status"], "success")
+        for forbidden in ("rgb565_digest", "asset_path", "pixel", "raw_packet"):
+            self.assertNotIn(forbidden, record)
 
     def test_hosted_profile_parser_is_exact_and_bounded(self):
         plaintext = bytearray(json.dumps(self.profile(), separators=(",", ":")).encode())

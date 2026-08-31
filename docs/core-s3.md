@@ -34,11 +34,13 @@ CoreS3 tasks deliberately separate build, observation, and mutation.
 | `core-s3:identity` | Execute an explicit identity lifecycle command. |
 | `core-s3:provision` | Write the selected Wi-Fi profile to NVS. |
 | `core-s3:run` | Run the configured application and record bounded diagnostics. |
+| `core-s3:benchmark` | Stop the application worker and run the fixed Pet rendering benchmark. |
 | `core-s3:recover` | Erase Deskkin storage and restore inert firmware. |
 
 No mutation task runs from `mise run test`. Flash, identity mutation,
-provisioning, application run, recovery, USB reset, and power cycling require
-an immediate explicit live approval that names the target device and operation.
+provisioning, application run, benchmark execution, recovery, USB reset, and
+power cycling require an immediate explicit live approval that names the target
+device and operation.
 Read back the resulting status after an approved mutation. Recovery requires
 the separate `--erase-storage` confirmation and must not be described as
 forensic erasure.
@@ -113,6 +115,49 @@ window. Status remains read-only:
 ```sh
 mise run core-s3:run -- --device /dev/ttyACM0
 mise run core-s3:status -- --device /dev/ttyACM0
+```
+
+## Pet rendering benchmark
+
+The product firmware contains a fixed 60-second Pet-only benchmark path. The
+runner first stops the application worker, then requests 1,200 animation
+updates at 20 FPS. The UI owner uses the same Slint software renderer, embedded
+atlas, RGB565 framebuffer, dirty-line capture, and display transfer path as the
+normal product UI. Network application work remains stopped for the measurement;
+no servo adapter or servo-power path exists in this firmware slice.
+
+The runner does not poll USB during the 60-second measurement. Afterward it
+reads one bounded summary containing only timing and counters: requested and
+completed frames, render and transfer totals and maxima, frames within 50 ms,
+dirty lines and transferred bytes, deadline misses and maximum consecutive
+misses, stalls over 250 ms, transfer and allocation failures, and frame-digest
+update count. It records no image, pixel, digest value, asset path, or raw
+packet.
+
+The allocation-failure counter covers the fallible external-memory allocation
+of the framebuffer and transfer staging buffer. Those buffers are allocated
+before measurement and reused by every measured frame. A fatal Rust or Slint
+allocator failure prevents terminal benchmark completion and therefore cannot
+produce a passing summary.
+
+The gate passes only when all 1,200 requests complete, at least 95% of completed
+frames stay within the combined 50 ms render-and-transfer budget, no combined
+render-and-transfer time exceeds 250 ms, no allocation or display-transfer
+failure occurs, and the frame digest changes. Simulator timing is not an input
+to this result.
+
+Flashing the current product firmware and executing the benchmark are separate
+live approvals. After both are approved for the inspected target device, run:
+
+```sh
+mise run core-s3:benchmark -- --device /dev/ttyACM0
+```
+
+The benchmark leaves the application worker stopped. Restarting it is another
+explicit application run:
+
+```sh
+mise run core-s3:run -- --device /dev/ttyACM0
 ```
 
 Identity inspection and exact unpair are distinct commands. `list` reports the

@@ -18,7 +18,8 @@ export component DeviceWindow inherits Window {
     in-out property <string> authentication-string: "";
     in-out property <int> pet-animation-row: 0;
     in-out property <int> pet-frame-index: 0;
-    property <bool> companion-visible: root.shell-state == "Paired" && root.authentication-string == "";
+    in-out property <bool> pet-benchmark-active: false;
+    property <bool> companion-visible: root.pet-benchmark-active || (root.shell-state == "Paired" && root.authentication-string == "");
     callback pair();
     callback confirm();
     callback cancel();
@@ -36,7 +37,7 @@ export component DeviceWindow inherits Window {
         y: 8px;
         width: 104px;
         height: 30px;
-        visible: root.companion-visible;
+        visible: root.companion-visible && !root.pet-benchmark-active;
         border-radius: 15px;
         background: #d9212830;
 

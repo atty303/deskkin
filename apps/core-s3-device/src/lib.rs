@@ -40,6 +40,24 @@ static LAST_STAGE: AtomicU8 = AtomicU8::new(0);
 static LAST_ERROR: AtomicU8 = AtomicU8::new(0);
 static BOOT_STAGE: AtomicU8 = AtomicU8::new(BootStage::Starting as u8);
 static BOOT_ERROR: AtomicU8 = AtomicU8::new(BootError::None as u8);
+static APPLICATION_RUNNING: AtomicU8 = AtomicU8::new(1);
+static PET_BENCHMARK_STATE: AtomicU8 = AtomicU8::new(0);
+static PET_BENCHMARK_DURATION_MS: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_UPDATE_REQUESTS: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_COMPLETED_FRAMES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_RENDER_TOTAL_US: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_TRANSFER_TOTAL_US: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_RENDER_MAX_US: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_TRANSFER_MAX_US: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_WITHIN_BUDGET: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_STALLS: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_DEADLINE_MISSES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_MAX_CONSECUTIVE_MISSES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_DIRTY_LINES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_TRANSFERRED_BYTES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_DIGEST_UPDATES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_TRANSFER_FAILURES: AtomicU32 = AtomicU32::new(0);
+static PET_BENCHMARK_ALLOCATION_FAILURES: AtomicU8 = AtomicU8::new(0);
 static SESSION_CONTEXT: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 static OPERATION_CONTEXT: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 static OWNER_GENERATION_HIGH: AtomicU32 = AtomicU32::new(0);
@@ -61,6 +79,7 @@ unsafe extern "C" {
     fn deskkin_nvs_delete(record_id: u16) -> c_int;
     fn deskkin_framebuffer_alloc() -> *mut u16;
     fn deskkin_staging_alloc() -> *mut u16;
+    fn deskkin_allocation_failures() -> u8;
     fn deskkin_display_write(
         x: u16,
         y: u16,
@@ -131,6 +150,15 @@ enum BootError {
     DisplayEnable = 8,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(u8)]
+enum PetBenchmarkState {
+    Idle = 0,
+    Active = 1,
+    Complete = 2,
+    Failed = 3,
+}
+
 fn set_boot_stage(stage: BootStage) {
     BOOT_STAGE.store(stage as u8, Ordering::Release);
     unsafe { deskkin_boot_trace(stage as u8, BootError::None as u8) };
@@ -139,6 +167,109 @@ fn set_boot_stage(stage: BootStage) {
 fn fail_boot(error: BootError) {
     BOOT_ERROR.store(error as u8, Ordering::Release);
     unsafe { deskkin_boot_trace(BOOT_STAGE.load(Ordering::Acquire), error as u8) };
+}
+
+fn reset_pet_benchmark() {
+    for value in [
+        &PET_BENCHMARK_DURATION_MS,
+        &PET_BENCHMARK_UPDATE_REQUESTS,
+        &PET_BENCHMARK_COMPLETED_FRAMES,
+        &PET_BENCHMARK_RENDER_TOTAL_US,
+        &PET_BENCHMARK_TRANSFER_TOTAL_US,
+        &PET_BENCHMARK_RENDER_MAX_US,
+        &PET_BENCHMARK_TRANSFER_MAX_US,
+        &PET_BENCHMARK_WITHIN_BUDGET,
+        &PET_BENCHMARK_STALLS,
+        &PET_BENCHMARK_DEADLINE_MISSES,
+        &PET_BENCHMARK_MAX_CONSECUTIVE_MISSES,
+        &PET_BENCHMARK_DIRTY_LINES,
+        &PET_BENCHMARK_TRANSFERRED_BYTES,
+        &PET_BENCHMARK_DIGEST_UPDATES,
+        &PET_BENCHMARK_TRANSFER_FAILURES,
+    ] {
+        value.store(0, Ordering::Relaxed);
+    }
+    PET_BENCHMARK_ALLOCATION_FAILURES
+        .store(unsafe { deskkin_allocation_failures() }, Ordering::Relaxed);
+    PET_BENCHMARK_STATE.store(PetBenchmarkState::Active as u8, Ordering::Release);
+}
+
+fn publish_pet_benchmark(summary: &deskkin_core_s3::PetBenchmarkSummary, state: PetBenchmarkState) {
+    PET_BENCHMARK_DURATION_MS.store(summary.duration_ms, Ordering::Relaxed);
+    PET_BENCHMARK_UPDATE_REQUESTS.store(summary.update_requests, Ordering::Relaxed);
+    PET_BENCHMARK_COMPLETED_FRAMES.store(summary.completed_frames, Ordering::Relaxed);
+    PET_BENCHMARK_RENDER_TOTAL_US.store(summary.render_total_us, Ordering::Relaxed);
+    PET_BENCHMARK_TRANSFER_TOTAL_US.store(summary.transfer_total_us, Ordering::Relaxed);
+    PET_BENCHMARK_RENDER_MAX_US.store(summary.render_max_us, Ordering::Relaxed);
+    PET_BENCHMARK_TRANSFER_MAX_US.store(summary.transfer_max_us, Ordering::Relaxed);
+    PET_BENCHMARK_WITHIN_BUDGET.store(summary.frames_within_budget, Ordering::Relaxed);
+    PET_BENCHMARK_STALLS.store(u32::from(summary.stalls), Ordering::Relaxed);
+    PET_BENCHMARK_DEADLINE_MISSES.store(u32::from(summary.deadline_misses), Ordering::Relaxed);
+    PET_BENCHMARK_MAX_CONSECUTIVE_MISSES
+        .store(u32::from(summary.max_consecutive_misses), Ordering::Relaxed);
+    PET_BENCHMARK_DIRTY_LINES.store(summary.dirty_lines, Ordering::Relaxed);
+    PET_BENCHMARK_TRANSFERRED_BYTES.store(summary.transferred_bytes, Ordering::Relaxed);
+    PET_BENCHMARK_DIGEST_UPDATES.store(summary.digest_updates, Ordering::Relaxed);
+    PET_BENCHMARK_TRANSFER_FAILURES.store(u32::from(summary.transfer_failures), Ordering::Relaxed);
+    PET_BENCHMARK_ALLOCATION_FAILURES.store(summary.allocation_failures, Ordering::Relaxed);
+    PET_BENCHMARK_STATE.store(state as u8, Ordering::Release);
+}
+
+fn encode_pet_benchmark(output: &mut [u8]) {
+    output[26] = PET_BENCHMARK_STATE.load(Ordering::Acquire);
+    output[27] = PET_BENCHMARK_ALLOCATION_FAILURES.load(Ordering::Relaxed);
+    let transfer_failures = PET_BENCHMARK_TRANSFER_FAILURES
+        .load(Ordering::Relaxed)
+        .try_into()
+        .unwrap_or(u16::MAX);
+    output[28..30].copy_from_slice(&transfer_failures.to_be_bytes());
+    for (range, value) in [
+        (30..34, PET_BENCHMARK_DURATION_MS.load(Ordering::Relaxed)),
+        (
+            34..38,
+            PET_BENCHMARK_UPDATE_REQUESTS.load(Ordering::Relaxed),
+        ),
+        (
+            38..42,
+            PET_BENCHMARK_COMPLETED_FRAMES.load(Ordering::Relaxed),
+        ),
+        (
+            42..46,
+            PET_BENCHMARK_RENDER_TOTAL_US.load(Ordering::Relaxed),
+        ),
+        (
+            46..50,
+            PET_BENCHMARK_TRANSFER_TOTAL_US.load(Ordering::Relaxed),
+        ),
+        (50..54, PET_BENCHMARK_RENDER_MAX_US.load(Ordering::Relaxed)),
+        (
+            54..58,
+            PET_BENCHMARK_TRANSFER_MAX_US.load(Ordering::Relaxed),
+        ),
+        (58..62, PET_BENCHMARK_WITHIN_BUDGET.load(Ordering::Relaxed)),
+        (68..72, PET_BENCHMARK_DIRTY_LINES.load(Ordering::Relaxed)),
+        (
+            72..76,
+            PET_BENCHMARK_TRANSFERRED_BYTES.load(Ordering::Relaxed),
+        ),
+        (76..80, PET_BENCHMARK_DIGEST_UPDATES.load(Ordering::Relaxed)),
+    ] {
+        output[range].copy_from_slice(&value.to_be_bytes());
+    }
+    for (range, value) in [
+        (62..64, PET_BENCHMARK_STALLS.load(Ordering::Relaxed)),
+        (
+            64..66,
+            PET_BENCHMARK_DEADLINE_MISSES.load(Ordering::Relaxed),
+        ),
+        (
+            66..68,
+            PET_BENCHMARK_MAX_CONSECUTIVE_MISSES.load(Ordering::Relaxed),
+        ),
+    ] {
+        let value = value.try_into().unwrap_or(u16::MAX);
+        output[range].copy_from_slice(&value.to_be_bytes());
+    }
 }
 
 struct ZephyrRandom;
@@ -294,6 +425,23 @@ fn transfer_dirty(
         }
     }
     Ok(())
+}
+
+fn dirty_measurement(ranges: &[deskkin_core_s3::DirtyRange; HEIGHT]) -> (u32, u32) {
+    ranges.iter().fold((0_u32, 0_u32), |(lines, bytes), range| {
+        if range.start == range.end {
+            (lines, bytes)
+        } else {
+            (
+                lines.saturating_add(1),
+                bytes.saturating_add(u32::from(range.end - range.start).saturating_mul(2)),
+            )
+        }
+    })
+}
+
+fn elapsed_us(start: u64, end: u64) -> u32 {
+    end.saturating_sub(start).try_into().unwrap_or(u32::MAX)
 }
 
 impl Platform for DevicePlatform {
@@ -1510,6 +1658,7 @@ unsafe extern "C" fn deskkin_rust_control_snapshot(
         deskkin_core_s3::ControlCommand::Status
             | deskkin_core_s3::ControlCommand::IdentityList
             | deskkin_core_s3::ControlCommand::WifiStatus
+            | deskkin_core_s3::ControlCommand::PetBenchmarkStatus
     ) || !control.payload.is_empty()
     {
         return 0;
@@ -1533,6 +1682,10 @@ unsafe extern "C" fn deskkin_rust_control_snapshot(
     if control.command == deskkin_core_s3::ControlCommand::WifiStatus {
         output[26] = CONFIG_PRESENT.load(Ordering::Acquire);
         return 27;
+    }
+    if control.command == deskkin_core_s3::ControlCommand::PetBenchmarkStatus {
+        encode_pet_benchmark(output);
+        return 80;
     }
     output[26] =
         UI_SHELL.load(Ordering::Acquire) | (VALID_RESULT.load(Ordering::Acquire).min(1) << 7);
@@ -1565,12 +1718,18 @@ fn handle_control(frame: deskkin_core_s3::ControlFrame<'_>) -> ServiceStatus {
     }
     match frame.command {
         ControlCommand::IdentityInit if frame.payload.is_empty() => identity_init(),
-        ControlCommand::IdentityList | ControlCommand::WifiStatus | ControlCommand::Status => {
-            ServiceStatus::Success
-        }
+        ControlCommand::IdentityList
+        | ControlCommand::WifiStatus
+        | ControlCommand::Status
+        | ControlCommand::PetBenchmarkStatus => ServiceStatus::Success,
         ControlCommand::WifiProvision => wifi_provision(frame.payload),
         ControlCommand::WifiClear if frame.payload.is_empty() => clear_config(),
         ControlCommand::Run if frame.payload.is_empty() => {
+            if PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Active as u8 {
+                return ServiceStatus::Busy;
+            }
+            PET_BENCHMARK_STATE.store(PetBenchmarkState::Idle as u8, Ordering::Release);
+            APPLICATION_RUNNING.store(1, Ordering::Release);
             let attempt = RUN_ATTEMPT.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
             VALID_RESULT.store(0, Ordering::Release);
             RESULT_ATTEMPT.store(0, Ordering::Release);
@@ -1582,8 +1741,18 @@ fn handle_control(frame: deskkin_core_s3::ControlFrame<'_>) -> ServiceStatus {
             ServiceStatus::Success
         }
         ControlCommand::Shutdown if frame.payload.is_empty() => {
+            APPLICATION_RUNNING.store(0, Ordering::Release);
             UI_ACTION.store(5, Ordering::Release);
             UI_VIEW.store(0, Ordering::Release);
+            ServiceStatus::Success
+        }
+        ControlCommand::PetBenchmarkStart if frame.payload.is_empty() => {
+            if APPLICATION_RUNNING.load(Ordering::Acquire) != 0
+                || PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Active as u8
+            {
+                return ServiceStatus::Busy;
+            }
+            reset_pet_benchmark();
             ServiceStatus::Success
         }
         ControlCommand::IdentityUnpair => identity_unpair(frame.payload),
@@ -1646,6 +1815,9 @@ fn publish_control_completion(
         } else if control.command == deskkin_core_s3::ControlCommand::Run {
             completion[26..30].copy_from_slice(&RUN_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
             completion_length = 30;
+        } else if control.command == deskkin_core_s3::ControlCommand::PetBenchmarkStatus {
+            encode_pet_benchmark(&mut *completion);
+            completion_length = 80;
         }
     }
     let _ = unsafe { deskkin_service_publish_completion(completion.as_ptr(), completion_length) };
@@ -1773,9 +1945,11 @@ extern "C" fn deskkin_rust_service_worker() {
         let action = UI_ACTION.swap(0, Ordering::AcqRel);
         if action == 5 {
             running = false;
+            APPLICATION_RUNNING.store(0, Ordering::Release);
             connection.stop();
         } else if action == 4 {
             running = true;
+            APPLICATION_RUNNING.store(1, Ordering::Release);
             next_attempt_ms = 0;
             connection.restart_after_pairing();
         }
@@ -1788,6 +1962,7 @@ extern "C" fn deskkin_rust_service_worker() {
         let paired = load_identity()
             .is_ok_and(|identity| identity.state == deskkin_core_s3::PeerState::Paired);
         if connection.state() != deskkin_protocol_client::ConnectionState::Stopped
+            && PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Idle as u8
             && (pair_requested || running && paired)
             && now >= next_attempt_ms
         {
@@ -1879,15 +2054,74 @@ async fn run_ui() {
     let mut first_frame = true;
     let mut pet_animator = PetAnimator::new();
     let mut pet_updated_at_ms = Instant::now().as_millis();
+    let mut benchmark_animator = PetAnimator::new();
+    let mut benchmark_summary = deskkin_core_s3::PetBenchmarkSummary::default();
+    let mut benchmark_started_at_us = 0_u64;
+    let mut benchmark_next_deadline_us = 0_u64;
+    let mut benchmark_frame_deadline_us = 0_u64;
+    let mut benchmark_scheduled_frames = 0_u32;
+    let mut benchmark_frame_pending = false;
+    let mut benchmark_previous_digest = 0_u32;
+    let mut benchmark_was_active = false;
     loop {
         slint::platform::update_timers_and_animations();
-        let now_ms = Instant::now().as_millis();
-        let elapsed_ms =
-            u32::try_from(now_ms.saturating_sub(pet_updated_at_ms)).unwrap_or(u32::MAX);
-        pet_updated_at_ms = now_ms;
-        let pet_frame = pet_animator.advance(elapsed_ms);
-        component.set_pet_animation_row(i32::from(pet_frame.row));
-        component.set_pet_frame_index(i32::from(pet_frame.column));
+        let benchmark_active =
+            PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Active as u8;
+        component.set_pet_benchmark_active(benchmark_active);
+        if benchmark_active {
+            let now_us = Instant::now().as_micros();
+            if !benchmark_was_active {
+                benchmark_summary = deskkin_core_s3::PetBenchmarkSummary::default();
+                benchmark_summary.allocation_failures = unsafe { deskkin_allocation_failures() };
+                benchmark_started_at_us = now_us;
+                benchmark_next_deadline_us = now_us;
+                benchmark_scheduled_frames = 0;
+                benchmark_frame_pending = false;
+                benchmark_previous_digest = UI_FRAME_DIGEST.load(Ordering::Acquire);
+                let frame = benchmark_animator
+                    .set_state(deskkin_presentation::PetAnimationState::MoveRight);
+                component.set_pet_animation_row(i32::from(frame.row));
+                component.set_pet_frame_index(i32::from(frame.column));
+            }
+            if now_us >= benchmark_next_deadline_us
+                && benchmark_scheduled_frames < deskkin_core_s3::PET_BENCHMARK_REQUESTS
+            {
+                let remaining = deskkin_core_s3::PET_BENCHMARK_REQUESTS
+                    .saturating_sub(benchmark_scheduled_frames);
+                let due = ((now_us.saturating_sub(benchmark_next_deadline_us)
+                    / deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US)
+                    .saturating_add(1))
+                .min(u64::from(remaining));
+                let due = u32::try_from(due).unwrap_or(remaining);
+                benchmark_summary.request_updates(due);
+                let elapsed_frames = if benchmark_scheduled_frames == 0 {
+                    due.saturating_sub(1)
+                } else {
+                    due
+                };
+                let frame = benchmark_animator.advance(elapsed_frames.saturating_mul(50));
+                component.set_pet_animation_row(i32::from(frame.row));
+                component.set_pet_frame_index(i32::from(frame.column));
+                benchmark_frame_deadline_us = benchmark_next_deadline_us.saturating_add(
+                    u64::from(due.saturating_sub(1))
+                        .saturating_mul(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
+                );
+                benchmark_next_deadline_us = benchmark_next_deadline_us.saturating_add(
+                    u64::from(due).saturating_mul(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
+                );
+                benchmark_scheduled_frames = benchmark_scheduled_frames.saturating_add(due);
+                benchmark_frame_pending = true;
+            }
+        } else {
+            let now_ms = Instant::now().as_millis();
+            let elapsed_ms =
+                u32::try_from(now_ms.saturating_sub(pet_updated_at_ms)).unwrap_or(u32::MAX);
+            pet_updated_at_ms = now_ms;
+            let pet_frame = pet_animator.advance(elapsed_ms);
+            component.set_pet_animation_row(i32::from(pet_frame.row));
+            component.set_pet_frame_index(i32::from(pet_frame.column));
+        }
+        benchmark_was_active = benchmark_active;
         let sas = UI_SAS.load(Ordering::Acquire);
         if sas == u32::MAX {
             component.set_authentication_string("".into());
@@ -1942,20 +2176,46 @@ async fn run_ui() {
             });
         }
         let mut ranges = [deskkin_core_s3::DirtyRange::EMPTY; HEIGHT];
-        window.draw_if_needed(|renderer| {
+        let render_started_us = Instant::now().as_micros();
+        let rendered = window.draw_if_needed(|renderer| {
             renderer.render_by_line(&mut Capture {
                 line: [Rgb565Pixel(0); WIDTH],
                 ranges: &mut ranges,
                 framebuffer: &framebuffer,
             });
         });
+        let render_ended_us = Instant::now().as_micros();
         let changed = ranges.iter().any(|range| range.start != range.end);
+        let (dirty_lines, transferred_bytes) = dirty_measurement(&ranges);
+        let transfer_started_us = Instant::now().as_micros();
         if transfer_dirty(&framebuffer, &ranges).is_err() {
+            if benchmark_active {
+                benchmark_summary.record_transfer_failure();
+                benchmark_summary.duration_ms =
+                    elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
+                publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Failed);
+            }
             fail_boot(BootError::DisplayTransfer);
             return;
         }
+        let transfer_ended_us = Instant::now().as_micros();
         if changed {
-            UI_FRAME_DIGEST.store(framebuffer.digest(), Ordering::Release);
+            let digest = framebuffer.digest();
+            UI_FRAME_DIGEST.store(digest, Ordering::Release);
+            if benchmark_active && benchmark_frame_pending && rendered {
+                benchmark_summary.complete_frame(
+                    elapsed_us(render_started_us, render_ended_us),
+                    elapsed_us(transfer_started_us, transfer_ended_us),
+                    dirty_lines,
+                    transferred_bytes,
+                    digest != benchmark_previous_digest,
+                    transfer_ended_us
+                        > benchmark_frame_deadline_us
+                            .saturating_add(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
+                );
+                benchmark_previous_digest = digest;
+                benchmark_frame_pending = false;
+            }
             if VALID_RESULT.load(Ordering::Acquire) == 1 {
                 FRAME_ATTEMPT.store(RESULT_ATTEMPT.load(Ordering::Acquire), Ordering::Release);
                 LAST_STAGE.store(8, Ordering::Release);
@@ -1968,6 +2228,16 @@ async fn run_ui() {
             }
             first_frame = false;
             set_boot_stage(BootStage::FirstFrameReady);
+        }
+        if benchmark_active
+            && Instant::now().as_micros()
+                >= benchmark_started_at_us
+                    .saturating_add(u64::from(deskkin_core_s3::PET_BENCHMARK_DURATION_MS) * 1_000)
+            && benchmark_scheduled_frames == deskkin_core_s3::PET_BENCHMARK_REQUESTS
+        {
+            benchmark_summary.duration_ms =
+                elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
+            publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Complete);
         }
         embassy_time::Timer::after_millis(10).await;
     }

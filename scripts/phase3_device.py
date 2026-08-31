@@ -35,7 +35,12 @@ COMMANDS = {
     "run": 7,
     "status": 8,
     "shutdown": 9,
+    "pet-benchmark-start": 10,
+    "pet-benchmark-status": 11,
 }
+
+PET_BENCHMARK_DURATION_SECONDS = 60.0
+PET_BENCHMARK_REQUESTS = 1_200
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -366,9 +371,9 @@ def exchange_once(device: Path, frame: bytearray, startup_delay: float, response
 
 
 def exchange(device: Path, frame: bytearray, recover_status_transport: bool = True) -> bytes:
-    if frame[3] == COMMANDS["status"] and not recover_status_transport:
+    if frame[3] in {COMMANDS["status"], COMMANDS["pet-benchmark-status"]} and not recover_status_transport:
         return exchange_once(device, frame, 0.0, 2.0)
-    if frame[3] != COMMANDS["status"]:
+    if frame[3] not in {COMMANDS["status"], COMMANDS["pet-benchmark-status"]}:
         return exchange_once(device, frame, 0.25, 2.0)
     # A flash/reset can leave USB Serial/JTAG visible before its device-side RX
     # service is ready.  Send immediately first, then reopen the tty for a
@@ -438,7 +443,7 @@ def run_control(
 ) -> bytes:
     device = discover_device(device_arg)
     generation = 0
-    if command in {"identity-init", "identity-unpair", "wifi-provision", "wifi-clear", "run", "shutdown"}:
+    if command in {"identity-init", "identity-unpair", "wifi-provision", "wifi-clear", "run", "shutdown", "pet-benchmark-start"}:
         status_frame = control_frame("status", 0)
         try:
             status = exchange(device, status_frame, recover_status_transport)
@@ -786,6 +791,84 @@ def run_succeeded(records: list[dict[str, object]], expected_attempt: int) -> bo
     )
 
 
+def decode_pet_benchmark(status: bytes) -> dict[str, int]:
+    if len(status) != 80 or status[0] != SCHEMA or status[1] != 0:
+        raise DeviceError("control_invalid")
+
+    def unsigned(start: int, end: int) -> int:
+        return int.from_bytes(status[start:end], "big")
+
+    return {
+        "state": status[26],
+        "allocation_failures": status[27],
+        "display_transfer_failures": unsigned(28, 30),
+        "duration_ms": unsigned(30, 34),
+        "animation_update_requests": unsigned(34, 38),
+        "completed_frames": unsigned(38, 42),
+        "render_total_us": unsigned(42, 46),
+        "display_transfer_total_us": unsigned(46, 50),
+        "render_max_us": unsigned(50, 54),
+        "display_transfer_max_us": unsigned(54, 58),
+        "frames_within_50ms": unsigned(58, 62),
+        "stalls_over_250ms": unsigned(62, 64),
+        "deadline_misses": unsigned(64, 66),
+        "max_consecutive_misses": unsigned(66, 68),
+        "dirty_lines": unsigned(68, 72),
+        "transferred_bytes": unsigned(72, 76),
+        "frame_digest_updates": unsigned(76, 80),
+    }
+
+
+def pet_benchmark_passed(summary: dict[str, int]) -> bool:
+    completed = summary["completed_frames"]
+    return (
+        summary["state"] == 2
+        and 60_000 <= summary["duration_ms"] <= 60_500
+        and summary["animation_update_requests"] == PET_BENCHMARK_REQUESTS
+        and completed == PET_BENCHMARK_REQUESTS
+        and summary["frames_within_50ms"] * 100 >= completed * 95
+        and summary["stalls_over_250ms"] == 0
+        and summary["allocation_failures"] == 0
+        and summary["display_transfer_failures"] == 0
+        and summary["frame_digest_updates"] > 0
+    )
+
+
+def pet_benchmark_record(summary: dict[str, int], passed: bool) -> dict[str, object]:
+    completed = summary["completed_frames"]
+    return {
+        "operation": "pet_render_benchmark",
+        "operation_id": 1,
+        "parent_operation_id": None,
+        "status": "success" if passed else "error",
+        "error_type": None if passed else "benchmark_gate_failed",
+        "effect_id": None,
+        "virtual_time_ms": 0,
+        "end_virtual_time_ms": summary["duration_ms"],
+        "duration_ms": summary["duration_ms"],
+        "render_width": 320,
+        "render_height": 240,
+        "value": "pass" if passed else "fail",
+        **summary,
+        "render_mean_us": summary["render_total_us"] // completed if completed else None,
+        "display_transfer_mean_us": summary["display_transfer_total_us"] // completed if completed else None,
+    }
+
+
+def await_pet_benchmark(device_arg: str | None) -> dict[str, int]:
+    time.sleep(PET_BENCHMARK_DURATION_SECONDS + 0.5)
+    deadline = time.monotonic() + 5.0
+    while True:
+        summary = decode_pet_benchmark(
+            run_control("pet-benchmark-status", device_arg, recover_status_transport=False)
+        )
+        if summary["state"] in {2, 3}:
+            return summary
+        if summary["state"] != 1 or time.monotonic() >= deadline:
+            raise DeviceError("benchmark_timeout")
+        time.sleep(0.1)
+
+
 def action_record(action: str, status: str, error_type: str | None = None) -> dict[str, object]:
     operation = {
         "profile": "control_route",
@@ -795,6 +878,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
         "provision": "nvs_publication",
         "status": "device_ui",
         "run": "device_ui",
+        "benchmark": "pet_render_benchmark",
         "recover": "nvs_publication",
     }[action]
     return {
@@ -815,7 +899,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "run", "recover"))
+    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
     parser.add_argument("identity_action", nargs="?")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--age-identity", type=Path)
@@ -888,6 +972,15 @@ def main() -> int:
             records = monitor_device(args.device, args.duration_seconds, expected_attempt)
             if not run_succeeded(records, expected_attempt):
                 raise DeviceError("availability_timeout")
+        elif args.action == "benchmark":
+            run_control("shutdown", args.device)
+            run_control("pet-benchmark-start", args.device)
+            summary = await_pet_benchmark(args.device)
+            passed = pet_benchmark_passed(summary)
+            records = [pet_benchmark_record(summary, passed)]
+            print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
+            if not passed:
+                raise DeviceError("benchmark_gate_failed")
         result = "success"
         exit_code = 0
     except (DeviceError, OSError, subprocess.SubprocessError, UnicodeError, ValueError) as error:
@@ -903,6 +996,8 @@ def main() -> int:
             "tcp_connect",
             "noise",
             "availability_timeout",
+            "benchmark_gate_failed",
+            "benchmark_timeout",
         } else None if boot_failure else "store_failed"
         print(message, file=sys.stderr)
     if not records:

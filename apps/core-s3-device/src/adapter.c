@@ -19,6 +19,7 @@
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/atomic.h>
 
 #include "dhcp_wait.h"
 
@@ -58,6 +59,7 @@ static uint32_t touch_generation;
 static uint32_t consumed_touch_generation;
 static uint16_t *framebuffer;
 static uint16_t *staging;
+static atomic_t allocation_failures;
 
 extern void rust_main(void);
 extern void deskkin_rust_service_worker(void);
@@ -65,7 +67,17 @@ extern void deskkin_rust_set_boot_status(uint8_t stage, uint8_t error);
 extern size_t deskkin_rust_control_snapshot(const uint8_t *input, size_t input_length,
 						   uint8_t *output);
 uint16_t *deskkin_framebuffer_alloc(void);
+uint8_t deskkin_allocation_failures(void);
 static void display_boot_stage(uint8_t stage, uint8_t error);
+
+static void record_allocation_failure(void)
+{
+	atomic_val_t current = atomic_get(&allocation_failures);
+	while (current < UINT8_MAX &&
+	       !atomic_cas(&allocation_failures, current, current + 1)) {
+		current = atomic_get(&allocation_failures);
+	}
+}
 
 static void publish_boot_status(uint8_t stage, uint8_t error)
 {
@@ -154,6 +166,8 @@ uint16_t *deskkin_framebuffer_alloc(void)
 							      FRAMEBUFFER_BYTES);
 		if (framebuffer != NULL) {
 			memset(framebuffer, 0, FRAMEBUFFER_BYTES);
+		} else {
+			record_allocation_failure();
 		}
 	}
 	return framebuffer;
@@ -164,8 +178,16 @@ uint16_t *deskkin_staging_alloc(void)
 	if (staging == NULL) {
 		staging = shared_multi_heap_aligned_alloc(SMH_REG_ATTR_EXTERNAL, 32,
 							  FRAMEBUFFER_BYTES);
+		if (staging == NULL) {
+			record_allocation_failure();
+		}
 	}
 	return staging;
+}
+
+uint8_t deskkin_allocation_failures(void)
+{
+	return (uint8_t)atomic_get(&allocation_failures);
 }
 
 int deskkin_display_write(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
@@ -382,7 +404,8 @@ static void control_entry(void *first, void *second, void *third)
 			continue;
 		}
 		struct k_msgq *queue = frame.bytes[1] == 9 ? &reserved_control : &application_commands;
-		if (frame.bytes[1] == 2 || frame.bytes[1] == 5 || frame.bytes[1] == 8) {
+		if (frame.bytes[1] == 2 || frame.bytes[1] == 5 || frame.bytes[1] == 8 ||
+		    frame.bytes[1] == 11) {
 			struct bounded_completion completion;
 			completion.length = deskkin_rust_control_snapshot(frame.bytes, frame.length,
 								   completion.bytes);

@@ -15,8 +15,10 @@ baseline. See [`docs/architecture.md`](docs/architecture.md) and
 The shared Pet-presentation baseline includes a normalized embedded Koyori
 atlas, a pure `no_std` animation model for `Idle`, `MoveLeft`, `MoveRight`, and
 `Attend`, and one Slint Pet surface used by the simulator and CoreS3 firmware.
-The clean CoreS3 build fits this surface, but no physical-device animation or
-display-transfer performance has been established.
+The CoreS3 firmware and host runner now include a fixed 60-second, 20 FPS
+Pet-only rendering benchmark with bounded timing and counter diagnostics. The
+clean CoreS3 build and host conformance tests pass, but no physical-device
+animation or display-transfer performance has been established.
 
 No external provider connector is implemented. The deterministic availability
 connector does not access an external service.
@@ -27,8 +29,7 @@ None.
 
 ## Next work
 
-The next planned slice is the bounded CoreS3 Pet rendering benchmark. Flashing
-and running it remain separate explicit approvals for a named physical device;
-the benchmark must establish the 20 FPS result on CoreS3 rather than using
-simulator timing. Fixed-world, parallax, Notice, IMU, and servo work remain
-behind that performance gate.
+After naming and inspecting the target device, obtain explicit approval to
+flash the benchmark-capable firmware. Obtain a separate explicit approval to
+run the 60-second Pet benchmark. Fixed-world, parallax, Notice, IMU, and servo
+work remain behind the physical performance gate.

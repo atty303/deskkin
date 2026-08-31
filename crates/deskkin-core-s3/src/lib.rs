@@ -10,6 +10,11 @@ pub const APPLICATION_QUEUE_CAPACITY: usize = 4;
 pub const RESERVED_CONTROL_CAPACITY: usize = 1;
 pub const COMPLETION_QUEUE_CAPACITY: usize = 8;
 pub const HOST_PORT: u16 = 39_042;
+pub const PET_BENCHMARK_DURATION_MS: u32 = 60_000;
+pub const PET_BENCHMARK_FRAME_PERIOD_US: u64 = 50_000;
+pub const PET_BENCHMARK_REQUESTS: u32 = 1_200;
+pub const PET_BENCHMARK_FRAME_BUDGET_US: u32 = 50_000;
+pub const PET_BENCHMARK_STALL_US: u32 = 250_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirtyRange {
@@ -28,6 +33,77 @@ impl DirtyRange {
             self.start = self.start.min(start);
             self.end = self.end.max(end);
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PetBenchmarkSummary {
+    pub duration_ms: u32,
+    pub update_requests: u32,
+    pub completed_frames: u32,
+    pub render_total_us: u32,
+    pub transfer_total_us: u32,
+    pub render_max_us: u32,
+    pub transfer_max_us: u32,
+    pub frames_within_budget: u32,
+    pub stalls: u16,
+    pub deadline_misses: u16,
+    pub max_consecutive_misses: u16,
+    pub dirty_lines: u32,
+    pub transferred_bytes: u32,
+    pub digest_updates: u32,
+    pub allocation_failures: u8,
+    pub transfer_failures: u16,
+    consecutive_misses: u16,
+}
+
+impl PetBenchmarkSummary {
+    pub fn request_updates(&mut self, count: u32) {
+        self.update_requests = self.update_requests.saturating_add(count);
+        self.record_misses(count.saturating_sub(1));
+    }
+
+    pub fn complete_frame(
+        &mut self,
+        render_us: u32,
+        transfer_us: u32,
+        dirty_lines: u32,
+        transferred_bytes: u32,
+        digest_changed: bool,
+        deadline_missed: bool,
+    ) {
+        self.completed_frames = self.completed_frames.saturating_add(1);
+        self.render_total_us = self.render_total_us.saturating_add(render_us);
+        self.transfer_total_us = self.transfer_total_us.saturating_add(transfer_us);
+        self.render_max_us = self.render_max_us.max(render_us);
+        self.transfer_max_us = self.transfer_max_us.max(transfer_us);
+        if render_us.saturating_add(transfer_us) <= PET_BENCHMARK_FRAME_BUDGET_US {
+            self.frames_within_budget = self.frames_within_budget.saturating_add(1);
+        }
+        if render_us.saturating_add(transfer_us) > PET_BENCHMARK_STALL_US {
+            self.stalls = self.stalls.saturating_add(1);
+        }
+        self.dirty_lines = self.dirty_lines.saturating_add(dirty_lines);
+        self.transferred_bytes = self.transferred_bytes.saturating_add(transferred_bytes);
+        self.digest_updates = self
+            .digest_updates
+            .saturating_add(u32::from(digest_changed));
+        if deadline_missed {
+            self.record_misses(1);
+        } else {
+            self.consecutive_misses = 0;
+        }
+    }
+
+    pub fn record_transfer_failure(&mut self) {
+        self.transfer_failures = self.transfer_failures.saturating_add(1);
+    }
+
+    fn record_misses(&mut self, count: u32) {
+        let count = u16::try_from(count).unwrap_or(u16::MAX);
+        self.deadline_misses = self.deadline_misses.saturating_add(count);
+        self.consecutive_misses = self.consecutive_misses.saturating_add(count);
+        self.max_consecutive_misses = self.max_consecutive_misses.max(self.consecutive_misses);
     }
 }
 
@@ -241,6 +317,8 @@ pub enum ControlCommand {
     Run = 7,
     Status = 8,
     Shutdown = 9,
+    PetBenchmarkStart = 10,
+    PetBenchmarkStatus = 11,
 }
 
 impl TryFrom<u8> for ControlCommand {
@@ -257,6 +335,8 @@ impl TryFrom<u8> for ControlCommand {
             7 => Ok(Self::Run),
             8 => Ok(Self::Status),
             9 => Ok(Self::Shutdown),
+            10 => Ok(Self::PetBenchmarkStart),
+            11 => Ok(Self::PetBenchmarkStatus),
             _ => Err(DecodeError::UnknownCommand),
         }
     }
@@ -466,5 +546,28 @@ mod tests {
         assert_eq!(overlapping, separated);
 
         assert_eq!(DirtyRange::EMPTY, DirtyRange { start: 0, end: 0 });
+    }
+
+    #[test]
+    fn pet_benchmark_summary_tracks_budget_misses_and_bounded_counters() {
+        let mut summary = PetBenchmarkSummary::default();
+        summary.request_updates(3);
+        summary.complete_frame(20_000, 20_000, 240, 153_600, true, true);
+        summary.complete_frame(30_000, 25_000, 120, 76_800, false, false);
+        summary.complete_frame(200_000, 60_000, 1, 2, true, false);
+        summary.record_transfer_failure();
+
+        assert_eq!(summary.update_requests, 3);
+        assert_eq!(summary.completed_frames, 3);
+        assert_eq!(summary.frames_within_budget, 1);
+        assert_eq!(summary.deadline_misses, 3);
+        assert_eq!(summary.max_consecutive_misses, 3);
+        assert_eq!(summary.stalls, 1);
+        assert_eq!(summary.dirty_lines, 361);
+        assert_eq!(summary.transferred_bytes, 230_402);
+        assert_eq!(summary.digest_updates, 2);
+        assert_eq!(summary.transfer_failures, 1);
+        assert_eq!(summary.render_max_us, 200_000);
+        assert_eq!(summary.transfer_max_us, 60_000);
     }
 }
