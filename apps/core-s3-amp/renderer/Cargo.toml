@@ -16,6 +16,8 @@ name = "rustapp"
 crate-type = ["staticlib"]
 
 [dependencies]
+deskkin-presentation = { path = "../../../crates/deskkin-presentation" }
+qoi = { version = "=0.4.1", default-features = false }
 slint = { version = "=1.17.1", default-features = false, features = ["compat-1-2", "renderer-software", "unsafe-single-threaded", "libm"] }
 zephyr = "=0.1.0"
 

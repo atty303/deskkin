@@ -280,15 +280,24 @@ class Phase3DeviceTests(unittest.TestCase):
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
         source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
         self.assertIn("CONFIG_ESP_SPIRAM=y", config)
-        self.assertIn("CONFIG_ESP_SPIRAM_HEAP_SIZE=1048576", config)
+        self.assertIn("CONFIG_ESP_SPIRAM_HEAP_SIZE=4194304", config)
         self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
         self.assertIn("CONFIG_SPIRAM_MODE_QUAD=y", config)
         self.assertIn("CONFIG_SPIRAM_SPEED_80M=y", config)
         self.assertIn("internal_framebuffer[2U][320U * 240U]", source)
         self.assertNotIn("external_framebuffer", source)
         self.assertIn("esp_psram_get_mapped_region", source)
+        self.assertIn("mapped_heap_size / 2U < CONFIG_ESP_SPIRAM_HEAP_SIZE", source)
         self.assertIn("mapped_heap_size - renderer_heap_size", source)
         self.assertIn("cache_ll_l1_enable_bus(1, appcpu_bus)", source)
+
+        renderer_config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--slot-size 0x200000"',
+            renderer_config,
+        )
 
     def test_amp_renderer_swaps_full_frames_without_reuse_overlap(self):
         config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(encoding="utf-8")
@@ -322,6 +331,40 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
         self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
         self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=1024", config)
+
+    def test_koyori_qoi_loop_assets_have_closed_native_geometry(self):
+        asset_root = ROOT / "assets/pets/koyori"
+        expected = {
+            "idle.qoi": (864, 156),
+            "move-right.qoi": (1152, 156),
+            "move-left.qoi": (1152, 156),
+            "attend.qoi": (864, 156),
+        }
+        self.assertFalse((asset_root / "atlas.png").exists())
+        for name, dimensions in expected.items():
+            header = (asset_root / name).read_bytes()[:14]
+            self.assertEqual(header[:4], b"qoif")
+            self.assertEqual(
+                (int.from_bytes(header[4:8], "big"), int.from_bytes(header[8:12], "big")),
+                dimensions,
+            )
+            self.assertEqual(header[12], 4)
+
+    def test_amp_renderer_releases_active_loop_before_direct_qoi_decode(self):
+        renderer = (ROOT / "apps/core-s3-amp/renderer/src/lib.rs").read_text(encoding="utf-8")
+        release = renderer.index("component.set_pet_atlas(Image::default())")
+        decode = renderer.index("let image = decode_loop", release)
+        install = renderer.index("component.set_pet_atlas(image)", decode)
+        redraw = renderer.index("component.set_pet_frame_index(0)", install)
+        self.assertLess(release, decode)
+        self.assertLess(decode, install)
+        self.assertLess(install, redraw)
+        self.assertIn("decode_to_buf(pixels.make_mut_bytes())", renderer)
+        self.assertIn("RendererStage::AssetLoading", renderer)
+        self.assertIn("RendererStage::AssetReady", renderer)
+        self.assertIn("RendererFault::QoiHeader", renderer)
+        self.assertIn("RendererFault::QoiMetadata", renderer)
+        self.assertIn("RendererFault::QoiDecode", renderer)
 
     def test_amp_buffer_ownership_requires_completion_before_reuse(self):
         source = ROOT / "apps/core-s3-amp/renderer/src/buffer_ownership.rs"

@@ -70,7 +70,7 @@ separate crate only when it has a materially independent dependency or reuse
 boundary. Dynamic device plugins are not supported.
 
 `deskkin-presentation` is allocation-free `no_std` Rust. It owns only the
-presentation-time Pet animation state and normalized atlas coordinates. It is
+presentation-time Pet animation state and normalized loop/frame coordinates. It is
 not a character domain model and does not own application semantics, assets,
 Slint properties, clocks, or hardware motion. UI owners supply elapsed time and
 adapt its closed frame result to the shared Slint Pet surface.
@@ -81,9 +81,9 @@ Slint is the shared declarative UI. One owner controls each Slint instance.
 Runtime tasks and callbacks exchange typed application inputs and views with
 that owner rather than mutating UI state directly.
 
-The embedded Koyori skin is a normalized four-state presentation asset. Its
+The embedded Koyori skin is four normalized horizontal QOI loop atlases. Its
 Codex Pet JSON and WebP source are not runtime inputs. The simulator and CoreS3
-compile the same Slint crop geometry; only a physical CoreS3 benchmark can make
+use the same native 144×156 Slint crop geometry; only a physical CoreS3 benchmark can make
 claims about sustained rendering rate or display-transfer latency.
 
 The CoreS3 Pet benchmark is a fixed 60-second device operation. It stops the
@@ -102,7 +102,7 @@ USB control, boot/status supervision, LCD power/reset/backlight, and two static
 full-screen internal-SRAM RGB565 framebuffers. PROCPU initializes and maps a
 bounded Quad-PSRAM allocation region once before starting APPCPU, then enables
 the second core's cache bus and publishes that region. APPCPU owns the heap
-metadata and uses the dedicated high-end 1 MiB region only for Slint dynamic
+metadata and uses the dedicated high-end 4 MiB region only for Slint dynamic
 allocations; it is disjoint from PROCPU's registered external heap. APPCPU
 exclusively owns Slint software rendering, SPI2, GDMA, and LCD transfer. The
 kernels exchange bounded publication metadata through shared memory;
@@ -110,8 +110,12 @@ pixel contents are never message payloads and SPI2 has one CPU owner.
 Heartbeat snapshots use an explicit unstable marker and matching generations
 so the supervisor never accepts a payload while APPCPU is rewriting it.
 
-The atlas-free physical pipeline uses unthrottled rendering into two complete
-320×240 internal-SRAM framebuffers. Slint `SwappedBuffers` reports the region
+The physical pipeline keeps compressed QOI bytes in flash and only the active
+decoded loop in PSRAM. A loop transition clears the Slint image owner, decodes
+the next QOI directly into its final RGBA buffer, installs it, and only then
+requests a draw. Idle and Attend advance every 100 ms; MoveRight and MoveLeft
+advance every 50 ms. Rendering uses two complete 320×240 internal-SRAM
+framebuffers. Slint `SwappedBuffers` reports the region
 changed across the two-buffer repaint history; the adapter transfers its
 bounding rectangle directly from the full-frame stride. The ESP32 MIPI-DBI
 driver gathers the selected row spans into GDMA descriptors without a bounce

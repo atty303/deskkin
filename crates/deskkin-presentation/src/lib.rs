@@ -12,7 +12,7 @@ pub enum PetAnimationState {
 
 impl PetAnimationState {
     #[must_use]
-    pub const fn atlas_row(self) -> u8 {
+    pub const fn loop_index(self) -> u8 {
         match self {
             Self::Idle => 0,
             Self::MoveRight => 1,
@@ -38,18 +38,18 @@ impl PetAnimationState {
     }
 }
 
-/// One cell in the normalized 8-column Pet atlas.
+/// One frame in a normalized Pet animation loop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PetFrame {
-    pub row: u8,
-    pub column: u8,
+    pub state: PetAnimationState,
+    pub index: u8,
 }
 
 /// Deterministic, allocation-free Pet animation state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PetAnimator {
     state: PetAnimationState,
-    column: u8,
+    index: u8,
     elapsed_in_frame_ms: u32,
 }
 
@@ -64,7 +64,7 @@ impl PetAnimator {
     pub const fn new() -> Self {
         Self {
             state: PetAnimationState::Idle,
-            column: 0,
+            index: 0,
             elapsed_in_frame_ms: 0,
         }
     }
@@ -77,8 +77,8 @@ impl PetAnimator {
     #[must_use]
     pub const fn frame(self) -> PetFrame {
         PetFrame {
-            row: self.state.atlas_row(),
-            column: self.column,
+            state: self.state,
+            index: self.index,
         }
     }
 
@@ -86,7 +86,7 @@ impl PetAnimator {
     pub fn set_state(&mut self, state: PetAnimationState) -> PetFrame {
         if self.state != state {
             self.state = state;
-            self.column = 0;
+            self.index = 0;
             self.elapsed_in_frame_ms = 0;
         }
         self.frame()
@@ -98,8 +98,8 @@ impl PetAnimator {
         let total = u64::from(self.elapsed_in_frame_ms) + u64::from(elapsed_ms);
         let steps = total / period;
         self.elapsed_in_frame_ms = u32::try_from(total % period).unwrap_or_default();
-        self.column =
-            u8::try_from((u64::from(self.column) + steps) % u64::from(self.state.frame_count()))
+        self.index =
+            u8::try_from((u64::from(self.index) + steps) % u64::from(self.state.frame_count()))
                 .unwrap_or_default();
         self.frame()
     }
@@ -110,11 +110,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn states_map_to_closed_atlas_rows_and_frame_counts() {
-        assert_eq!(PetAnimationState::Idle.atlas_row(), 0);
-        assert_eq!(PetAnimationState::MoveRight.atlas_row(), 1);
-        assert_eq!(PetAnimationState::MoveLeft.atlas_row(), 2);
-        assert_eq!(PetAnimationState::Attend.atlas_row(), 3);
+    fn states_map_to_closed_loop_indices_and_frame_counts() {
+        assert_eq!(PetAnimationState::Idle.loop_index(), 0);
+        assert_eq!(PetAnimationState::MoveRight.loop_index(), 1);
+        assert_eq!(PetAnimationState::MoveLeft.loop_index(), 2);
+        assert_eq!(PetAnimationState::Attend.loop_index(), 3);
         assert_eq!(PetAnimationState::Idle.frame_count(), 6);
         assert_eq!(PetAnimationState::MoveRight.frame_count(), 8);
         assert_eq!(PetAnimationState::MoveLeft.frame_count(), 8);
@@ -126,35 +126,44 @@ mod tests {
         let mut animator = PetAnimator::new();
         assert_eq!(
             animator.set_state(PetAnimationState::MoveRight),
-            PetFrame { row: 1, column: 0 }
+            PetFrame {
+                state: PetAnimationState::MoveRight,
+                index: 0,
+            }
         );
-        assert_eq!(animator.advance(49).column, 0);
-        assert_eq!(animator.advance(1).column, 1);
-        assert_eq!(animator.advance(350).column, 0);
+        assert_eq!(animator.advance(49).index, 0);
+        assert_eq!(animator.advance(1).index, 1);
+        assert_eq!(animator.advance(350).index, 0);
     }
 
     #[test]
     fn ambient_states_advance_at_ten_frames_per_second() {
         let mut animator = PetAnimator::new();
-        assert_eq!(animator.advance(99).column, 0);
-        assert_eq!(animator.advance(1).column, 1);
+        assert_eq!(animator.advance(99).index, 0);
+        assert_eq!(animator.advance(1).index, 1);
         assert_eq!(
             animator.set_state(PetAnimationState::Attend),
-            PetFrame { row: 3, column: 0 }
+            PetFrame {
+                state: PetAnimationState::Attend,
+                index: 0,
+            }
         );
-        assert_eq!(animator.advance(600).column, 0);
+        assert_eq!(animator.advance(600).index, 0);
     }
 
     #[test]
     fn changing_state_resets_frame_and_partial_time() {
         let mut animator = PetAnimator::new();
-        assert_eq!(animator.advance(150).column, 1);
+        assert_eq!(animator.advance(150).index, 1);
         assert_eq!(
             animator.set_state(PetAnimationState::MoveLeft),
-            PetFrame { row: 2, column: 0 }
+            PetFrame {
+                state: PetAnimationState::MoveLeft,
+                index: 0,
+            }
         );
-        assert_eq!(animator.advance(49).column, 0);
-        assert_eq!(animator.advance(1).column, 1);
+        assert_eq!(animator.advance(49).index, 0);
+        assert_eq!(animator.advance(1).index, 1);
     }
 
     #[test]
@@ -162,10 +171,13 @@ mod tests {
         let mut animator = PetAnimator::new();
         assert_eq!(
             animator.set_state(PetAnimationState::MoveLeft),
-            PetFrame { row: 2, column: 0 }
+            PetFrame {
+                state: PetAnimationState::MoveLeft,
+                index: 0,
+            }
         );
         let frame = animator.advance(u32::MAX);
-        assert_eq!(frame.row, 2);
-        assert!(frame.column < PetAnimationState::MoveLeft.frame_count());
+        assert_eq!(frame.state, PetAnimationState::MoveLeft);
+        assert!(frame.index < PetAnimationState::MoveLeft.frame_count());
     }
 }

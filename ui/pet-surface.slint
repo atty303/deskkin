@@ -1,5 +1,5 @@
 export component PetSurface inherits Rectangle {
-    in property <int> animation-row: 0;
+    in property <image> atlas;
     in property <int> frame-index: 0;
     in property <bool> benchmark-active: false;
     in property <int> benchmark-frame: 0;
@@ -55,9 +55,9 @@ export component PetSurface inherits Rectangle {
         y: (parent.height - self.height) / 2;
         width: 144px;
         height: 156px;
-        source: @image-url("../assets/pets/koyori/atlas.png");
+        source: root.atlas;
         source-clip-x: root.frame-index * 144;
-        source-clip-y: root.animation-row * 156;
+        source-clip-y: 0;
         source-clip-width: 144;
         source-clip-height: 156;
         image-fit: contain;

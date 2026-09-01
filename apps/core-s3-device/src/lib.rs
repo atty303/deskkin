@@ -2115,8 +2115,8 @@ async fn run_ui() {
                 component.set_benchmark_frame(0);
                 let frame = benchmark_animator
                     .set_state(deskkin_presentation::PetAnimationState::MoveRight);
-                component.set_pet_animation_row(i32::from(frame.row));
-                component.set_pet_frame_index(i32::from(frame.column));
+                component.set_pet_animation_state(i32::from(frame.state.loop_index()));
+                component.set_pet_frame_index(i32::from(frame.index));
             }
             if now_us >= benchmark_next_deadline_us
                 && benchmark_scheduled_frames < deskkin_core_s3::PET_BENCHMARK_REQUESTS
@@ -2135,8 +2135,8 @@ async fn run_ui() {
                     due
                 };
                 let frame = benchmark_animator.advance(elapsed_frames.saturating_mul(50));
-                component.set_pet_animation_row(i32::from(frame.row));
-                component.set_pet_frame_index(i32::from(frame.column));
+                component.set_pet_animation_state(i32::from(frame.state.loop_index()));
+                component.set_pet_frame_index(i32::from(frame.index));
                 benchmark_frame_deadline_us = benchmark_next_deadline_us.saturating_add(
                     u64::from(due.saturating_sub(1))
                         .saturating_mul(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
@@ -2156,8 +2156,8 @@ async fn run_ui() {
                 u32::try_from(now_ms.saturating_sub(pet_updated_at_ms)).unwrap_or(u32::MAX);
             pet_updated_at_ms = now_ms;
             let pet_frame = pet_animator.advance(elapsed_ms);
-            component.set_pet_animation_row(i32::from(pet_frame.row));
-            component.set_pet_frame_index(i32::from(pet_frame.column));
+            component.set_pet_animation_state(i32::from(pet_frame.state.loop_index()));
+            component.set_pet_frame_index(i32::from(pet_frame.index));
         }
         benchmark_was_active = benchmark_active;
         let sas = UI_SAS.load(Ordering::Acquire);

@@ -254,7 +254,7 @@ int main(void)
 	intptr_t mapped_heap = 0;
 	size_t mapped_heap_size = 0;
 	if (esp_psram_get_mapped_region(&mapped_heap, &mapped_heap_size) != 0 ||
-	    mapped_heap == 0 || mapped_heap_size < CONFIG_ESP_SPIRAM_HEAP_SIZE) {
+	    mapped_heap == 0 || mapped_heap_size / 2U < CONFIG_ESP_SPIRAM_HEAP_SIZE) {
 		atomic_set(&boot_error, 5);
 		return 1;
 	}

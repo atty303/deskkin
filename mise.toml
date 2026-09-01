@@ -143,11 +143,11 @@ description = "Build the CoreS3 firmware without touching a device"
 run = "python scripts/phase3_device.py build"
 
 [tasks."core-s3:amp-build"]
-description = "Build the atlas-free CoreS3 AMP rendering pipeline firmware"
+description = "Build the CoreS3 AMP Koyori QOI rendering pipeline firmware"
 run = "python scripts/phase3_device.py amp-build"
 
 [tasks."core-s3:amp-flash"]
-description = "Flash the atlas-free CoreS3 AMP rendering pipeline firmware"
+description = "Flash the CoreS3 AMP Koyori QOI rendering pipeline firmware"
 run = "python scripts/phase3_device.py amp-flash"
 
 [tasks."core-s3:amp-benchmark"]

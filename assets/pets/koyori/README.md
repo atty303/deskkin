@@ -1,10 +1,10 @@
 # Koyori Pet skin
 
-This is a normalized, embedded presentation asset derived from the project
+These are normalized, embedded presentation assets derived from the project
 owner's custom Codex Pet v2 skin. The source Codex manifest and WebP sheet are
 not runtime inputs.
 
-`atlas.png` is an 8-column by 4-row RGBA atlas. Each cell is 144 by 156 pixels.
-Rows are `Idle` (6 frames), `MoveRight` (8), `MoveLeft` (8), and `Attend` (6).
-Unused cells are transparent. The shared Slint surface displays a cell at 192
-by 208 pixels.
+Each QOI file contains one horizontal RGBA animation loop with 144 by 156 pixel
+cells: `idle.qoi` and `attend.qoi` contain 6 frames; `move-right.qoi` and
+`move-left.qoi` contain 8 frames. The shared Slint surface displays cells at
+their native 144 by 156 pixel size.

@@ -16,10 +16,17 @@ export component DeviceWindow inherits Window {
     in-out property <bool> notice-visible: false;
     in-out property <string> notice-text: "";
     in-out property <string> authentication-string: "";
-    in-out property <int> pet-animation-row: 0;
+    in-out property <int> pet-animation-state: 0;
     in-out property <int> pet-frame-index: 0;
     in-out property <bool> pet-benchmark-active: false;
     in-out property <int> benchmark-frame: 0;
+    property <image> pet-atlas: root.pet-animation-state == 0
+        ? @image-url("../../../assets/pets/koyori/idle.qoi")
+        : root.pet-animation-state == 1
+            ? @image-url("../../../assets/pets/koyori/move-right.qoi")
+            : root.pet-animation-state == 2
+                ? @image-url("../../../assets/pets/koyori/move-left.qoi")
+                : @image-url("../../../assets/pets/koyori/attend.qoi");
     property <bool> companion-visible: root.pet-benchmark-active || (root.shell-state == "Paired" && root.authentication-string == "");
     callback pair();
     callback confirm();
@@ -29,7 +36,7 @@ export component DeviceWindow inherits Window {
         width: 100%;
         height: 100%;
         visible: root.companion-visible;
-        animation-row: root.pet-animation-row;
+        atlas: root.pet-atlas;
         frame-index: root.pet-frame-index;
         benchmark-active: root.pet-benchmark-active;
         benchmark-frame: root.benchmark-frame;

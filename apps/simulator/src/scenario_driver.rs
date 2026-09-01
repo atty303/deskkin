@@ -1141,8 +1141,8 @@ mod tests {
         ] {
             let mut frame = animator.set_state(state);
             for _ in 0..state.frame_count() {
-                ui.set_pet_animation_row(i32::from(frame.row));
-                ui.set_pet_frame_index(i32::from(frame.column));
+                ui.set_pet_animation_state(i32::from(frame.state.loop_index()));
+                ui.set_pet_frame_index(i32::from(frame.index));
                 let pixels = render(&window).unwrap();
                 assert_eq!(pixels, render(&window).unwrap());
                 frame_digests.push(rgb565_digest(&pixels));

@@ -7,11 +7,13 @@ extern crate zephyr;
 
 use alloc::{boxed::Box, rc::Rc};
 use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
+use deskkin_presentation::{PetAnimationState, PetAnimator};
+use qoi::{Channels, Decoder};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, Rgb565Pixel, TargetPixel,
 };
 use slint::platform::{Platform, WindowAdapter};
-use slint::{ComponentHandle, PhysicalSize};
+use slint::{ComponentHandle, Image, PhysicalSize, Rgba8Pixel, SharedPixelBuffer};
 
 slint::include_modules!();
 
@@ -24,6 +26,37 @@ const HEIGHT: usize = 240;
 const BUFFER_COUNT: usize = 2;
 const FRAME_PIXELS: usize = WIDTH * HEIGHT;
 const MAX_DIRTY_RECTS: usize = 3;
+const PET_FRAME_WIDTH: u32 = 144;
+const PET_FRAME_HEIGHT: u32 = 156;
+
+struct LoopAsset {
+    bytes: &'static [u8],
+    state: PetAnimationState,
+}
+
+impl LoopAsset {
+    const fn for_state(state: PetAnimationState) -> Self {
+        let bytes: &'static [u8] = match state {
+            PetAnimationState::Idle => {
+                include_bytes!("../../../../assets/pets/koyori/idle.qoi")
+            }
+            PetAnimationState::MoveRight => {
+                include_bytes!("../../../../assets/pets/koyori/move-right.qoi")
+            }
+            PetAnimationState::MoveLeft => {
+                include_bytes!("../../../../assets/pets/koyori/move-left.qoi")
+            }
+            PetAnimationState::Attend => {
+                include_bytes!("../../../../assets/pets/koyori/attend.qoi")
+            }
+        };
+        Self { bytes, state }
+    }
+
+    const fn width(&self) -> u32 {
+        PET_FRAME_WIDTH * self.state.frame_count() as u32
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -101,6 +134,20 @@ enum RendererFault {
     RenderSkipped = 8,
     Submit = 9,
     DisplayEnable = 10,
+    QoiHeader = 14,
+    QoiMetadata = 15,
+    QoiDecode = 16,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum RendererStage {
+    Rendering = 2,
+    Transferring = 3,
+    Presented = 4,
+    Failed = 5,
+    AssetLoading = 6,
+    AssetReady = 7,
 }
 
 struct Framebuffer {
@@ -156,7 +203,7 @@ impl Framebuffer {
         while let Some(frame) = self.take_completion()? {
             unsafe {
                 deskkin_renderer_observe(
-                    4,
+                    RendererStage::Presented as u8,
                     RendererFault::None as u8,
                     frame.render_us,
                     frame.transfer_us,
@@ -171,7 +218,7 @@ impl Framebuffer {
             if let Some(frame) = self.take_completion()? {
                 unsafe {
                     deskkin_renderer_observe(
-                        4,
+                        RendererStage::Presented as u8,
                         RendererFault::None as u8,
                         frame.render_us,
                         frame.transfer_us,
@@ -202,7 +249,14 @@ impl Framebuffer {
             return Err(RendererFault::Submit);
         }
         self.back ^= 1;
-        unsafe { deskkin_renderer_observe(3, RendererFault::None as u8, render_us, 0) };
+        unsafe {
+            deskkin_renderer_observe(
+                RendererStage::Transferring as u8,
+                RendererFault::None as u8,
+                render_us,
+                0,
+            )
+        };
         Ok(())
     }
 }
@@ -211,17 +265,71 @@ fn elapsed_us(start: u64, end: u64) -> u32 {
     end.saturating_sub(start).try_into().unwrap_or(u32::MAX)
 }
 
+fn decode_loop(asset: LoopAsset) -> Result<Image, RendererFault> {
+    let decoder = Decoder::new(asset.bytes).map_err(|_| RendererFault::QoiHeader)?;
+    let header = *decoder.header();
+    if header.width != asset.width()
+        || header.height != PET_FRAME_HEIGHT
+        || header.channels != Channels::Rgba
+    {
+        return Err(RendererFault::QoiMetadata);
+    }
+    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(header.width, header.height);
+    decoder
+        .with_channels(Channels::Rgba)
+        .decode_to_buf(pixels.make_mut_bytes())
+        .map_err(|_| RendererFault::QoiDecode)?;
+    Ok(Image::from_rgba8(pixels))
+}
+
+fn replace_loop(component: &RendererWindow, state: PetAnimationState) -> Result<(), RendererFault> {
+    unsafe {
+        deskkin_renderer_observe(
+            RendererStage::AssetLoading as u8,
+            RendererFault::None as u8,
+            0,
+            0,
+        )
+    };
+    component.set_pet_atlas(Image::default());
+    let image = decode_loop(LoopAsset::for_state(state))?;
+    component.set_pet_atlas(image);
+    component.set_pet_frame_index(0);
+    unsafe {
+        deskkin_renderer_observe(
+            RendererStage::AssetReady as u8,
+            RendererFault::None as u8,
+            0,
+            0,
+        )
+    };
+    Ok(())
+}
+
+const fn next_state(state: PetAnimationState) -> PetAnimationState {
+    match state {
+        PetAnimationState::Idle => PetAnimationState::MoveRight,
+        PetAnimationState::MoveRight => PetAnimationState::MoveLeft,
+        PetAnimationState::MoveLeft => PetAnimationState::Attend,
+        PetAnimationState::Attend => PetAnimationState::Idle,
+    }
+}
+
 fn render_frame(
-    component: &RendererWindow,
     window: &MinimalSoftwareWindow,
     framebuffer: &mut Framebuffer,
-    frame: i32,
 ) -> Result<(), RendererFault> {
-    component.set_frame(frame);
     slint::platform::update_timers_and_animations();
     framebuffer.publish_completions()?;
     framebuffer.wait_for_back_buffer()?;
-    unsafe { deskkin_renderer_observe(2, RendererFault::None as u8, 0, 0) };
+    unsafe {
+        deskkin_renderer_observe(
+            RendererStage::Rendering as u8,
+            RendererFault::None as u8,
+            0,
+            0,
+        )
+    };
     let started = unsafe { deskkin_uptime_us() };
     let index = framebuffer.back;
     let mut dirty_rects = [DirtyRect::default(); MAX_DIRTY_RECTS];
@@ -270,46 +378,111 @@ extern "C" fn rust_main() {
     }))
     .is_err()
     {
-        unsafe { deskkin_renderer_observe(5, RendererFault::Platform as u8, 0, 0) };
+        unsafe {
+            deskkin_renderer_observe(
+                RendererStage::Failed as u8,
+                RendererFault::Platform as u8,
+                0,
+                0,
+            )
+        };
         return;
     }
     unsafe { deskkin_renderer_boot_stage(10) };
     let Ok(component) = RendererWindow::new() else {
-        unsafe { deskkin_renderer_observe(5, RendererFault::Component as u8, 0, 0) };
+        unsafe {
+            deskkin_renderer_observe(
+                RendererStage::Failed as u8,
+                RendererFault::Component as u8,
+                0,
+                0,
+            )
+        };
         return;
     };
     unsafe { deskkin_renderer_boot_stage(11) };
     let Some(window) = state.borrow().clone() else {
-        unsafe { deskkin_renderer_observe(5, RendererFault::Window as u8, 0, 0) };
+        unsafe {
+            deskkin_renderer_observe(
+                RendererStage::Failed as u8,
+                RendererFault::Window as u8,
+                0,
+                0,
+            )
+        };
         return;
     };
     window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
     unsafe { deskkin_renderer_boot_stage(12) };
     if component.show().is_err() {
-        unsafe { deskkin_renderer_observe(5, RendererFault::Show as u8, 0, 0) };
+        unsafe {
+            deskkin_renderer_observe(RendererStage::Failed as u8, RendererFault::Show as u8, 0, 0)
+        };
         return;
     }
     unsafe { deskkin_renderer_boot_stage(13) };
     let Some(mut framebuffer) = Framebuffer::new() else {
-        unsafe { deskkin_renderer_observe(5, RendererFault::Framebuffer as u8, 0, 0) };
+        unsafe {
+            deskkin_renderer_observe(
+                RendererStage::Failed as u8,
+                RendererFault::Framebuffer as u8,
+                0,
+                0,
+            )
+        };
         return;
     };
     unsafe { deskkin_renderer_boot_stage(14) };
-    let mut frame = 0_i32;
+    let mut animator = PetAnimator::new();
+    if let Err(fault) = replace_loop(&component, PetAnimationState::Idle) {
+        unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };
+        return;
+    }
+    unsafe { deskkin_renderer_boot_stage(15) };
     let mut display_enabled = false;
+    let mut next_frame_at_us = unsafe { deskkin_uptime_us() }
+        .saturating_add(u64::from(animator.state().frame_period_ms()) * 1_000);
 
     loop {
-        if let Err(fault) = render_frame(&component, &window, &mut framebuffer, frame) {
-            unsafe { deskkin_renderer_observe(5, fault as u8, 0, 0) };
+        if let Err(fault) = render_frame(&window, &mut framebuffer) {
+            unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };
             return;
         }
         if !display_enabled {
             if unsafe { deskkin_display_enable() } != 0 {
-                unsafe { deskkin_renderer_observe(5, RendererFault::DisplayEnable as u8, 0, 0) };
+                unsafe {
+                    deskkin_renderer_observe(
+                        RendererStage::Failed as u8,
+                        RendererFault::DisplayEnable as u8,
+                        0,
+                        0,
+                    )
+                };
                 return;
             }
             display_enabled = true;
         }
-        frame = frame.wrapping_add(1);
+        while unsafe { deskkin_uptime_us() } < next_frame_at_us {
+            if let Err(fault) = framebuffer.publish_completions() {
+                unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };
+                return;
+            }
+            unsafe { deskkin_yield() };
+        }
+        let current = animator.frame();
+        if current.index.saturating_add(1) == current.state.frame_count() {
+            let state = next_state(current.state);
+            let frame = animator.set_state(state);
+            if let Err(fault) = replace_loop(&component, state) {
+                unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };
+                return;
+            }
+            debug_assert_eq!(frame.index, 0);
+        } else {
+            let frame = animator.advance(current.state.frame_period_ms());
+            component.set_pet_frame_index(i32::from(frame.index));
+        }
+        next_frame_at_us = unsafe { deskkin_uptime_us() }
+            .saturating_add(u64::from(animator.state().frame_period_ms()) * 1_000);
     }
 }

@@ -30,7 +30,7 @@ CoreS3 tasks deliberately separate build, observation, and mutation.
 | --- | --- |
 | `core-s3:bootstrap` | Prepare and verify repository-local toolchains. |
 | `core-s3:build` | Build product and inert firmware without device access. |
-| `core-s3:amp-build` | Build the atlas-free AMP full-screen rendering pipeline. |
+| `core-s3:amp-build` | Build the AMP Koyori QOI rendering pipeline. |
 | `core-s3:amp-flash` | Flash all AMP domains in sysbuild order. |
 | `core-s3:amp-benchmark` | Measure the APPCPU pipeline through the PROCPU USB status surface. |
 | `core-s3:status` | Read boot and application status without mutation. |
@@ -167,15 +167,16 @@ mise run core-s3:run -- --device /dev/ttyACM0
 
 ## AMP rendering pipeline
 
-The separate AMP runtime contains no Pet atlas, network worker, NVS mutation,
-or servo path. MCUboot occupies flash offset `0x0`, the signed PROCPU supervisor
+The separate AMP runtime contains no network worker, NVS mutation, or servo
+path. It stores four Koyori loop atlases as QOI bytes in flash. MCUboot occupies
+flash offset `0x0`, the signed PROCPU supervisor
 image occupies `0x20000`, and the signed APPCPU image occupies `0x2c0000` in a
 2 MiB renderer slot. Flashing is one multi-domain west operation so the
 sysbuild dependency order is authoritative.
 
 PROCPU exclusively owns the USB status surface and LCD power/reset/backlight.
 It reserves two 320×240 RGB565 framebuffers in internal SRAM and initializes a
-bounded 1 MiB Quad-PSRAM allocation region, then publishes the framebuffer and
+bounded 4 MiB Quad-PSRAM allocation region, then publishes the framebuffer and
 heap addresses and readiness. PSRAM chip initialization and mapping happen once
 on PROCPU before APPCPU starts; APPCPU enables no competing MSPI initialization
 path and owns only the heap metadata for its published high-end region. That
@@ -192,6 +193,15 @@ bounce copy. A complete-frame dirty region is split into bounded 30-line
 transactions. Completion ownership prevents either framebuffer from being
 rendered again while it remains in flight.
 
+APPCPU decodes only the active loop. At each loop boundary it first releases
+the Slint image property, then allocates and decodes the next QOI directly into
+the final RGBA pixel buffer, installs it, resets the frame index, and requests
+the next draw. No render occurs while the property is empty, so the LCD retains
+the preceding completed frame and old/new decoded atlases never coexist.
+Idle and Attend use 100 ms frames; MoveRight and MoveLeft use 50 ms frames.
+Header, metadata, decode, allocation, and transfer failures remain distinct in
+the bounded renderer status surface.
+
 The validated hardware configuration is QIO flash at 80 MHz, LCD SPI at
 40 MHz, and an approximately 30.9 Hz ILI9342 normal-mode frame rate
 (`DIVA=fosc/2`, `RTNA=31`). The panel setting does not synchronize LCD scanout
@@ -201,14 +211,14 @@ unchanged while substantially reducing the multiple-edge persistence visible
 to the eye. Same-priority APPCPU render and display threads alternate two
 complete framebuffers. The SPI polling loop yields so Slint can fill the back
 buffer while GDMA transfers the dirty rectangle from the front buffer. The
-continuously busy renderer uses a 1 kHz periodic kernel
+renderer uses a 1 kHz periodic kernel
 tick. The previous default tickless configuration stopped near a 32-bit 240 MHz
 CCOUNT wrap boundary while PROCPU remained responsive; the periodic 1 kHz
 configuration did not reproduce the stop across multiple wraps. Those two
 configuration changes have not been isolated from each other. USB supervision
 remains isolated on PROCPU. The fixed 60-second pipeline benchmark does not reset
-the device; it observes an already booted,
-unthrottled run and calculates throughput from the device heartbeat times of
+the device; it observes an already booted Koyori loop run and calculates
+throughput from the device heartbeat times of
 its first and last valid samples. Frame rate and render/transfer latency are
 reported measurements, not acceptance thresholds. Live display and stable
 mailbox publications, a live final sample, at least 80% observation coverage,
@@ -225,21 +235,21 @@ mise run core-s3:amp-flash -- --device /dev/ttyACM0
 mise run core-s3:amp-benchmark -- --device /dev/ttyACM0
 ```
 
-This is an atlas-free maximum-throughput benchmark. It does not assert the
-animation cadence of a future scene; that policy belongs to the presentation
-scheduler after the Pet asset is restored. A complete 153,600-byte RGB565
-payload has a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS wire-only
-ceiling. The validated local-update scene is an 80×80 square moving one pixel
-per frame. Its steady-state swapped-buffer dirty bound is 82×82: 13,448 bytes
-in six pixel DMA batches. A physical 60-second run measured 153.803 FPS, 2 ms
-last/4 ms maximum render time, and 6 ms last/35 ms maximum transfer time, with
-zero allocation or transfer failures.
+The current benchmark checks the paced loop scheduler, QOI transitions, live
+display and stable mailbox publications, bounded USB response latency, and
+zero asset, allocation, or transfer failures. It does not impose an FPS gate.
+The predecessor atlas-free local-update benchmark measured 153.803 FPS with an
+82×82 dirty bound, 2 ms last/4 ms maximum render time, and 6 ms last/35 ms
+maximum transfer time; those measurements establish the transfer pipeline, not
+the current Koyori scene's physical performance.
 The two framebuffers reserve 307,200 internal-SRAM bytes. The AMP control nodes
 occupy a separate 5,136-byte region at the top of SRAM1 and APPCPU static DRAM
 is limited to 48 KiB below that region. PROCPU's current static image uses
 358,064 bytes of the 368,640 bytes below the asserted APPCPU boundary, leaving
-10,576 bytes of static growth headroom. The 1 MiB Slint dynamic heap is backed
-by 80 MHz Quad PSRAM; pixel rendering and LCD DMA never traverse it. PROCPU's
+10,576 bytes of static growth headroom. The 4 MiB Slint dynamic heap is the
+high half of the 8 MiB 80 MHz Quad-PSRAM mapping; boot rejects a mapping too
+small to keep it disjoint from the low-half PROCPU heap. Pixel rendering and
+LCD DMA never traverse it. PROCPU's
 common-libc allocation arena is disabled; Zephyr driver allocations use the
 separately bounded kernel heap. These limits are linker- and build-asserted so
 future growth fails visibly instead of overlapping another owner. Maximum
