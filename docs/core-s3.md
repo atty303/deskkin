@@ -174,25 +174,30 @@ image occupies `0x20000`, and the signed APPCPU image occupies `0x2c0000` in a
 sysbuild dependency order is authoritative.
 
 PROCPU exclusively owns the USB status surface and LCD power/reset/backlight.
-It reserves two 320×30 RGB565 line bands in internal DRAM, then publishes only
-its address and readiness.
-The PROCPU linker region ends at the APPCPU DRAM origin, so image growth cannot
-silently overlap the renderer. APPCPU exclusively owns the Slint instance, software
-renderer, SPI2, GDMA, and display driver. Slint renders directly into ping-pong
-bands without a bounce copy. A frame is divided into eight equal 30-line transfers;
-each 19,200-byte band remains below the 32,736-byte GDMA transaction limit.
-Slint fills one band while GDMA reads the other, and completion ownership
-prevents either band from being reused while it remains in flight.
+It reserves two 320×240 RGB565 framebuffers in internal SRAM and initializes a
+bounded 1 MiB Quad-PSRAM allocation region, then publishes the framebuffer and
+heap addresses and readiness. PSRAM chip initialization and mapping happen once
+on PROCPU before APPCPU starts; APPCPU enables no competing MSPI initialization
+path and owns only the heap metadata for its published high-end region. That
+region is disjoint from the low-end external heap registered to PROCPU.
+The PROCPU static image end is asserted below the APPCPU DRAM origin, so image
+growth cannot silently overlap the renderer even though the board's generated
+linker region extends beyond that ownership boundary. APPCPU exclusively owns
+the Slint instance, software renderer, SPI2, GDMA, and display driver. Slint
+`SwappedBuffers` renders directly into one full framebuffer while
+descriptor-chained GDMA transfers the other, without a bounce copy. Completion
+ownership prevents either framebuffer from being rendered again while it
+remains in flight.
 
 The validated hardware configuration is QIO flash at 80 MHz and LCD SPI at
-40 MHz. Same-priority APPCPU render and display threads alternate two band
-buffers. The SPI polling loop yields so Slint can fill the other band while
-GDMA transfers. The continuously busy renderer uses a 1 kHz periodic kernel
+40 MHz. Same-priority APPCPU render and display threads alternate two complete
+framebuffers. The SPI polling loop yields so Slint can fill the back buffer while
+GDMA transfers the front buffer. The continuously busy renderer uses a 1 kHz periodic kernel
 tick. The previous default tickless configuration stopped near a 32-bit 240 MHz
 CCOUNT wrap boundary while PROCPU remained responsive; the periodic 1 kHz
 configuration did not reproduce the stop across multiple wraps. Those two
 configuration changes have not been isolated from each other. USB supervision
-remains isolated on PROCPU. The ten-second pipeline benchmark does not reset
+remains isolated on PROCPU. The fixed 60-second pipeline benchmark does not reset
 the device; it observes an already booted,
 unthrottled run and calculates throughput from the device heartbeat times of
 its first and last valid samples. Frame rate and render/transfer latency are
@@ -213,14 +218,16 @@ This is an atlas-free maximum-throughput benchmark. It does not assert the
 animation cadence of a future scene; that policy belongs to the presentation
 scheduler after the Pet asset is restored. The 153,600-byte RGB565 payload has
 a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS wire-only ceiling.
-The retained safe ping-pong run with the periodic 1 kHz configuration sustained
-six consecutive ten-second observations after crossing the former stop point.
-Each window measured 29.57--29.58 FPS; the final window completed 285 frames in
-9.635 seconds. Last transfer time was 32 ms, cumulative transfer maximum was
-32 ms, cumulative render maximum was 13 ms, and allocation, transfer, and copy
-failures were zero. Maximum fields are not reset by the observation command.
-The two band buffers reserve 38,400 bytes, one quarter of a full-screen RGB565
-buffer.
+The two framebuffers reserve 307,200 internal-SRAM bytes. The AMP control nodes
+occupy a separate 5,136-byte region at the top of SRAM1 and APPCPU static DRAM
+is limited to 48 KiB below that region. PROCPU's current static image uses
+358,064 bytes of the 368,640 bytes below the asserted APPCPU boundary, leaving
+10,576 bytes of static growth headroom. The 1 MiB Slint dynamic heap is backed
+by 80 MHz Quad PSRAM; pixel rendering and LCD DMA never traverse it. PROCPU's
+common-libc allocation arena is disabled; Zephyr driver allocations use the
+separately bounded kernel heap. These limits are linker- and build-asserted so
+future growth fails visibly instead of overlapping another owner. Maximum
+diagnostic fields are not reset by the observation command.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

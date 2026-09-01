@@ -6,44 +6,31 @@ extern crate alloc;
 extern crate zephyr;
 
 use alloc::{boxed::Box, rc::Rc};
-use core::{
-    cell::RefCell, ffi::c_int, marker::PhantomData, ops::Range, ptr::NonNull, time::Duration,
-};
+use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
 use slint::platform::software_renderer::{
-    LineBufferProvider, MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
-    Rgb565Pixel, TargetPixel,
+    MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, Rgb565Pixel, TargetPixel,
 };
 use slint::platform::{Platform, WindowAdapter};
 use slint::{ComponentHandle, PhysicalSize};
 
 slint::include_modules!();
 
-mod band_ownership;
+mod buffer_ownership;
 
-use band_ownership::BandOwnership;
+use buffer_ownership::BufferOwnership;
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
-const DMA_MAX_BYTES: usize = 4092 * 8;
-const BYTES_PER_LINE: usize = WIDTH * core::mem::size_of::<u16>();
-const BAND_COUNT: usize = 8;
-const BAND_LINES: usize = HEIGHT / BAND_COUNT;
-const BAND_PIXELS: usize = BAND_LINES * BYTES_PER_LINE / core::mem::size_of::<u16>();
 const BUFFER_COUNT: usize = 2;
-
-const _: () = {
-    assert!(HEIGHT % BAND_COUNT == 0);
-    assert!(BAND_LINES == 30);
-    assert!(BAND_PIXELS * core::mem::size_of::<u16>() <= DMA_MAX_BYTES);
-};
+const FRAME_PIXELS: usize = WIDTH * HEIGHT;
 
 unsafe extern "C" {
     fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
-    fn deskkin_display_submit(buffer_index: u8, y: u16, line_count: u16) -> c_int;
+    fn deskkin_display_submit(buffer_index: u8) -> c_int;
     fn deskkin_display_take_completion(buffer_index: *mut u8, duration_us: *mut u32) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_renderer_boot_stage(stage: u8);
-    fn deskkin_renderer_observe(stage: u8, render_us: u32, transfer_us: u32);
+    fn deskkin_renderer_observe(stage: u8, fault: u8, render_us: u32, transfer_us: u32);
     fn deskkin_uptime_us() -> u64;
     fn deskkin_yield();
 }
@@ -54,7 +41,7 @@ struct DevicePlatform {
 
 impl Platform for DevicePlatform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
         self.window.replace(Some(window.clone()));
         Ok(window)
     }
@@ -81,21 +68,121 @@ impl TargetPixel for Rgb565BePixel {
     }
 }
 
+struct CompletedFrame {
+    render_us: u32,
+    transfer_us: u32,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum RendererFault {
+    None = 0,
+    Platform = 1,
+    Component = 2,
+    Window = 3,
+    Show = 4,
+    Framebuffer = 5,
+    Completion = 6,
+    Ownership = 7,
+    RenderSkipped = 8,
+    Submit = 9,
+    DisplayEnable = 10,
+}
+
 struct Framebuffer {
-    pixels: NonNull<u16>,
+    pixels: [NonNull<u16>; BUFFER_COUNT],
+    render_us: [u32; BUFFER_COUNT],
+    back: usize,
+    ownership: BufferOwnership<BUFFER_COUNT>,
     _single_threaded: PhantomData<Rc<()>>,
 }
 
 impl Framebuffer {
     fn new() -> Option<Self> {
         Some(Self {
-            pixels: NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
+            pixels: [
+                NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
+                NonNull::new(unsafe { deskkin_framebuffer_alloc(1) })?,
+            ],
+            render_us: [0; BUFFER_COUNT],
+            back: 0,
+            ownership: BufferOwnership::new(),
             _single_threaded: PhantomData,
         })
     }
 
-    fn pixels(&self) -> NonNull<Rgb565BePixel> {
-        self.pixels.cast()
+    fn pixels_mut(&mut self, index: usize) -> &mut [Rgb565BePixel] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.pixels[index].as_ptr().cast::<Rgb565BePixel>(),
+                FRAME_PIXELS,
+            )
+        }
+    }
+
+    fn take_completion(&mut self) -> Result<Option<CompletedFrame>, RendererFault> {
+        let mut buffer_index = 0_u8;
+        let mut transfer_us = 0_u32;
+        let result =
+            unsafe { deskkin_display_take_completion(&mut buffer_index, &mut transfer_us) };
+        if result == 0 {
+            return Ok(None);
+        }
+        let index = usize::from(buffer_index);
+        if result < 0 || self.ownership.complete(index).is_err() {
+            return Err(RendererFault::Completion);
+        }
+        Ok(Some(CompletedFrame {
+            render_us: self.render_us[index],
+            transfer_us,
+        }))
+    }
+
+    fn publish_completions(&mut self) -> Result<(), RendererFault> {
+        while let Some(frame) = self.take_completion()? {
+            unsafe {
+                deskkin_renderer_observe(
+                    4,
+                    RendererFault::None as u8,
+                    frame.render_us,
+                    frame.transfer_us,
+                )
+            };
+        }
+        Ok(())
+    }
+
+    fn wait_for_back_buffer(&mut self) -> Result<(), RendererFault> {
+        while self.ownership.is_inflight(self.back) {
+            if let Some(frame) = self.take_completion()? {
+                unsafe {
+                    deskkin_renderer_observe(
+                        4,
+                        RendererFault::None as u8,
+                        frame.render_us,
+                        frame.transfer_us,
+                    )
+                };
+            } else {
+                unsafe { deskkin_yield() };
+            }
+        }
+        Ok(())
+    }
+
+    fn submit(&mut self, render_us: u32) -> Result<(), RendererFault> {
+        let index = self.back;
+        self.render_us[index] = render_us;
+        self.ownership
+            .submit(index)
+            .map_err(|_| RendererFault::Ownership)?;
+        if unsafe { deskkin_display_submit(index as u8) } != 0 {
+            self.ownership.submission_failed(index);
+            return Err(RendererFault::Submit);
+        }
+        self.back ^= 1;
+        unsafe { deskkin_renderer_observe(3, RendererFault::None as u8, render_us, 0) };
+        Ok(())
     }
 }
 
@@ -103,155 +190,31 @@ fn elapsed_us(start: u64, end: u64) -> u32 {
     end.saturating_sub(start).try_into().unwrap_or(u32::MAX)
 }
 
-struct BandedLineBuffer {
-    pixels: NonNull<Rgb565BePixel>,
-    next_line: usize,
-    band_start: usize,
-    band_lines: usize,
-    current_buffer: usize,
-    ownership: BandOwnership<BUFFER_COUNT>,
-    transfers: usize,
-    transfer_us: u32,
-    wait_us: u32,
-    failed: bool,
-}
-
-impl BandedLineBuffer {
-    fn take_completion(&mut self) -> bool {
-        let mut buffer_index = 0_u8;
-        let mut duration_us = 0_u32;
-        let result =
-            unsafe { deskkin_display_take_completion(&mut buffer_index, &mut duration_us) };
-        if result == 0 {
-            return false;
-        }
-        let index = buffer_index as usize;
-        if result < 0 || self.ownership.complete(index).is_err() {
-            self.failed = true;
-            return true;
-        }
-        self.transfer_us = self.transfer_us.saturating_add(duration_us);
-        true
-    }
-
-    fn wait_for_buffer(&mut self, index: usize) {
-        let started = unsafe { deskkin_uptime_us() };
-        while self.ownership.is_inflight(index) && !self.failed {
-            if !self.take_completion() {
-                unsafe { deskkin_yield() };
-            }
-        }
-        self.wait_us = self
-            .wait_us
-            .saturating_add(elapsed_us(started, unsafe { deskkin_uptime_us() }));
-    }
-
-    fn finish(&mut self) {
-        for index in 0..BUFFER_COUNT {
-            self.wait_for_buffer(index);
-        }
-    }
-}
-
-impl LineBufferProvider for &mut BandedLineBuffer {
-    type TargetPixel = Rgb565BePixel;
-
-    fn process_line(
-        &mut self,
-        line: usize,
-        range: Range<usize>,
-        render_fn: impl FnOnce(&mut [Self::TargetPixel]),
-    ) {
-        if line != self.next_line || range != (0..WIDTH) || self.band_lines >= BAND_LINES {
-            self.failed = true;
-        }
-        if self.band_lines == 0 {
-            self.wait_for_buffer(self.current_buffer);
-            self.failed |= self.ownership.begin_render(self.current_buffer).is_err();
-        }
-        if self.failed {
-            let mut scratch = [Rgb565BePixel::default(); WIDTH];
-            render_fn(&mut scratch[range]);
-            self.band_lines += 1;
-            self.next_line = line.saturating_add(1);
-            if self.band_lines == BAND_LINES || self.next_line == HEIGHT {
-                self.band_start = self.next_line;
-                self.band_lines = 0;
-                self.current_buffer ^= 1;
-            }
-            return;
-        }
-        let band_line = self.band_lines.min(BAND_LINES - 1);
-        let line_start = self.current_buffer * BAND_PIXELS + band_line * WIDTH;
-        // Only the renderer-owned band is borrowed, and the borrow ends before
-        // ownership is published to the display thread.
-        let line_pixels =
-            unsafe { core::slice::from_raw_parts_mut(self.pixels.as_ptr().add(line_start), WIDTH) };
-        render_fn(&mut line_pixels[range]);
-        self.band_lines += 1;
-        self.next_line = line.saturating_add(1);
-
-        if self.band_lines == BAND_LINES || self.next_line == HEIGHT {
-            if self.ownership.submit(self.current_buffer).is_err() {
-                self.failed = true;
-            } else {
-                let result = unsafe {
-                    deskkin_display_submit(
-                        self.current_buffer as u8,
-                        self.band_start as u16,
-                        self.band_lines as u16,
-                    )
-                };
-                self.failed |= result != 0;
-                if result != 0 {
-                    self.ownership.submission_failed(self.current_buffer);
-                }
-                self.transfers += 1;
-            }
-            self.band_start = self.next_line;
-            self.band_lines = 0;
-            self.current_buffer ^= 1;
-        }
-    }
-}
-
 fn render_frame(
     component: &RendererWindow,
     window: &MinimalSoftwareWindow,
     framebuffer: &mut Framebuffer,
     frame: i32,
-) -> Result<(u32, u32), ()> {
+) -> Result<(), RendererFault> {
     component.set_frame(frame);
     slint::platform::update_timers_and_animations();
-    unsafe { deskkin_renderer_observe(2, 0, 0) };
+    framebuffer.publish_completions()?;
+    framebuffer.wait_for_back_buffer()?;
+    unsafe { deskkin_renderer_observe(2, RendererFault::None as u8, 0, 0) };
     let started = unsafe { deskkin_uptime_us() };
-    let mut provider = BandedLineBuffer {
-        pixels: framebuffer.pixels(),
-        next_line: 0,
-        band_start: 0,
-        band_lines: 0,
-        current_buffer: 0,
-        ownership: BandOwnership::new(),
-        transfers: 0,
-        transfer_us: 0,
-        wait_us: 0,
-        failed: false,
-    };
+    let index = framebuffer.back;
+    framebuffer
+        .ownership
+        .begin_render(index)
+        .map_err(|_| RendererFault::Ownership)?;
     let rendered = window.draw_if_needed(|renderer| {
-        let _ = renderer.render_by_line(&mut provider);
+        renderer.render(framebuffer.pixels_mut(index), WIDTH);
     });
-    let render_phase_us = elapsed_us(started, unsafe { deskkin_uptime_us() });
-    let render_wait_us = provider.wait_us;
-    provider.finish();
-    (rendered
-        && !provider.failed
-        && provider.next_line == HEIGHT
-        && provider.transfers == BAND_COUNT)
-        .then_some((
-            render_phase_us.saturating_sub(render_wait_us),
-            provider.transfer_us,
-        ))
-        .ok_or(())
+    if !rendered {
+        framebuffer.ownership.cancel_render(index);
+        return Err(RendererFault::RenderSkipped);
+    }
+    framebuffer.submit(elapsed_us(started, unsafe { deskkin_uptime_us() }))
 }
 
 #[no_mangle]
@@ -263,49 +226,46 @@ extern "C" fn rust_main() {
     }))
     .is_err()
     {
-        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        unsafe { deskkin_renderer_observe(5, RendererFault::Platform as u8, 0, 0) };
         return;
     }
     unsafe { deskkin_renderer_boot_stage(10) };
     let Ok(component) = RendererWindow::new() else {
-        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        unsafe { deskkin_renderer_observe(5, RendererFault::Component as u8, 0, 0) };
         return;
     };
     unsafe { deskkin_renderer_boot_stage(11) };
     let Some(window) = state.borrow().clone() else {
-        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        unsafe { deskkin_renderer_observe(5, RendererFault::Window as u8, 0, 0) };
         return;
     };
     window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
     unsafe { deskkin_renderer_boot_stage(12) };
     if component.show().is_err() {
-        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        unsafe { deskkin_renderer_observe(5, RendererFault::Show as u8, 0, 0) };
         return;
     }
     unsafe { deskkin_renderer_boot_stage(13) };
     let Some(mut framebuffer) = Framebuffer::new() else {
-        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        unsafe { deskkin_renderer_observe(5, RendererFault::Framebuffer as u8, 0, 0) };
         return;
     };
     unsafe { deskkin_renderer_boot_stage(14) };
     let mut frame = 0_i32;
+    let mut display_enabled = false;
 
-    let mut first_frame = true;
     loop {
-        let Ok((render_us, transfer_us)) =
-            render_frame(&component, &window, &mut framebuffer, frame)
-        else {
-            unsafe { deskkin_renderer_observe(5, 0, 0) };
+        if let Err(fault) = render_frame(&component, &window, &mut framebuffer, frame) {
+            unsafe { deskkin_renderer_observe(5, fault as u8, 0, 0) };
             return;
-        };
-        if first_frame {
+        }
+        if !display_enabled {
             if unsafe { deskkin_display_enable() } != 0 {
-                unsafe { deskkin_renderer_observe(5, render_us, transfer_us) };
+                unsafe { deskkin_renderer_observe(5, RendererFault::DisplayEnable as u8, 0, 0) };
                 return;
             }
-            first_frame = false;
+            display_enabled = true;
         }
-        unsafe { deskkin_renderer_observe(4, render_us, transfer_us) };
         frame = frame.wrapping_add(1);
     }
 }

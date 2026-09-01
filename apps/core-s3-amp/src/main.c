@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include <esp_psram.h>
+#include <hal/cache_ll.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/regulator.h>
@@ -35,9 +37,9 @@ static atomic_t transfer_failures;
 static atomic_t display_ready;
 static atomic_t boot_stage;
 static atomic_t boot_error;
-/* Eight equal 30-line RGB565 bands keep every transfer below the 32,736-byte
- * SPI DMA transaction limit without a special final-band size. */
-static __aligned(32) uint16_t internal_framebuffer[2U][320U * 30U];
+static __aligned(32) uint16_t internal_framebuffer[2U][320U * 240U];
+static uintptr_t renderer_heap;
+static size_t renderer_heap_size;
 
 K_THREAD_STACK_DEFINE(supervisor_stack, 2048);
 static struct k_thread supervisor_thread;
@@ -117,6 +119,8 @@ static void supervisor_entry(void *first, void *second, void *third)
 				.generation = 1U,
 				.ready = 1U,
 				.framebuffer = (uint32_t)(uintptr_t)internal_framebuffer,
+				.renderer_heap = (uint32_t)renderer_heap,
+				.renderer_heap_size = (uint32_t)renderer_heap_size,
 			};
 			memcpy((void *)&AMP_SHARED->display, &message, sizeof(message));
 			__atomic_store_n(&AMP_SHARED->display_publication, 1U, __ATOMIC_RELEASE);
@@ -235,6 +239,19 @@ int main(void)
 	if (!device_is_ready(console)) {
 		return 1;
 	}
+	intptr_t mapped_heap = 0;
+	size_t mapped_heap_size = 0;
+	if (esp_psram_get_mapped_region(&mapped_heap, &mapped_heap_size) != 0 ||
+	    mapped_heap == 0 || mapped_heap_size < CONFIG_ESP_SPIRAM_HEAP_SIZE) {
+		atomic_set(&boot_error, 5);
+		return 1;
+	}
+	/* Keep APPCPU allocations disjoint from PROCPU's heap at the low end. */
+	renderer_heap_size = CONFIG_ESP_SPIRAM_HEAP_SIZE;
+	renderer_heap = (uintptr_t)mapped_heap + mapped_heap_size - renderer_heap_size;
+	const cache_bus_mask_t appcpu_bus =
+		cache_ll_l1_get_bus(1, (uint32_t)renderer_heap, renderer_heap_size);
+	cache_ll_l1_enable_bus(1, appcpu_bus);
 	memset((void *)AMP_SHARED, 0, sizeof(*AMP_SHARED));
 	k_thread_create(&supervisor_thread, supervisor_stack, K_THREAD_STACK_SIZEOF(supervisor_stack),
 			supervisor_entry, NULL, NULL, NULL, 3, 0, K_NO_WAIT);

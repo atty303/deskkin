@@ -41,7 +41,7 @@ COMMANDS = {
 
 PET_BENCHMARK_DURATION_SECONDS = 60.0
 PET_BENCHMARK_REQUESTS = 1_200
-AMP_BENCHMARK_DURATION_SECONDS = 10.0
+AMP_BENCHMARK_DURATION_SECONDS = 60.0
 AMP_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS = 1.0
 AMP_BENCHMARK_MIN_COVERAGE_MILLI = 800
 AMP_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
@@ -646,9 +646,11 @@ def decode_amp_pipeline_status(status: bytes) -> dict[str, int]:
     }
 
 
-def amp_render_pipeline_benchmark(device_arg: str | None) -> dict[str, object]:
+def amp_render_pipeline_benchmark(
+    device_arg: str | None, duration_seconds: float = AMP_BENCHMARK_DURATION_SECONDS
+) -> dict[str, object]:
     benchmark_started = time.monotonic()
-    deadline = benchmark_started + AMP_BENCHMARK_DURATION_SECONDS
+    deadline = benchmark_started + duration_seconds
     responses = 0
     max_response_ms = 0
     first_request = True
@@ -1164,7 +1166,7 @@ def main() -> int:
         elif args.action == "amp-flash":
             flash_amp(root, args.device)
         elif args.action == "amp-benchmark":
-            records = [amp_render_pipeline_benchmark(args.device)]
+            records = [amp_render_pipeline_benchmark(args.device, AMP_BENCHMARK_DURATION_SECONDS)]
         elif args.action == "flash":
             flash(root, args.device)
         elif args.action == "recover":

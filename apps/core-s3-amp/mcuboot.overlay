@@ -1,5 +1,6 @@
 /* Keep the flash map identical in the supervisor, renderer, and MCUboot. */
 #include "amp-partitions.overlay"
+#include "amp-memory.overlay"
 
 / {
 	chosen {

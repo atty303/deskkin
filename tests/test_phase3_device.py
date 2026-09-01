@@ -248,48 +248,60 @@ class Phase3DeviceTests(unittest.TestCase):
             "transfer_failures": 0,
         }
         failure = device.AmpBenchmarkError("amp_pipeline_benchmark_failed", summary)
-        with mock.patch.object(device.sys, "argv", ["phase3_device.py", "amp-benchmark"]), mock.patch.object(
+        with mock.patch.object(
+            device.sys,
+            "argv",
+            ["phase3_device.py", "amp-benchmark", "--duration-seconds", "10"],
+        ), mock.patch.object(
             device, "amp_render_pipeline_benchmark", side_effect=failure
-        ), mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
+        ) as benchmark, mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
             device, "publish_result", return_value=Path("/tmp/result.json")
         ):
             exit_code = device.main()
 
         self.assertEqual(exit_code, 2)
+        benchmark.assert_called_once_with(None, device.AMP_BENCHMARK_DURATION_SECONDS)
         self.assertEqual(publish_diagnostic.call_args.args[2], "error")
         self.assertEqual(publish_diagnostic.call_args.args[3], [summary])
 
     def test_amp_supervisor_dram_ends_at_renderer_origin(self):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
-        self.assertIn("ASSERT(_end <= 0x3fcc5000", linker)
+        self.assertIn("ASSERT(_end <= 0x3fce2000", linker)
 
-    def test_amp_supervisor_uses_two_equal_bands_without_psram(self):
+    def test_amp_supervisor_reserves_two_full_internal_framebuffers(self):
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
         source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
-        self.assertNotIn("CONFIG_ESP_SPIRAM", config)
-        self.assertIn("internal_framebuffer[2U][320U * 30U]", source)
+        self.assertIn("CONFIG_ESP_SPIRAM=y", config)
+        self.assertIn("CONFIG_ESP_SPIRAM_HEAP_SIZE=1048576", config)
+        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
+        self.assertIn("CONFIG_SPIRAM_MODE_QUAD=y", config)
+        self.assertIn("CONFIG_SPIRAM_SPEED_80M=y", config)
+        self.assertIn("internal_framebuffer[2U][320U * 240U]", source)
         self.assertNotIn("external_framebuffer", source)
-        self.assertNotIn("psram_ready", source)
+        self.assertIn("esp_psram_get_mapped_region", source)
+        self.assertIn("mapped_heap_size - renderer_heap_size", source)
+        self.assertIn("cache_ll_l1_enable_bus(1, appcpu_bus)", source)
 
-    def test_amp_renderer_ping_pongs_eight_equal_bands_without_reuse_overlap(self):
+    def test_amp_renderer_swaps_full_frames_without_reuse_overlap(self):
         config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(encoding="utf-8")
         renderer = (ROOT / "apps/core-s3-amp/renderer/src/lib.rs").read_text(encoding="utf-8")
         adapter = (ROOT / "apps/core-s3-amp/renderer/src/adapter.c").read_text(encoding="utf-8")
         bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
-        self.assertIn("const BAND_COUNT: usize = 8;", renderer)
-        self.assertIn("assert!(BAND_LINES == 30);", renderer)
-        self.assertIn("renderer.render_by_line", renderer)
         self.assertIn("const BUFFER_COUNT: usize = 2;", renderer)
+        self.assertIn("RepaintBufferType::SwappedBuffers", renderer)
+        self.assertIn("renderer.render(framebuffer.pixels_mut(index), WIDTH)", renderer)
+        self.assertNotIn("render_by_line", renderer)
         self.assertIn("deskkin_display_submit", renderer)
         self.assertIn("deskkin_display_take_completion", renderer)
-        self.assertIn("self.wait_for_buffer(self.current_buffer);", renderer)
-        self.assertIn("self.ownership.begin_render(self.current_buffer)", renderer)
-        self.assertIn("self.ownership.submit(self.current_buffer)", renderer)
-        self.assertNotIn("fn pixels_mut", renderer)
-        self.assertIn("self.current_buffer ^= 1;", renderer)
-        self.assertIn("#define BAND_COUNT 8U", adapter)
-        self.assertIn("BUILD_ASSERT(BAND_LINES == 30U);", adapter)
-        self.assertIn("BUILD_ASSERT(BAND_BUFFER_BYTES <= DMA_MAX_BYTES);", adapter)
+        self.assertIn("framebuffer.wait_for_back_buffer()?", renderer)
+        self.assertIn(".begin_render(index)", renderer)
+        self.assertIn(".submit(index)", renderer)
+        self.assertIn("self.back ^= 1;", renderer)
+        self.assertIn("#define FRAME_PIXELS (DISPLAY_WIDTH * DISPLAY_HEIGHT)", adapter)
+        self.assertNotIn("CONFIG_ESP_SPIRAM", config)
+        self.assertIn("sys_heap_init(&renderer_heap", adapter)
+        self.assertIn("sys_heap_alloc(&renderer_heap", adapter)
+        self.assertIn("atomic_inc(&allocation_failures)", adapter)
         self.assertIn("K_MSGQ_DEFINE(display_requests", adapter)
         self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
         self.assertIn("k_yield();", adapter)
@@ -301,9 +313,10 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("543fd300e1237cb09a41e4e7f443f9392370dc470e9eb89de7e8706a2bbe8abb", bootstrap)
         self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
         self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
+        self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=1024", config)
 
-    def test_amp_band_ownership_requires_completion_before_reuse(self):
-        source = ROOT / "apps/core-s3-amp/renderer/src/band_ownership.rs"
+    def test_amp_buffer_ownership_requires_completion_before_reuse(self):
+        source = ROOT / "apps/core-s3-amp/renderer/src/buffer_ownership.rs"
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / "band_ownership_test"
             subprocess.run(

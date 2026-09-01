@@ -99,7 +99,11 @@ not part of the portable core.
 
 The replacement CoreS3 runtime consists of two Zephyr AMP images. PROCPU owns
 USB control, boot/status supervision, LCD power/reset/backlight, and two static
-internal-DRAM RGB565 30-line bands. APPCPU
+full-screen internal-SRAM RGB565 framebuffers. PROCPU initializes and maps a
+bounded Quad-PSRAM allocation region once before starting APPCPU, then enables
+the second core's cache bus and publishes that region. APPCPU owns the heap
+metadata and uses the dedicated high-end 1 MiB region only for Slint dynamic
+allocations; it is disjoint from PROCPU's registered external heap. APPCPU
 exclusively owns Slint software rendering, SPI2, GDMA, and LCD transfer. The
 kernels exchange bounded publication metadata through shared memory;
 pixel contents are never message payloads and SPI2 has one CPU owner.
@@ -107,14 +111,13 @@ Heartbeat snapshots use an explicit unstable marker and matching generations
 so the supervisor never accepts a payload while APPCPU is rewriting it.
 
 The atlas-free physical pipeline uses unthrottled full-screen rendering at
-320×240. APPCPU renders directly into two ping-pong internal-DRAM bands without
-a bounce copy. Eight equal 30-line bands keep every 19,200-byte transfer below
-the 32,736-byte GDMA transaction limit. Slint fills one band while GDMA reads
-the other, and completion ownership prevents either band from being reused
+320×240. Slint `SwappedBuffers` renders directly into one complete internal-SRAM
+framebuffer while GDMA descriptor chaining transfers the other, without a
+bounce copy. Completion ownership prevents either buffer from being reused
 early. LCD SPI runs at 40 MHz and QIO flash at 80 MHz. Separate same-priority
 APPCPU render and display threads overlap safely while the separate PROCPU
 remains responsive. The
-bounded benchmark derives throughput from device heartbeat times at its first
+fixed 60-second benchmark derives throughput from device heartbeat times at its first
 and last valid observations. It treats frame rate and latency as measurements,
 while stale or incomplete observation, unresponsive PROCPU status, allocation
 failure, and transfer failure remain integrity errors. Simulator timing is not

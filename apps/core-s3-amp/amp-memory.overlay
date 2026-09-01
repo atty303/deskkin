@@ -1,0 +1,46 @@
+/* SPDX-License-Identifier: MIT */
+
+/*
+ * Keep the 416 KiB SRAM1 bank contiguous for the two Zephyr images and the
+ * full-screen framebuffers. The shared AMP control block only needs one KiB;
+ * place it, the IPM payload, and the software doorbells at the top of SRAM1.
+ */
+/ {
+	soc {
+		/delete-node/ memory@3fce5000;
+		/delete-node/ memory@3fce5400;
+		/delete-node/ ipm@3fce9400;
+		/delete-node/ mbox@3fce9408;
+
+		ipmmem0: memory@3fcee000 {
+			compatible = "mmio-sram";
+			reg = <0x3fcee000 0x400>;
+		};
+
+		shm0: memory@3fcee400 {
+			compatible = "mmio-sram";
+			reg = <0x3fcee400 0x1000>;
+		};
+
+		ipm0: ipm@3fcef400 {
+			compatible = "espressif,esp32-ipm";
+			reg = <0x3fcef400 0x8>;
+			status = "disabled";
+			shared-memory = <&ipmmem0>;
+			shared-memory-size = <0x400>;
+			interrupts = <79 0 0>, <80 0 0>;
+			interrupt-parent = <&intc>;
+		};
+
+		mbox0: mbox@3fcef408 {
+			compatible = "espressif,mbox-esp32";
+			reg = <0x3fcef408 0x8>;
+			status = "disabled";
+			shared-memory = <&ipmmem0>;
+			shared-memory-size = <0x400>;
+			interrupts = <79 0 0>, <80 0 0>;
+			interrupt-parent = <&intc>;
+			#mbox-cells = <1>;
+		};
+	};
+};

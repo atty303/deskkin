@@ -28,6 +28,8 @@ struct deskkin_display_ready {
 	uint32_t generation;
 	uint32_t ready;
 	uint32_t framebuffer;
+	uint32_t renderer_heap;
+	uint32_t renderer_heap_size;
 };
 
 struct deskkin_amp_shared {

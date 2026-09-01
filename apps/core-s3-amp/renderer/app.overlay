@@ -1,6 +1,7 @@
 #include <zephyr/dt-bindings/display/panel.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include "../amp-partitions.overlay"
+#include "../amp-memory.overlay"
 
 / {
 	chosen {
