@@ -62,9 +62,14 @@ semantic-result correlation, deadline/drop accounting, and schema-fault
 handling. No firmware from this slice has been flashed, so live frame timings
 and the 60-second benchmark remain unmeasured.
 
+The target CoreS3 was confirmed read-only on the host as the Espressif USB
+JTAG/serial device at `/dev/ttyACM2`. No device node was opened and no reset or
+write was performed.
+
 ## Next work
 
-Inspect the target serial device read-only and stop for explicit flash approval.
+Stop for explicit approval before flashing the AMP product to the confirmed
+`/dev/ttyACM2` target.
 
 After approved flash and existing identity/profile checks, run the normal
 application and 60-second world benchmark. Physical acceptance still requires
