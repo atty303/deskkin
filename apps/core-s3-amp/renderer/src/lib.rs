@@ -23,10 +23,24 @@ const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
 const BUFFER_COUNT: usize = 2;
 const FRAME_PIXELS: usize = WIDTH * HEIGHT;
+const MAX_DIRTY_RECTS: usize = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct DirtyRect {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
 
 unsafe extern "C" {
     fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
-    fn deskkin_display_submit(buffer_index: u8) -> c_int;
+    fn deskkin_display_submit(
+        buffer_index: u8,
+        dirty_rects: *const DirtyRect,
+        dirty_rect_count: u8,
+    ) -> c_int;
     fn deskkin_display_take_completion(buffer_index: *mut u8, duration_us: *mut u32) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_renderer_boot_stage(stage: u8);
@@ -170,13 +184,20 @@ impl Framebuffer {
         Ok(())
     }
 
-    fn submit(&mut self, render_us: u32) -> Result<(), RendererFault> {
+    fn submit(&mut self, render_us: u32, dirty_rects: &[DirtyRect]) -> Result<(), RendererFault> {
         let index = self.back;
         self.render_us[index] = render_us;
         self.ownership
             .submit(index)
             .map_err(|_| RendererFault::Ownership)?;
-        if unsafe { deskkin_display_submit(index as u8) } != 0 {
+        if unsafe {
+            deskkin_display_submit(
+                index as u8,
+                dirty_rects.as_ptr(),
+                dirty_rects.len().try_into().unwrap_or(u8::MAX),
+            )
+        } != 0
+        {
             self.ownership.submission_failed(index);
             return Err(RendererFault::Submit);
         }
@@ -203,18 +224,41 @@ fn render_frame(
     unsafe { deskkin_renderer_observe(2, RendererFault::None as u8, 0, 0) };
     let started = unsafe { deskkin_uptime_us() };
     let index = framebuffer.back;
+    let mut dirty_rects = [DirtyRect::default(); MAX_DIRTY_RECTS];
+    let mut dirty_rect_count = 0_usize;
     framebuffer
         .ownership
         .begin_render(index)
         .map_err(|_| RendererFault::Ownership)?;
     let rendered = window.draw_if_needed(|renderer| {
-        renderer.render(framebuffer.pixels_mut(index), WIDTH);
+        let dirty_region = renderer.render(framebuffer.pixels_mut(index), WIDTH);
+        let position = dirty_region.bounding_box_origin();
+        let size = dirty_region.bounding_box_size();
+        if size.width != 0 && size.height != 0 {
+            if let (Ok(x), Ok(y), Ok(width), Ok(height)) = (
+                position.x.try_into(),
+                position.y.try_into(),
+                size.width.try_into(),
+                size.height.try_into(),
+            ) {
+                dirty_rects[0] = DirtyRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                dirty_rect_count = 1;
+            }
+        }
     });
     if !rendered {
         framebuffer.ownership.cancel_render(index);
         return Err(RendererFault::RenderSkipped);
     }
-    framebuffer.submit(elapsed_us(started, unsafe { deskkin_uptime_us() }))
+    framebuffer.submit(
+        elapsed_us(started, unsafe { deskkin_uptime_us() }),
+        &dirty_rects[..dirty_rect_count],
+    )
 }
 
 #[no_mangle]

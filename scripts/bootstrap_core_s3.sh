@@ -129,7 +129,12 @@ expected_rust_status = [
     " M dt-rust.yaml",
     " M zephyr-build/src/lib.rs",
 ]
-expected_zephyr_status = [" M drivers/spi/spi_esp32_spim.c"]
+expected_zephyr_status = [
+    " M drivers/display/display_ili9xxx.c",
+    " M drivers/mipi_dbi/mipi_dbi_esp32.c",
+    " M drivers/spi/spi_esp32_spim.c",
+    " M include/zephyr/drivers/mipi_dbi.h",
+]
 for relative, expected in revisions.items():
     project = state / relative
     actual = subprocess.run(
@@ -168,7 +173,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "543fd300e1237cb09a41e4e7f443f9392370dc470e9eb89de7e8706a2bbe8abb":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "2ea9ab40f9068f557e8337d0cef6e44e848eaccea478dfb4498f4f00c5b4a0dd":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 toolchain = state / "rustup/toolchains/deskkin-esp"

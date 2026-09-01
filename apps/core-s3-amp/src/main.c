@@ -14,7 +14,7 @@
 #include "../shared.h"
 
 #define CONTROL_FRAME_MAX 188
-#define STATUS_RESPONSE_SIZE 80
+#define STATUS_RESPONSE_SIZE 92
 #define HEARTBEAT_STALE_MS 500
 #define APPCPU_BOOT_MARKER ((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + 0x3f0U))
 #define AMP_SHARED ((volatile struct deskkin_amp_shared *)DT_REG_ADDR(DT_NODELABEL(shm0)))
@@ -34,6 +34,10 @@ static atomic_t renderer_stage;
 static atomic_t renderer_fault;
 static atomic_t allocation_failures;
 static atomic_t transfer_failures;
+static atomic_t dirty_rect_count;
+static atomic_t pixel_dma_batches;
+static atomic_t dirty_pixels;
+static atomic_t transferred_bytes;
 static atomic_t display_ready;
 static atomic_t boot_stage;
 static atomic_t boot_error;
@@ -85,6 +89,10 @@ static void receive_heartbeat(void)
 	atomic_set(&renderer_fault, heartbeat.fault);
 	atomic_set(&allocation_failures, heartbeat.allocation_failures);
 	atomic_set(&transfer_failures, heartbeat.transfer_failures);
+	atomic_set(&dirty_rect_count, heartbeat.dirty_rect_count);
+	atomic_set(&pixel_dma_batches, heartbeat.pixel_dma_batches);
+	atomic_set(&dirty_pixels, (atomic_val_t)heartbeat.dirty_pixels);
+	atomic_set(&transferred_bytes, (atomic_val_t)heartbeat.transferred_bytes);
 }
 
 static int initialize_display_power(void)
@@ -227,6 +235,10 @@ static void write_status(const uint8_t *request)
 	const uint32_t now = k_uptime_get_32();
 	response[27] = generation != 0U && now - received_ms <= HEARTBEAT_STALE_MS ? 1U : 2U;
 	response[78] = 9;
+	response[80] = (uint8_t)atomic_get(&dirty_rect_count);
+	sys_put_be16((uint16_t)atomic_get(&pixel_dma_batches), &response[82]);
+	sys_put_be32((uint32_t)atomic_get(&dirty_pixels), &response[84]);
+	sys_put_be32((uint32_t)atomic_get(&transferred_bytes), &response[88]);
 	uart_poll_out(console, 0);
 	uart_poll_out(console, STATUS_RESPONSE_SIZE);
 	for (size_t index = 0; index < sizeof(response); ++index) {

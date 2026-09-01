@@ -20,8 +20,8 @@ Pet-only rendering benchmark with bounded timing and counter diagnostics.
 
 The atlas-free replacement runtime is a dual-Zephyr AMP build. PROCPU owns USB
 control, boot supervision, LCD power/reset/backlight, and two full-screen
-internal-SRAM RGB565 framebuffers. APPCPU owns Slint software rendering, SPI2, GDMA, and
-full-screen LCD transfer. QIO flash and LCD SPI run at 80 MHz and 40 MHz
+internal-SRAM RGB565 framebuffers. APPCPU owns Slint software rendering, SPI2,
+GDMA, and dirty-rectangle LCD transfer. QIO flash and LCD SPI run at 80 MHz and 40 MHz
 respectively while PROCPU status remains responsive. PROCPU initializes a
 bounded 1 MiB Quad-PSRAM heap for APPCPU Slint allocations; framebuffer pixels
 and the LCD DMA path remain entirely in internal SRAM.
@@ -32,10 +32,12 @@ connector does not access an external service.
 ## Validated rendering baseline
 
 The renderer now uses Slint `SwappedBuffers` with two 320×240 RGB565
-framebuffers in internal SRAM. Slint renders a complete back buffer while GDMA
-transfers the other complete buffer; explicit completion ownership prevents a
-buffer from being rendered again while its transfer remains in flight. Each
-153,600-byte transfer is descriptor-chained by the display driver. There is no
+framebuffers in internal SRAM. Slint renders the changed area into a complete
+back buffer while GDMA transfers the dirty bounding rectangle from the other
+buffer's full-frame stride; explicit completion ownership prevents a buffer
+from being rendered again while its transfer remains in flight. The ESP32
+MIPI-DBI driver gathers selected row spans directly into DMA descriptors, and
+complete-frame dirty regions use bounded 30-line transactions. There is no
 bounce copy, band clear, or PSRAM framebuffer. PROCPU owns the static 307,200
 pixel bytes, while APPCPU exclusively owns their runtime contents.
 
@@ -48,15 +50,18 @@ its heap metadata locally. The published region is the dedicated high-end 1
 MiB of the mapping, disjoint from PROCPU's registered low-end external heap;
 PROCPU's unbounded common-libc allocation arena is disabled.
 
-The physical 60-second full-screen benchmark completed 1,871 frames at 31.438
+The physical 60-second complete-frame benchmark completed 1,871 frames at 31.438
 FPS. The last render and transfer took 7 ms and 32 ms; observed maxima were 8
 ms and 33 ms. Copy time, allocation failures, and transfer failures were zero,
 and PROCPU answered 229 bounded status requests during the unthrottled run.
 The 30.72 ms RGB565 wire time at 40 MHz remains the principal limit.
-The benchmark scene uses a fixed background color so content-driven full-screen
-luminance changes do not obscure panel flicker and tearing observations. Its
-vertical bar moves 20 pixels per rendered frame as a deliberately visible
-diagnostic stimulus, not as a product animation cadence.
+The local-update benchmark uses a fixed background and an 80×80 square moving
+one pixel per frame throughout the 320×240 screen. Its steady-state
+`SwappedBuffers` dirty bound is 82×82: one rectangle, 6,724 pixels, 13,448
+transferred bytes, and six pixel DMA batches. The physical 60-second run
+completed 9,177 frames at 153.803 FPS. Last render and transfer times were 2 ms
+and 6 ms; observed maxima were 4 ms and 35 ms. Allocation and transfer failures
+were zero.
 
 The ILI9342 normal-mode frame rate is approximately 30.9 Hz
 (`DIVA=fosc/2`, `RTNA=31`). On the physical panel this left the tear geometry in
@@ -67,7 +72,7 @@ not claim tear-free presentation.
 
 ## Next work
 
-Select the next implementation slice from the fixed-2D-world roadmap. No
-physical display diagnostic is currently active; use the validated 30.9 Hz
-panel setting, 40 MHz SPI pipeline, and SRAM swapped-buffer ownership as the
-CoreS3 rendering baseline.
+Resume the approved fixed-2D-world slice on this rendering baseline: implement
+the deterministic 320×240 viewport, three parallax layers, separated target
+and observed pose, and Notice cues in the simulator before restoring a Pet
+asset or enabling physical motion.

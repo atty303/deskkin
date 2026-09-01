@@ -1,0 +1,284 @@
+diff --git a/drivers/display/display_ili9xxx.c b/drivers/display/display_ili9xxx.c
+index e6a59cd6063..66f34c2e3af 100644
+--- a/drivers/display/display_ili9xxx.c
++++ b/drivers/display/display_ili9xxx.c
+@@ -130,8 +130,8 @@ static int ili9xxx_write(const struct device *dev, const uint16_t x,
+ 	uint16_t write_h;
+ 
+ 	__ASSERT(desc->width <= desc->pitch, "Pitch is smaller than width");
+-	__ASSERT((desc->pitch * data->bytes_per_pixel * desc->height) <=
+-			 desc->buf_size,
++	__ASSERT(((((uint32_t)desc->height - 1U) * desc->pitch + desc->width) *
++		  data->bytes_per_pixel) <= desc->buf_size,
+ 		 "Input buffer too small");
+ 
+ 	LOG_DBG("Writing %dx%d (w,h) @ %dx%d (x,y)", desc->width, desc->height,
+@@ -141,28 +141,39 @@ static int ili9xxx_write(const struct device *dev, const uint16_t x,
+ 		return r;
+ 	}
+ 
++	mipi_desc.width = desc->width;
++	mipi_desc.frame_incomplete = desc->frame_incomplete;
+ 	if (desc->pitch > desc->width) {
+ 		write_h = 1U;
+ 		nbr_of_writes = desc->height;
+-		mipi_desc.height = 1;
+-		mipi_desc.buf_size = desc->pitch * data->bytes_per_pixel;
++		mipi_desc.height = desc->height;
++		mipi_desc.buf_size = desc->width * data->bytes_per_pixel * desc->height;
++		mipi_desc.pitch = desc->pitch;
+ 	} else {
+ 		write_h = desc->height;
+ 		mipi_desc.height = desc->height;
+ 		mipi_desc.buf_size = desc->width * data->bytes_per_pixel * write_h;
+ 		nbr_of_writes = 1U;
++		mipi_desc.pitch = desc->width;
+ 	}
+ 
+-	mipi_desc.width = desc->width;
+-	/* Per MIPI API, pitch must always match width */
+-	mipi_desc.pitch = desc->width;
+-	mipi_desc.frame_incomplete = desc->frame_incomplete;
+-
+ 	r = ili9xxx_transmit(dev, ILI9XXX_RAMWR, NULL, 0);
+ 	if (r < 0) {
+ 		return r;
+ 	}
+ 
++	if (desc->pitch > desc->width) {
++		r = mipi_dbi_write_display_strided(config->mipi_dev, &config->dbi_config,
++						   write_data_start, &mipi_desc,
++						   data->pixel_format);
++		if (r != -ENOSYS && r != -ENOTSUP) {
++			return r;
++		}
++		mipi_desc.height = 1U;
++		mipi_desc.buf_size = desc->width * data->bytes_per_pixel;
++		mipi_desc.pitch = desc->width;
++	}
++
+ 	for (write_cnt = 0U; write_cnt < nbr_of_writes; ++write_cnt) {
+ 		r = mipi_dbi_write_display(config->mipi_dev,
+ 					   &config->dbi_config,
+diff --git a/drivers/mipi_dbi/mipi_dbi_esp32.c b/drivers/mipi_dbi/mipi_dbi_esp32.c
+index 09546684f35..5a30de619e8 100644
+--- a/drivers/mipi_dbi/mipi_dbi_esp32.c
++++ b/drivers/mipi_dbi/mipi_dbi_esp32.c
+@@ -15,6 +15,7 @@
+ #include <zephyr/drivers/interrupt_controller/intc_esp32.h>
+ 
+ #include <hal/gdma_channel.h>
++#include <hal/dma_types.h>
+ #include <esp_clk_tree.h>
+ #include <esp_heap_caps.h>
+ #include <esp_memory_utils.h>
+@@ -198,8 +199,56 @@ static int mipi_dbi_esp32_dma_start(const struct device *dev, const uint8_t *buf
+ 	return 0;
+ }
+ 
++static int mipi_dbi_esp32_dma_start_strided(const struct device *dev, const uint8_t *buffer,
++					     size_t row_bytes, size_t pitch_bytes,
++					     uint16_t row_count)
++{
++	const struct mipi_dbi_esp32_config *cfg = dev->config;
++	struct dma_status dma_status = {0};
++	struct dma_config dma_cfg = {0};
++	struct dma_block_config blocks[CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM] = {0};
++	int ret;
++
++	if (row_count == 0U || row_count > ARRAY_SIZE(blocks) || row_bytes == 0U ||
++	    row_bytes > DMA_DESCRIPTOR_BUFFER_MAX_SIZE_4B_ALIGNED) {
++		return -ENOTSUP;
++	}
++
++	ret = dma_get_status(cfg->dma_dev, cfg->tx_dma_channel, &dma_status);
++	if (ret < 0) {
++		LOG_ERR("Unable to get DMA status (%d)", ret);
++		return ret;
++	}
++	if (dma_status.busy) {
++		return -EBUSY;
++	}
++
++	for (size_t index = 0; index < row_count; ++index) {
++		blocks[index].block_size = row_bytes;
++		blocks[index].source_address = (uint32_t)(buffer + index * pitch_bytes);
++		blocks[index].next_block = index + 1U < row_count ? &blocks[index + 1U] : NULL;
++	}
++	dma_cfg.channel_direction = MEMORY_TO_PERIPHERAL;
++	dma_cfg.dma_slot = ESP_GDMA_TRIG_PERIPH_LCD0;
++	dma_cfg.block_count = row_count;
++	dma_cfg.head_block = blocks;
++
++	ret = dma_config(cfg->dma_dev, cfg->tx_dma_channel, &dma_cfg);
++	if (ret < 0) {
++		LOG_ERR("Failed to configure strided DMA channel %u (%d)", cfg->tx_dma_channel,
++			ret);
++		return ret;
++	}
++	ret = dma_start(cfg->dma_dev, cfg->tx_dma_channel);
++	if (ret < 0) {
++		LOG_ERR("Failed to start DMA channel %u (%d)", cfg->tx_dma_channel, ret);
++	}
++	return ret;
++}
++
+ static int mipi_dbi_esp32_transfer(const struct device *dev, const struct mipi_dbi_config *dbi_cfg,
+-				   bool send_cmd, uint8_t cmd, const uint8_t *buffer, size_t len)
++				   bool send_cmd, uint8_t cmd, const uint8_t *buffer, size_t len,
++				   size_t row_bytes, size_t pitch_bytes, uint16_t row_count)
+ {
+ 	const struct mipi_dbi_esp32_config *cfg = dev->config;
+ 	struct mipi_dbi_esp32_data *data = dev->data;
+@@ -215,6 +264,9 @@ static int mipi_dbi_esp32_transfer(const struct device *dev, const struct mipi_d
+ 	if (len > 0 && buffer == NULL) {
+ 		return -EINVAL;
+ 	}
++	if (row_count > 0U && (!esp_ptr_dma_capable(buffer) || row_bytes > pitch_bytes)) {
++		return -ENOTSUP;
++	}
+ 
+ 	if (len > 0 && !esp_ptr_dma_capable(buffer)) {
+ 		tmp_buffer = k_malloc(len);
+@@ -241,7 +293,11 @@ static int mipi_dbi_esp32_transfer(const struct device *dev, const struct mipi_d
+ 	lcd_ll_fifo_reset(hal->dev);
+ 
+ 	if (len > 0) {
+-		ret = mipi_dbi_esp32_dma_start(dev, tmp_buffer ? tmp_buffer : buffer, len);
++		ret = row_count > 0U
++			      ? mipi_dbi_esp32_dma_start_strided(dev, buffer, row_bytes,
++							 pitch_bytes, row_count)
++			      : mipi_dbi_esp32_dma_start(dev, tmp_buffer ? tmp_buffer : buffer,
++							 len);
+ 		if (ret < 0) {
+ 			goto free;
+ 		}
+@@ -273,7 +329,7 @@ static int mipi_dbi_esp32_command_write(const struct device *dev,
+ 	int ret;
+ 
+ 	k_mutex_lock(&drv_data->lock, K_FOREVER);
+-	ret = mipi_dbi_esp32_transfer(dev, dbi_cfg, true, cmd, data, len);
++	ret = mipi_dbi_esp32_transfer(dev, dbi_cfg, true, cmd, data, len, 0U, 0U, 0U);
+ 	k_mutex_unlock(&drv_data->lock);
+ 
+ 	return ret;
+@@ -297,12 +353,51 @@ static int mipi_dbi_esp32_write_display(const struct device *dev,
+ 	}
+ 
+ 	k_mutex_lock(&drv_data->lock, K_FOREVER);
+-	ret = mipi_dbi_esp32_transfer(dev, dbi_cfg, false, 0x00, framebuf, desc->buf_size);
++	ret = mipi_dbi_esp32_transfer(dev, dbi_cfg, false, 0x00, framebuf, desc->buf_size,
++					0U, 0U, 0U);
+ 	k_mutex_unlock(&drv_data->lock);
+ 
+ 	return ret;
+ }
+ 
++static int mipi_dbi_esp32_write_display_strided(const struct device *dev,
++						 const struct mipi_dbi_config *dbi_cfg,
++						 const uint8_t *framebuf,
++						 struct display_buffer_descriptor *desc,
++						 enum display_pixel_format pixfmt)
++{
++	struct mipi_dbi_esp32_data *drv_data = dev->data;
++	const size_t bytes_per_pixel = 2U;
++	const size_t row_bytes = desc->width * bytes_per_pixel;
++	const size_t pitch_bytes = desc->pitch * bytes_per_pixel;
++	int ret = 0;
++
++	if ((pixfmt != PIXEL_FORMAT_RGB_565 && pixfmt != PIXEL_FORMAT_RGB_565X) ||
++	    framebuf == NULL || desc->width == 0U || desc->height == 0U ||
++	    desc->pitch <= desc->width || desc->buf_size < row_bytes * desc->height ||
++	    row_bytes > DMA_DESCRIPTOR_BUFFER_MAX_SIZE_4B_ALIGNED ||
++	    !esp_ptr_dma_capable(framebuf)) {
++		return -ENOTSUP;
++	}
++
++	k_mutex_lock(&drv_data->lock, K_FOREVER);
++	for (uint16_t row = 0; row < desc->height;) {
++		const uint16_t batch_rows =
++			MIN((uint16_t)CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM,
++			    (uint16_t)(desc->height - row));
++		ret = mipi_dbi_esp32_transfer(dev, dbi_cfg, false, 0x00,
++					       framebuf + (size_t)row * pitch_bytes,
++					       row_bytes * batch_rows, row_bytes, pitch_bytes,
++					       batch_rows);
++		if (ret < 0) {
++			break;
++		}
++		row += batch_rows;
++	}
++	k_mutex_unlock(&drv_data->lock);
++	return ret;
++}
++
+ static int mipi_dbi_esp32_reset(const struct device *dev, k_timeout_t delay)
+ {
+ 	const struct mipi_dbi_esp32_config *cfg = dev->config;
+@@ -323,6 +418,7 @@ static int mipi_dbi_esp32_reset(const struct device *dev, k_timeout_t delay)
+ static DEVICE_API(mipi_dbi, mipi_dbi_esp32_api) = {
+ 	.command_write = mipi_dbi_esp32_command_write,
+ 	.write_display = mipi_dbi_esp32_write_display,
++	.write_display_strided = mipi_dbi_esp32_write_display_strided,
+ 	.reset = mipi_dbi_esp32_reset,
+ };
+ 
+diff --git a/include/zephyr/drivers/mipi_dbi.h b/include/zephyr/drivers/mipi_dbi.h
+index 3b443ae8889..1657063f323 100644
+--- a/include/zephyr/drivers/mipi_dbi.h
++++ b/include/zephyr/drivers/mipi_dbi.h
+@@ -194,6 +194,16 @@ typedef int (*mipi_dbi_write_display_t)(const struct device *dev,
+ 					struct display_buffer_descriptor *desc,
+ 					enum display_pixel_format pixfmt);
+ 
++/**
++ * @brief Callback API to write a strided display buffer to the display controller.
++ * See mipi_dbi_write_display_strided() for argument description
++ */
++typedef int (*mipi_dbi_write_display_strided_t)(const struct device *dev,
++						const struct mipi_dbi_config *config,
++						const uint8_t *framebuf,
++						struct display_buffer_descriptor *desc,
++						enum display_pixel_format pixfmt);
++
+ /**
+  * @brief Callback API to reset the attached display controller.
+  * See mipi_dbi_reset() for argument description
+@@ -228,6 +238,10 @@ __subsystem struct mipi_dbi_driver_api {
+ 	 * @driver_ops_optional @copybrief mipi_dbi_write_display
+ 	 */
+ 	mipi_dbi_write_display_t write_display;
++	/**
++	 * @driver_ops_optional @copybrief mipi_dbi_write_display_strided
++	 */
++	mipi_dbi_write_display_strided_t write_display_strided;
+ 	/**
+ 	 * @driver_ops_optional @copybrief mipi_dbi_reset
+ 	 */
+@@ -344,6 +358,26 @@ static inline int mipi_dbi_write_display(const struct device *dev,
+ 	return api->write_display(dev, config, framebuf, desc, pixfmt);
+ }
+ 
++/**
++ * @brief Write a rectangular view of a strided display buffer.
++ *
++ * The pitch may be greater than width. Only width pixels from each of height
++ * rows are transferred.
++ */
++static inline int mipi_dbi_write_display_strided(const struct device *dev,
++						 const struct mipi_dbi_config *config,
++						 const uint8_t *framebuf,
++						 struct display_buffer_descriptor *desc,
++						 enum display_pixel_format pixfmt)
++{
++	const struct mipi_dbi_driver_api *api =
++		(const struct mipi_dbi_driver_api *)dev->api;
++
++	return api->write_display_strided == NULL
++		       ? -ENOSYS
++		       : api->write_display_strided(dev, config, framebuf, desc, pixfmt);
++}
++
+ /**
+  * @brief Resets attached display controller
+  *

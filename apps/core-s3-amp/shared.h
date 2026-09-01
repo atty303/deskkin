@@ -21,6 +21,11 @@ struct deskkin_renderer_heartbeat {
 	uint8_t fault;
 	uint8_t allocation_failures;
 	uint8_t transfer_failures;
+	uint8_t dirty_rect_count;
+	uint8_t reserved;
+	uint16_t pixel_dma_batches;
+	uint32_t dirty_pixels;
+	uint32_t transferred_bytes;
 };
 
 struct deskkin_display_ready {

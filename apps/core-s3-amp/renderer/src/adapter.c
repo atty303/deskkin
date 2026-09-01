@@ -18,6 +18,8 @@
 #define BYTES_PER_LINE (DISPLAY_WIDTH * sizeof(uint16_t))
 #define FRAME_PIXELS (DISPLAY_WIDTH * DISPLAY_HEIGHT)
 #define FRAMEBUFFER_COUNT 2U
+#define MAX_DIRTY_RECTS 3U
+#define FULL_WIDTH_CHUNK_LINES 30U
 #define BOOT_MARKER ((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + 0x3f0U))
 #define AMP_SHARED ((volatile struct deskkin_amp_shared *)DT_REG_ADDR(DT_NODELABEL(shm0)))
 
@@ -36,8 +38,17 @@ enum renderer_fault {
 	RENDERER_FAULT_HEAP_INIT = 13,
 };
 
+struct deskkin_dirty_rect {
+	uint16_t x;
+	uint16_t y;
+	uint16_t width;
+	uint16_t height;
+};
+
 struct display_request {
 	uint8_t buffer_index;
+	uint8_t dirty_rect_count;
+	struct deskkin_dirty_rect dirty_rects[MAX_DIRTY_RECTS];
 };
 
 struct display_completion {
@@ -64,6 +75,10 @@ static atomic_t transfer_max_us;
 static atomic_t render_last_us;
 static atomic_t transfer_last_us;
 static atomic_t copy_last_us;
+static atomic_t dirty_rect_count;
+static atomic_t pixel_dma_batches;
+static atomic_t dirty_pixels;
+static atomic_t transferred_bytes;
 
 extern void rust_main(void);
 void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
@@ -150,6 +165,10 @@ void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 		.fault = fault,
 		.allocation_failures = (uint8_t)atomic_get(&allocation_failures),
 		.transfer_failures = (uint8_t)atomic_get(&transfer_failures),
+		.dirty_rect_count = (uint8_t)atomic_get(&dirty_rect_count),
+		.pixel_dma_batches = (uint16_t)atomic_get(&pixel_dma_batches),
+		.dirty_pixels = (uint32_t)atomic_get(&dirty_pixels),
+		.transferred_bytes = (uint32_t)atomic_get(&transferred_bytes),
 	};
 	/* Zero marks the payload unstable while the next snapshot is copied. */
 	__atomic_store_n(&AMP_SHARED->renderer_publication, 0U, __ATOMIC_SEQ_CST);
@@ -185,14 +204,28 @@ uint16_t *deskkin_framebuffer_alloc(uint8_t index)
 	return framebuffer == NULL ? NULL : framebuffer + (size_t)index * FRAME_PIXELS;
 }
 
-int deskkin_display_submit(uint8_t buffer_index)
+int deskkin_display_submit(uint8_t buffer_index,
+			   const struct deskkin_dirty_rect *dirty_rects,
+			   uint8_t dirty_rect_count)
 {
-	if (framebuffer == NULL || buffer_index >= FRAMEBUFFER_COUNT) {
+	if (framebuffer == NULL || buffer_index >= FRAMEBUFFER_COUNT ||
+	    dirty_rect_count > MAX_DIRTY_RECTS ||
+	    (dirty_rect_count != 0U && dirty_rects == NULL)) {
 		return -EINVAL;
 	}
-	const struct display_request request = {
+	struct display_request request = {
 		.buffer_index = buffer_index,
+		.dirty_rect_count = dirty_rect_count,
 	};
+	for (size_t index = 0; index < dirty_rect_count; ++index) {
+		const struct deskkin_dirty_rect rect = dirty_rects[index];
+		if (rect.width == 0U || rect.height == 0U || rect.x >= DISPLAY_WIDTH ||
+		    rect.y >= DISPLAY_HEIGHT || rect.width > DISPLAY_WIDTH - rect.x ||
+		    rect.height > DISPLAY_HEIGHT - rect.y) {
+			return -EINVAL;
+		}
+		request.dirty_rects[index] = rect;
+	}
 	const int result = k_msgq_put(&display_requests, &request, K_NO_WAIT);
 	if (result == 0) {
 		k_yield();
@@ -240,6 +273,43 @@ static uint32_t display_spi_frequency_hz(void)
 	       ((GPSPI2.clock.clkdiv_pre + 1U) * (GPSPI2.clock.clkcnt_n + 1U));
 }
 
+static int display_write_rect(const uint16_t *pixels,
+			      const struct deskkin_dirty_rect *rect)
+{
+	if (rect->width == DISPLAY_WIDTH) {
+		uint16_t line = rect->y;
+		const uint16_t end = rect->y + rect->height;
+		while (line < end) {
+			const uint16_t height = MIN(FULL_WIDTH_CHUNK_LINES, end - line);
+			const struct display_buffer_descriptor descriptor = {
+				.buf_size = DISPLAY_WIDTH * height * sizeof(uint16_t),
+				.pitch = DISPLAY_WIDTH,
+				.width = DISPLAY_WIDTH,
+				.height = height,
+			};
+			const int result =
+				display_write(display, 0, line, &descriptor,
+					      pixels + (size_t)line * DISPLAY_WIDTH);
+			if (result != 0) {
+				return result;
+			}
+			line += height;
+		}
+		return 0;
+	}
+
+	const struct display_buffer_descriptor descriptor = {
+		.buf_size =
+			(((uint32_t)rect->height - 1U) * DISPLAY_WIDTH + rect->width) *
+			sizeof(uint16_t),
+		.pitch = DISPLAY_WIDTH,
+		.width = rect->width,
+		.height = rect->height,
+	};
+	return display_write(display, rect->x, rect->y, &descriptor,
+			     pixels + (size_t)rect->y * DISPLAY_WIDTH + rect->x);
+}
+
 static void display_entry(void *first, void *second, void *third)
 {
 	ARG_UNUSED(first);
@@ -248,16 +318,31 @@ static void display_entry(void *first, void *second, void *third)
 	for (;;) {
 		struct display_request request;
 		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
-		const struct display_buffer_descriptor descriptor = {
-			.buf_size = FRAME_PIXELS * sizeof(uint16_t),
-			.pitch = DISPLAY_WIDTH,
-			.width = DISPLAY_WIDTH,
-			.height = DISPLAY_HEIGHT,
-		};
 		const int64_t started = k_uptime_ticks();
 		const uint16_t *pixels =
 			framebuffer + (size_t)request.buffer_index * FRAME_PIXELS;
-		const int result = display_write(display, 0, 0, &descriptor, pixels);
+		uint32_t request_pixels = 0U;
+		uint32_t request_batches = 0U;
+		for (size_t index = 0; index < request.dirty_rect_count; ++index) {
+			const struct deskkin_dirty_rect *rect = &request.dirty_rects[index];
+			request_pixels += (uint32_t)rect->width * rect->height;
+			request_batches += rect->width == DISPLAY_WIDTH
+					   ? DIV_ROUND_UP(rect->height, FULL_WIDTH_CHUNK_LINES)
+					   : DIV_ROUND_UP(rect->height,
+							  CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM);
+		}
+		atomic_set(&dirty_rect_count, request.dirty_rect_count);
+		atomic_set(&pixel_dma_batches, (atomic_val_t)request_batches);
+		atomic_set(&dirty_pixels, (atomic_val_t)request_pixels);
+		atomic_set(&transferred_bytes,
+			   (atomic_val_t)(request_pixels * sizeof(uint16_t)));
+		int result = 0;
+		for (size_t index = 0; index < request.dirty_rect_count; ++index) {
+			result = display_write_rect(pixels, &request.dirty_rects[index]);
+			if (result != 0) {
+				break;
+			}
+		}
 		const uint64_t elapsed = k_ticks_to_us_floor64(k_uptime_ticks() - started);
 		const struct display_completion completion = {
 			.buffer_index = request.buffer_index,

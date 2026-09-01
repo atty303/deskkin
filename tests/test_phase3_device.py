@@ -95,7 +95,7 @@ class Phase3DeviceTests(unittest.TestCase):
         def status(*_args, **_kwargs):
             nonlocal generation
             generation += 3
-            response = bytearray(80)
+            response = bytearray(92)
             response[0] = 1
             response[27] = 1
             response[28:32] = generation.to_bytes(4, "big")
@@ -108,6 +108,10 @@ class Phase3DeviceTests(unittest.TestCase):
             response[57:61] = (14_000).to_bytes(4, "big")
             response[61:65] = (44_000).to_bytes(4, "big")
             response[74:78] = (3_000).to_bytes(4, "big")
+            response[80] = 2
+            response[82:84] = (10).to_bytes(2, "big")
+            response[84:88] = (12_800).to_bytes(4, "big")
+            response[88:92] = (25_600).to_bytes(4, "big")
             return bytes(response)
 
         with mock.patch.object(device, "time", clock), mock.patch.object(
@@ -126,6 +130,10 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertEqual(summary["transfer_max_us"], 44_000)
         self.assertEqual(summary["copy_last_us"], 3_000)
         self.assertEqual(summary["wire_last_us"], 39_000)
+        self.assertEqual(summary["dirty_rect_count"], 2)
+        self.assertEqual(summary["dirty_pixels"], 12_800)
+        self.assertEqual(summary["transferred_bytes"], 25_600)
+        self.assertEqual(summary["pixel_dma_batches"], 10)
         self.assertTrue(run_control.call_args_list[0].kwargs["recover_status_transport"])
         self.assertFalse(run_control.call_args_list[1].kwargs["recover_status_transport"])
 
@@ -310,7 +318,7 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
         self.assertIn("+\t\t\tk_yield();", spi_patch)
-        self.assertIn("543fd300e1237cb09a41e4e7f443f9392370dc470e9eb89de7e8706a2bbe8abb", bootstrap)
+        self.assertIn("2ea9ab40f9068f557e8337d0cef6e44e848eaccea478dfb4498f4f00c5b4a0dd", bootstrap)
         self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
         self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
         self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=1024", config)
@@ -403,6 +411,26 @@ int main(void) {
         stream = bytearray(b"deskkin.boot stage=3 error=0\n")
         stream.extend(len(response).to_bytes(2, "big"))
         stream.extend(response)
+        def consume(_descriptor, length):
+            value = bytes(stream[:length])
+            del stream[:length]
+            return value
+
+        with mock.patch.object(
+            device.select,
+            "select",
+            side_effect=lambda reads, writes, errors, timeout: (reads, writes, errors),
+        ), mock.patch.object(device.os, "read", side_effect=consume):
+            self.assertEqual(device.read_control_response(7, frame, 1), bytes(response))
+
+    def test_control_response_accepts_extended_amp_status(self):
+        frame = device.control_frame("status", 0)
+        response = bytearray(92)
+        response[0] = 1
+        response[2:18] = frame[4:20]
+        stream = bytearray(len(response).to_bytes(2, "big"))
+        stream.extend(response)
+
         def consume(_descriptor, length):
             value = bytes(stream[:length])
             del stream[:length]

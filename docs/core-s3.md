@@ -184,10 +184,13 @@ The PROCPU static image end is asserted below the APPCPU DRAM origin, so image
 growth cannot silently overlap the renderer even though the board's generated
 linker region extends beyond that ownership boundary. APPCPU exclusively owns
 the Slint instance, software renderer, SPI2, GDMA, and display driver. Slint
-`SwappedBuffers` renders directly into one full framebuffer while
-descriptor-chained GDMA transfers the other, without a bounce copy. Completion
-ownership prevents either framebuffer from being rendered again while it
-remains in flight.
+`SwappedBuffers` renders directly into one full framebuffer and reports the
+region changed across the two-buffer repaint history. The adapter transfers
+the region's bounding rectangle from the full-frame stride; the ESP32 MIPI-DBI
+driver gathers only the selected row spans into GDMA descriptors without a
+bounce copy. A complete-frame dirty region is split into bounded 30-line
+transactions. Completion ownership prevents either framebuffer from being
+rendered again while it remains in flight.
 
 The validated hardware configuration is QIO flash at 80 MHz, LCD SPI at
 40 MHz, and an approximately 30.9 Hz ILI9342 normal-mode frame rate
@@ -195,9 +198,10 @@ The validated hardware configuration is QIO flash at 80 MHz, LCD SPI at
 with transfer: the board has no wired TE signal or usable scan-line readback.
 On the physical display it left the tear geometry in paused video effectively
 unchanged while substantially reducing the multiple-edge persistence visible
-to the eye. Same-priority APPCPU render and display threads alternate two complete
-framebuffers. The SPI polling loop yields so Slint can fill the back buffer while
-GDMA transfers the front buffer. The continuously busy renderer uses a 1 kHz periodic kernel
+to the eye. Same-priority APPCPU render and display threads alternate two
+complete framebuffers. The SPI polling loop yields so Slint can fill the back
+buffer while GDMA transfers the dirty rectangle from the front buffer. The
+continuously busy renderer uses a 1 kHz periodic kernel
 tick. The previous default tickless configuration stopped near a 32-bit 240 MHz
 CCOUNT wrap boundary while PROCPU remained responsive; the periodic 1 kHz
 configuration did not reproduce the stop across multiple wraps. Those two
@@ -211,7 +215,9 @@ mailbox publications, a live final sample, at least 80% observation coverage,
 bounded USB response latency, and zero allocation or transfer failures remain
 measurement-integrity requirements. The host stores only bounded timing,
 counters, boot stages, copy time, and the effective SPI clock; it records no
-frame, pixel, asset, raw shared-memory data, or raw USB packet.
+frame, pixel, asset, raw shared-memory data, or raw USB packet. The bounded
+status surface additionally reports dirty-rectangle count, dirty pixels,
+transferred bytes, and pixel DMA batches.
 
 ```sh
 mise run core-s3:amp-build
@@ -221,8 +227,13 @@ mise run core-s3:amp-benchmark -- --device /dev/ttyACM0
 
 This is an atlas-free maximum-throughput benchmark. It does not assert the
 animation cadence of a future scene; that policy belongs to the presentation
-scheduler after the Pet asset is restored. The 153,600-byte RGB565 payload has
-a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS wire-only ceiling.
+scheduler after the Pet asset is restored. A complete 153,600-byte RGB565
+payload has a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS wire-only
+ceiling. The validated local-update scene is an 80×80 square moving one pixel
+per frame. Its steady-state swapped-buffer dirty bound is 82×82: 13,448 bytes
+in six pixel DMA batches. A physical 60-second run measured 153.803 FPS, 2 ms
+last/4 ms maximum render time, and 6 ms last/35 ms maximum transfer time, with
+zero allocation or transfer failures.
 The two framebuffers reserve 307,200 internal-SRAM bytes. The AMP control nodes
 occupy a separate 5,136-byte region at the top of SRAM1 and APPCPU static DRAM
 is limited to 48 KiB below that region. PROCPU's current static image uses

@@ -325,7 +325,7 @@ def read_control_response(descriptor: int, frame: bytearray, timeout: float) -> 
         candidate_start: int | None = None
         for start in range(max(0, len(buffered) - 1)):
             length = int.from_bytes(buffered[start : start + 2], "big")
-            if not 18 <= length <= 80 or start + 3 > len(buffered):
+            if not 18 <= length <= 92 or start + 3 > len(buffered):
                 continue
             if buffered[start + 2] != SCHEMA:
                 continue
@@ -616,13 +616,13 @@ def flash_amp(root: Path, device_arg: str | None) -> None:
 
 
 def decode_amp_pipeline_status(status: bytes) -> dict[str, int]:
-    if len(status) != 80 or status[0] != SCHEMA or status[1] != 0:
+    if len(status) not in {80, 92} or status[0] != SCHEMA or status[1] != 0:
         raise DeviceError("control_invalid")
 
     def unsigned(start: int, end: int) -> int:
         return int.from_bytes(status[start:end], "big")
 
-    return {
+    decoded = {
         "availability": status[27],
         "generation": unsigned(28, 32),
         "heartbeat_received_ms": unsigned(32, 40),
@@ -644,6 +644,15 @@ def decode_amp_pipeline_status(status: bytes) -> dict[str, int]:
         "display_spi_hz": unsigned(70, 74),
         "copy_us": unsigned(74, 78),
     }
+    decoded.update(
+        {
+            "dirty_rect_count": status[80] if len(status) >= 92 else 0,
+            "pixel_dma_batches": unsigned(82, 84) if len(status) >= 92 else 0,
+            "dirty_pixels": unsigned(84, 88) if len(status) >= 92 else 0,
+            "transferred_bytes": unsigned(88, 92) if len(status) >= 92 else 0,
+        }
+    )
+    return decoded
 
 
 def amp_render_pipeline_benchmark(
@@ -767,6 +776,10 @@ def amp_render_pipeline_benchmark(
         "display_spi_hz": last["display_spi_hz"],
         "copy_last_us": last["copy_us"],
         "wire_last_us": max(0, last["transfer_us"] - last["copy_us"]),
+        "dirty_rect_count": last["dirty_rect_count"],
+        "dirty_pixels": last["dirty_pixels"],
+        "transferred_bytes": last["transferred_bytes"],
+        "pixel_dma_batches": last["pixel_dma_batches"],
     }
     print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
     if not passed:

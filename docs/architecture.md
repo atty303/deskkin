@@ -110,10 +110,13 @@ pixel contents are never message payloads and SPI2 has one CPU owner.
 Heartbeat snapshots use an explicit unstable marker and matching generations
 so the supervisor never accepts a payload while APPCPU is rewriting it.
 
-The atlas-free physical pipeline uses unthrottled full-screen rendering at
-320×240. Slint `SwappedBuffers` renders directly into one complete internal-SRAM
-framebuffer while GDMA descriptor chaining transfers the other, without a
-bounce copy. Completion ownership prevents either buffer from being reused
+The atlas-free physical pipeline uses unthrottled rendering into two complete
+320×240 internal-SRAM framebuffers. Slint `SwappedBuffers` reports the region
+changed across the two-buffer repaint history; the adapter transfers its
+bounding rectangle directly from the full-frame stride. The ESP32 MIPI-DBI
+driver gathers the selected row spans into GDMA descriptors without a bounce
+copy. A complete-frame dirty region uses the same path with bounded 30-line
+transactions. Completion ownership prevents either buffer from being reused
 early. LCD SPI runs at 40 MHz and QIO flash at 80 MHz. Separate same-priority
 APPCPU render and display threads overlap safely while the separate PROCPU
 remains responsive. The
