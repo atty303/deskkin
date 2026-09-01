@@ -27,7 +27,7 @@ struct deskkin_display_ready {
 	uint32_t magic;
 	uint32_t generation;
 	uint32_t ready;
-	uint32_t framebuffer[2];
+	uint32_t framebuffer;
 };
 
 struct deskkin_amp_shared {

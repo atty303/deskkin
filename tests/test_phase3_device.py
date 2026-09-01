@@ -263,13 +263,13 @@ class Phase3DeviceTests(unittest.TestCase):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
         self.assertIn("ASSERT(_end <= 0x3fcc5000", linker)
 
-    def test_amp_supervisor_owns_the_single_psram_test_and_inhibits_boot_on_failure(self):
+    def test_amp_supervisor_uses_one_internal_framebuffer_without_psram(self):
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
         source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
-        self.assertIn("CONFIG_ESP_SPIRAM_MEMTEST=n", config)
-        self.assertIn("esp_psram_is_initialized() && esp_psram_extram_test()", source)
-        self.assertIn("if (!psram_ready)", source)
-        self.assertIn("atomic_set(&boot_error, 2)", source)
+        self.assertNotIn("CONFIG_ESP_SPIRAM", config)
+        self.assertIn("internal_framebuffer[320U * 240U]", source)
+        self.assertNotIn("external_framebuffer", source)
+        self.assertNotIn("psram_ready", source)
 
     def test_profile_schema_is_exact_and_rfc1918(self):
         self.assertEqual(device.validate_profile(self.profile()), self.profile())

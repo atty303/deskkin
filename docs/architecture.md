@@ -98,21 +98,21 @@ one Rust service worker hosted by Zephyr threads. Embassy is a runtime adapter,
 not part of the portable core.
 
 The replacement CoreS3 runtime consists of two Zephyr AMP images. PROCPU owns
-USB control, boot/status supervision, LCD power/reset/backlight, one static
-internal-DRAM RGB565 render buffer, and one static PSRAM render buffer. APPCPU
+USB control, boot/status supervision, LCD power/reset/backlight, and one static
+internal-DRAM RGB565 render buffer. APPCPU
 exclusively owns Slint software rendering, SPI2, GDMA, and LCD transfer. The
 kernels exchange bounded publication metadata through shared memory;
 framebuffer contents are never message payloads and SPI2 has one CPU owner.
 Heartbeat snapshots use an explicit unstable marker and matching generations
 so the supervisor never accepts a payload while APPCPU is rewriting it.
 
-The atlas-free physical pipeline uses unthrottled full-screen double-buffered
-rendering at 320×240. APPCPU renders alternating frames directly into the
-internal-DRAM and PSRAM buffers and submits each buffer to GDMA without a bounce
-copy. The SPI driver performs cache write-back before direct external-memory
-DMA. LCD SPI runs at 40 MHz, Quad PSRAM and QIO flash at 80 MHz. The display
-worker starts DMA ahead of the next render; the patched polling driver sleeps
-while DMA is in flight so rendering can use otherwise idle APP CPU time. The
+The atlas-free physical pipeline uses unthrottled full-screen rendering at
+320×240. APPCPU renders a complete frame directly into the internal-DRAM
+buffer and submits it to GDMA without a bounce copy. LCD SPI runs at 40 MHz and
+QIO flash at 80 MHz. Rendering and transfer are sequential in this speed-limit
+baseline so their independently reported durations have one stable memory path.
+The APPCPU busy-polls each synchronous SPI transaction; it has no concurrent
+work in this baseline, while the separate PROCPU remains responsive. The
 bounded benchmark derives throughput from device heartbeat times at its first
 and last valid observations. It treats frame rate and latency as measurements,
 while stale or incomplete observation, unresponsive PROCPU status, allocation

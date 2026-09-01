@@ -174,21 +174,19 @@ image occupies `0x20000`, and the signed APPCPU image occupies `0x2c0000` in a
 sysbuild dependency order is authoritative.
 
 PROCPU exclusively owns the USB status surface and LCD power/reset/backlight.
-It reserves one 320×240 RGB565 render buffer in internal DRAM and one in PSRAM,
-then publishes only their addresses and readiness after PSRAM initialization
-and its memory test pass.
-Failure inhibits APPCPU boot and is reported through the bounded boot error.
+It reserves one 320×240 RGB565 render buffer in internal DRAM, then publishes
+only its address and readiness.
 The PROCPU linker region ends at the APPCPU DRAM origin, so image growth cannot
 silently overlap the renderer. APPCPU exclusively owns the Slint instance, software
-renderer, SPI2, GDMA, and display driver. It renders alternating full frames
-directly into the two buffers and transfers each completed buffer without a
-bounce copy while rendering the next frame. The driver writes back external
-cache lines before PSRAM DMA. Its polling loop sleeps during DMA so the single
-APP CPU can execute the renderer instead of busy-waiting.
+renderer, SPI2, GDMA, and display driver. It renders each full frame directly
+into the internal buffer and transfers the completed frame without a bounce
+copy. Rendering and transfer are sequential in this baseline.
 
-The validated hardware configuration is QIO flash and Quad PSRAM at 80 MHz and
-LCD SPI at 40 MHz. Octal PSRAM does not boot this CoreS3. The ten-second
-pipeline benchmark does not reset the device; it observes an already booted,
+The validated hardware configuration is QIO flash at 80 MHz and LCD SPI at
+40 MHz. The APPCPU busy-polls the synchronous SPI transactions because render
+and transfer do not overlap in this baseline; sleeping at transaction
+boundaries only adds scheduler latency, while USB supervision remains isolated
+on PROCPU. The ten-second pipeline benchmark does not reset the device; it observes an already booted,
 unthrottled run and calculates throughput from the device heartbeat times of
 its first and last valid samples. Frame rate and render/transfer latency are
 reported measurements, not acceptance thresholds. Live display and stable
@@ -206,7 +204,11 @@ mise run core-s3:amp-benchmark -- --device /dev/ttyACM0
 
 This is an atlas-free maximum-throughput benchmark. It does not assert the
 animation cadence of a future scene; that policy belongs to the presentation
-scheduler after the Pet asset is restored.
+scheduler after the Pet asset is restored. The retained physical baseline
+completes 255 frames in a 9.619-second measurement window (26.50 FPS), with
+31.1 ms maximum full-screen transfer and observed 4.2--7.6 ms render samples.
+The 153,600-byte RGB565 payload has a 30.72 ms wire-only time at 40 MHz, placing
+the measured transfer within 1.2% of that limit.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

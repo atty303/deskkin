@@ -19,29 +19,29 @@ The CoreS3 product firmware and host runner include a fixed 60-second, 20 FPS
 Pet-only rendering benchmark with bounded timing and counter diagnostics.
 
 The atlas-free replacement runtime is a dual-Zephyr AMP build. PROCPU owns USB
-control, boot supervision, LCD power/reset/backlight, one internal-DRAM RGB565
-render buffer, and one PSRAM render buffer. APPCPU owns Slint software
-rendering, SPI2, GDMA, and full-screen LCD transfer. QIO flash and Quad PSRAM
-run at 80 MHz and LCD SPI at 40 MHz while PROCPU status remains responsive.
+control, boot supervision, LCD power/reset/backlight, and one internal-DRAM
+RGB565 render buffer. APPCPU owns Slint software rendering, SPI2, GDMA, and
+full-screen LCD transfer. QIO flash and LCD SPI run at 80 MHz and 40 MHz
+respectively while PROCPU status remains responsive.
 
 No external provider connector is implemented. The deterministic availability
 connector does not access an external service.
 
 ## Active work
 
-No implementation slice is active. The full-screen benchmark is unthrottled
-and reports performance rather than enforcing a 20 FPS gate. Its hybrid
-internal/PSRAM buffers transfer directly through GDMA with zero bounce-copy
-bytes. On the physical CoreS3, the prior capped PSRAM-to-DRAM-copy baseline
-reported 20.05 FPS, 18.0 ms last render, 39.7 ms last copy-plus-transfer, and
-6.2 ms last copy. The final QIO hybrid path reported 27.27 FPS with 19.9 ms
-maximum render, 41.0 ms maximum transfer, and zero copy, with no allocation or
-transfer failure. A 64-byte D-cache-line trial had no measurable benefit and
-was not retained.
+The physical 40 MHz full-screen speed baseline is complete. One internal-DRAM
+framebuffer removes PSRAM and bounce-copy traffic, and rendering and GDMA
+transfer remain sequential so their costs stay independently observable. A
+ten-second physical run completed 255 frames at 26.50 FPS with 31.1 ms maximum
+full-screen transfer, zero copy time, and no allocation or transfer failure.
+The 153,600-byte pixel payload alone requires 30.72 ms at 40 MHz, so the
+retained path reaches 98.8% of the wire-only limit. Busy polling is retained on
+the isolated APPCPU because a one-millisecond sleep in each SPI transaction
+raised transfer time to 33.2 ms. The Rust release profile now favors execution
+speed with optimization level 3; observed render samples were 4.2--7.6 ms.
 
 ## Next work
 
-Restore the normalized Pet asset through the hybrid double-buffered full-screen
-path and measure the real scene without turning its animation cadence into a
-hardware performance gate. Fixed world, parallax, Notice, IMU, and servo work
-remain behind that foundation.
+Resume the presentation pipeline on this measured baseline. Streaming line or
+band rendering and tear synchronization remain deferred. Fixed world,
+parallax, Notice, IMU, and servo work remain behind that foundation.

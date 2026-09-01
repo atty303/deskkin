@@ -26,5 +26,5 @@ slint-build = "=1.17.1"
 codegen-units = 1
 debug = true
 lto = "fat"
-opt-level = 2
+opt-level = 3
 panic = "abort"

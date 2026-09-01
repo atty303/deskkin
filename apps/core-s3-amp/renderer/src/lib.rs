@@ -39,7 +39,7 @@ struct DevicePlatform {
 
 impl Platform for DevicePlatform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         self.window.replace(Some(window.clone()));
         Ok(window)
     }
@@ -67,19 +67,14 @@ impl TargetPixel for Rgb565BePixel {
 }
 
 struct Framebuffer {
-    pixels: [NonNull<u16>; 2],
-    back: usize,
+    pixels: NonNull<u16>,
     _single_threaded: PhantomData<Rc<()>>,
 }
 
 impl Framebuffer {
     fn new() -> Option<Self> {
         Some(Self {
-            pixels: [
-                NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
-                NonNull::new(unsafe { deskkin_framebuffer_alloc(1) })?,
-            ],
-            back: 0,
+            pixels: NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
             _single_threaded: PhantomData,
         })
     }
@@ -87,18 +82,14 @@ impl Framebuffer {
     fn pixels_mut(&mut self) -> &mut [Rgb565BePixel] {
         unsafe {
             core::slice::from_raw_parts_mut(
-                self.pixels[self.back].as_ptr().cast::<Rgb565BePixel>(),
+                self.pixels.as_ptr().cast::<Rgb565BePixel>(),
                 WIDTH * HEIGHT,
             )
         }
     }
 
-    fn swap(&mut self) {
-        self.back ^= 1;
-    }
-
     fn back_index(&self) -> u8 {
-        self.back as u8
+        0
     }
 }
 
@@ -178,47 +169,30 @@ extern "C" fn rust_main() {
     unsafe { deskkin_renderer_boot_stage(14) };
     let mut frame = 0_i32;
 
-    let Ok(mut in_flight_render_us) = render_frame(&component, &window, &mut framebuffer, frame)
-    else {
-        unsafe { deskkin_renderer_observe(5, 0, 0) };
-        return;
-    };
-    let mut in_flight_buffer = framebuffer.back_index();
-    if unsafe { deskkin_display_submit(in_flight_buffer) } != 0 {
-        unsafe { deskkin_renderer_observe(5, in_flight_render_us, 0) };
-        return;
-    }
-    unsafe { deskkin_renderer_observe(3, in_flight_render_us, 0) };
-    framebuffer.swap();
-    frame = frame.wrapping_add(1);
-
     let mut first_frame = true;
     loop {
-        let Ok(ready_render_us) = render_frame(&component, &window, &mut framebuffer, frame) else {
+        let Ok(render_us) = render_frame(&component, &window, &mut framebuffer, frame) else {
             unsafe { deskkin_renderer_observe(5, 0, 0) };
             return;
         };
-        let Ok(transfer_us) = take_completion(in_flight_buffer) else {
-            unsafe { deskkin_renderer_observe(5, in_flight_render_us, 0) };
+        let buffer = framebuffer.back_index();
+        if unsafe { deskkin_display_submit(buffer) } != 0 {
+            unsafe { deskkin_renderer_observe(5, render_us, 0) };
+            return;
+        }
+        unsafe { deskkin_renderer_observe(3, render_us, 0) };
+        let Ok(transfer_us) = take_completion(buffer) else {
+            unsafe { deskkin_renderer_observe(5, render_us, 0) };
             return;
         };
         if first_frame {
             if unsafe { deskkin_display_enable() } != 0 {
-                unsafe { deskkin_renderer_observe(5, in_flight_render_us, transfer_us) };
+                unsafe { deskkin_renderer_observe(5, render_us, transfer_us) };
                 return;
             }
             first_frame = false;
         }
-        unsafe { deskkin_renderer_observe(4, in_flight_render_us, transfer_us) };
-
-        in_flight_buffer = framebuffer.back_index();
-        in_flight_render_us = ready_render_us;
-        if unsafe { deskkin_display_submit(in_flight_buffer) } != 0 {
-            unsafe { deskkin_renderer_observe(5, in_flight_render_us, 0) };
-            return;
-        }
-        unsafe { deskkin_renderer_observe(3, in_flight_render_us, 0) };
-        framebuffer.swap();
+        unsafe { deskkin_renderer_observe(4, render_us, transfer_us) };
         frame = frame.wrapping_add(1);
     }
 }

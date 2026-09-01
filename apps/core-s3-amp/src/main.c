@@ -9,10 +9,6 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
-#include <esp_attr.h>
-#include <esp_cpu.h>
-#include <esp_private/esp_psram_extram.h>
-#include <esp_psram.h>
 #include "../shared.h"
 
 #define CONTROL_FRAME_MAX 188
@@ -39,10 +35,7 @@ static atomic_t transfer_failures;
 static atomic_t display_ready;
 static atomic_t boot_stage;
 static atomic_t boot_error;
-static volatile bool psram_ready;
-static uint16_t *framebuffers[2];
 static __aligned(32) uint16_t internal_framebuffer[320U * 240U];
-static EXT_RAM_BSS_ATTR __aligned(32) uint16_t external_framebuffer[320U * 240U];
 
 K_THREAD_STACK_DEFINE(supervisor_stack, 2048);
 static struct k_thread supervisor_thread;
@@ -50,19 +43,6 @@ K_THREAD_STACK_DEFINE(boot_stack, 4096);
 static struct k_thread boot_thread;
 
 extern int esp_appcpu_init(void);
-extern void __real_esp_init_psram(void);
-
-void __wrap_esp_init_psram(void)
-{
-	esp_cpu_stall(1);
-	__real_esp_init_psram();
-	psram_ready = esp_psram_is_initialized() && esp_psram_extram_test();
-}
-
-int __wrap_esp_psram_smh_init(void)
-{
-	return 0;
-}
 
 static void receive_heartbeat(void)
 {
@@ -134,10 +114,7 @@ static void supervisor_entry(void *first, void *second, void *third)
 				.magic = DESKKIN_DISPLAY_MAGIC,
 				.generation = 1U,
 				.ready = 1U,
-				.framebuffer = {
-					(uint32_t)(uintptr_t)framebuffers[0],
-					(uint32_t)(uintptr_t)framebuffers[1],
-				},
+				.framebuffer = (uint32_t)(uintptr_t)internal_framebuffer,
 			};
 			memcpy((void *)&AMP_SHARED->display, &message, sizeof(message));
 			__atomic_store_n(&AMP_SHARED->display_publication, 1U, __ATOMIC_RELEASE);
@@ -152,13 +129,7 @@ static void boot_entry(void *first, void *second, void *third)
 	ARG_UNUSED(second);
 	ARG_UNUSED(third);
 	atomic_set(&boot_stage, 1);
-	if (!psram_ready) {
-		atomic_set(&boot_error, 2);
-		return;
-	}
 	atomic_set(&boot_stage, 2);
-	framebuffers[0] = internal_framebuffer;
-	framebuffers[1] = external_framebuffer;
 	atomic_set(&boot_stage, 3);
 	if (esp_appcpu_init() != 0) {
 		atomic_set(&boot_error, 3);

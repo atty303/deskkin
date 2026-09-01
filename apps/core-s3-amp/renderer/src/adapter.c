@@ -42,7 +42,7 @@ K_THREAD_STACK_DEFINE(display_stack, 4096);
 static struct k_thread display_thread;
 
 static const struct device *const display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
-static uint16_t *framebuffers[2];
+static uint16_t *framebuffer;
 static atomic_t generation;
 static atomic_t completed_frames;
 static atomic_t allocation_failures;
@@ -121,23 +121,23 @@ void deskkin_sleep_ms(uint32_t delay_ms)
 
 uint16_t *deskkin_framebuffer_alloc(uint8_t index)
 {
-	if (index >= ARRAY_SIZE(framebuffers)) {
+	if (index != 0U) {
 		return NULL;
 	}
-	if (framebuffers[index] == NULL) {
-		const uint32_t address = AMP_SHARED->display.framebuffer[index];
+	if (framebuffer == NULL) {
+		const uint32_t address = AMP_SHARED->display.framebuffer;
 		if (address == 0U || (address & 31U) != 0U) {
 			atomic_inc(&allocation_failures);
 		} else {
-			framebuffers[index] = (uint16_t *)(uintptr_t)address;
+			framebuffer = (uint16_t *)(uintptr_t)address;
 		}
 	}
-	return framebuffers[index];
+	return framebuffer;
 }
 
 int deskkin_display_submit(uint8_t buffer_index)
 {
-	if (buffer_index >= ARRAY_SIZE(framebuffers) || framebuffers[buffer_index] == NULL) {
+	if (buffer_index != 0U || framebuffer == NULL) {
 		return -EINVAL;
 	}
 	const struct display_request request = {.buffer_index = buffer_index};
@@ -198,8 +198,7 @@ static void display_entry(void *first, void *second, void *third)
 		struct display_request request;
 		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
 		const int64_t started = k_uptime_ticks();
-		const int result = display_write(display, 0, 0, &descriptor,
-					   framebuffers[request.buffer_index]);
+		const int result = display_write(display, 0, 0, &descriptor, framebuffer);
 		const uint64_t elapsed = k_ticks_to_us_floor64(k_uptime_ticks() - started);
 		const struct display_completion completion = {
 			.buffer_index = request.buffer_index,
