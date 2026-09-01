@@ -1,6 +1,0 @@
-#include <zephyr/dt-bindings/display/panel.h>
-
-&ili9342c {
-	mipi-max-frequency = <30000000>;
-	pixel-format = <PANEL_PIXEL_FORMAT_RGB_565X>;
-};

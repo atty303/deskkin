@@ -10,80 +10,192 @@ pub const APPLICATION_QUEUE_CAPACITY: usize = 4;
 pub const RESERVED_CONTROL_CAPACITY: usize = 1;
 pub const COMPLETION_QUEUE_CAPACITY: usize = 8;
 pub const HOST_PORT: u16 = 39_042;
-pub const PET_BENCHMARK_DURATION_MS: u32 = 60_000;
-pub const PET_BENCHMARK_FRAME_PERIOD_US: u64 = 50_000;
-pub const PET_BENCHMARK_REQUESTS: u32 = 1_200;
-pub const PET_BENCHMARK_FRAME_BUDGET_US: u32 = 50_000;
-pub const PET_BENCHMARK_STALL_US: u32 = 250_000;
+pub const AMP_WORLD_MAGIC: u32 = 0x4453_574c;
+pub const AMP_WORLD_SCHEMA: u8 = 1;
+pub const AMP_WORLD_SNAPSHOT_LEN: usize = 24;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PetBenchmarkSummary {
-    pub duration_ms: u32,
-    pub update_requests: u32,
-    pub completed_frames: u32,
-    pub render_total_us: u32,
-    pub transfer_total_us: u32,
-    pub render_max_us: u32,
-    pub transfer_max_us: u32,
-    pub frames_within_budget: u32,
-    pub stalls: u16,
-    pub deadline_misses: u16,
-    pub max_consecutive_misses: u16,
-    pub transferred_lines: u32,
-    pub transferred_bytes: u32,
-    pub digest_updates: u32,
-    pub allocation_failures: u8,
-    pub transfer_failures: u16,
-    consecutive_misses: u16,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmpWorldSnapshot {
+    pub generation: u32,
+    pub observed_yaw: i64,
+    pub sas: Option<u32>,
+    pub shell: u8,
+    pub availability: Option<u8>,
+    pub notice: Option<u8>,
 }
 
-impl PetBenchmarkSummary {
-    pub fn request_updates(&mut self, count: u32) {
-        self.update_requests = self.update_requests.saturating_add(count);
-        self.record_misses(count.saturating_sub(1));
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AmpSnapshotError {
+    Unpublished,
+    Unstable,
+    UnknownSchema,
+    InvalidMagic,
+    GenerationMismatch,
+    InvalidSemanticValue,
+}
+
+pub fn decode_amp_world_snapshot(
+    publication_before: u32,
+    payload: &[u8; AMP_WORLD_SNAPSHOT_LEN],
+    publication_after: u32,
+) -> Result<AmpWorldSnapshot, AmpSnapshotError> {
+    if publication_before == 0 || publication_after == 0 {
+        return Err(AmpSnapshotError::Unpublished);
+    }
+    if publication_before != publication_after {
+        return Err(AmpSnapshotError::Unstable);
+    }
+    let magic = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    if magic != AMP_WORLD_MAGIC {
+        return Err(AmpSnapshotError::InvalidMagic);
+    }
+    let generation = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    if generation != publication_before {
+        return Err(AmpSnapshotError::GenerationMismatch);
+    }
+    if payload[20] != AMP_WORLD_SCHEMA {
+        return Err(AmpSnapshotError::UnknownSchema);
+    }
+    let shell = payload[21];
+    let availability = match payload[22] {
+        0 => None,
+        value @ 1..=3 => Some(value),
+        _ => return Err(AmpSnapshotError::InvalidSemanticValue),
+    };
+    let notice = match payload[23] {
+        0 => None,
+        1 => Some(1),
+        _ => return Err(AmpSnapshotError::InvalidSemanticValue),
+    };
+    if shell > 4 {
+        return Err(AmpSnapshotError::InvalidSemanticValue);
+    }
+    let sas = u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+    Ok(AmpWorldSnapshot {
+        generation,
+        observed_yaw: i64::from_le_bytes([
+            payload[8],
+            payload[9],
+            payload[10],
+            payload[11],
+            payload[12],
+            payload[13],
+            payload[14],
+            payload[15],
+        ]),
+        sas: (sas != u32::MAX).then_some(sas),
+        shell,
+        availability,
+        notice,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AmpTouchSample {
+    pub generation: u32,
+    pub x: i16,
+    pub y: i16,
+    pub pressed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmpTouchRing<const N: usize> {
+    samples: [AmpTouchSample; N],
+    generation: u32,
+    drops: u32,
+}
+
+impl<const N: usize> AmpTouchRing<N> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            samples: [AmpTouchSample {
+                generation: 0,
+                x: 0,
+                y: 0,
+                pressed: false,
+            }; N],
+            generation: 0,
+            drops: 0,
+        }
     }
 
-    pub fn complete_frame(
-        &mut self,
-        render_us: u32,
-        transfer_us: u32,
-        transferred_lines: u32,
-        transferred_bytes: u32,
-        digest_changed: bool,
-        deadline_missed: bool,
-    ) {
-        self.completed_frames = self.completed_frames.saturating_add(1);
-        self.render_total_us = self.render_total_us.saturating_add(render_us);
-        self.transfer_total_us = self.transfer_total_us.saturating_add(transfer_us);
-        self.render_max_us = self.render_max_us.max(render_us);
-        self.transfer_max_us = self.transfer_max_us.max(transfer_us);
-        if render_us.saturating_add(transfer_us) <= PET_BENCHMARK_FRAME_BUDGET_US {
-            self.frames_within_budget = self.frames_within_budget.saturating_add(1);
+    pub fn push(&mut self, x: i16, y: i16, pressed: bool) {
+        if N == 0 {
+            return;
         }
-        if render_us.saturating_add(transfer_us) > PET_BENCHMARK_STALL_US {
-            self.stalls = self.stalls.saturating_add(1);
+        let capacity = u32::try_from(N).unwrap_or(u32::MAX);
+        self.generation = self.generation.wrapping_add(1).max(1);
+        if self.generation > capacity {
+            self.drops = self.drops.saturating_add(1);
         }
-        self.transferred_lines = self.transferred_lines.saturating_add(transferred_lines);
-        self.transferred_bytes = self.transferred_bytes.saturating_add(transferred_bytes);
-        self.digest_updates = self
-            .digest_updates
-            .saturating_add(u32::from(digest_changed));
-        if deadline_missed {
-            self.record_misses(1);
+        self.samples[(self.generation as usize - 1) % N] = AmpTouchSample {
+            generation: self.generation,
+            x,
+            y,
+            pressed,
+        };
+    }
+
+    #[must_use]
+    pub fn next_after(&self, after: u32) -> Option<AmpTouchSample> {
+        if N == 0 || self.generation == 0 || after == self.generation {
+            return None;
+        }
+        let capacity = u32::try_from(N).unwrap_or(u32::MAX);
+        let oldest = self.generation.saturating_sub(capacity).saturating_add(1);
+        let wanted = after.wrapping_add(1).max(oldest);
+        let sample = self.samples[(wanted as usize - 1) % N];
+        (sample.generation == wanted).then_some(sample)
+    }
+
+    #[must_use]
+    pub const fn drops(&self) -> u32 {
+        self.drops
+    }
+}
+
+impl<const N: usize> Default for AmpTouchRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Host-side conformance model for generation-published latest-value AMP slots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmpLatestValue<T: Copy> {
+    generation: u32,
+    value: Option<T>,
+}
+
+impl<T: Copy> AmpLatestValue<T> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            generation: 0,
+            value: None,
+        }
+    }
+
+    pub fn publish(&mut self, value: T) -> u32 {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.value = Some(value);
+        self.generation
+    }
+
+    #[must_use]
+    pub fn latest_after(&self, observed_generation: u32) -> Option<(u32, T)> {
+        if self.generation == 0 || self.generation == observed_generation {
+            None
         } else {
-            self.consecutive_misses = 0;
+            self.value.map(|value| (self.generation, value))
         }
     }
+}
 
-    pub fn record_transfer_failure(&mut self) {
-        self.transfer_failures = self.transfer_failures.saturating_add(1);
-    }
-
-    fn record_misses(&mut self, count: u32) {
-        let count = u16::try_from(count).unwrap_or(u16::MAX);
-        self.deadline_misses = self.deadline_misses.saturating_add(count);
-        self.consecutive_misses = self.consecutive_misses.saturating_add(count);
-        self.max_consecutive_misses = self.max_consecutive_misses.max(self.consecutive_misses);
+impl<T: Copy> Default for AmpLatestValue<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -297,8 +409,7 @@ pub enum ControlCommand {
     Run = 7,
     Status = 8,
     Shutdown = 9,
-    PetBenchmarkStart = 10,
-    PetBenchmarkStatus = 11,
+    WorldBenchmarkStart = 10,
 }
 
 impl TryFrom<u8> for ControlCommand {
@@ -315,8 +426,7 @@ impl TryFrom<u8> for ControlCommand {
             7 => Ok(Self::Run),
             8 => Ok(Self::Status),
             9 => Ok(Self::Shutdown),
-            10 => Ok(Self::PetBenchmarkStart),
-            11 => Ok(Self::PetBenchmarkStatus),
+            10 => Ok(Self::WorldBenchmarkStart),
             _ => Err(DecodeError::UnknownCommand),
         }
     }
@@ -509,25 +619,61 @@ mod tests {
     }
 
     #[test]
-    fn pet_benchmark_summary_tracks_budget_misses_and_bounded_counters() {
-        let mut summary = PetBenchmarkSummary::default();
-        summary.request_updates(3);
-        summary.complete_frame(20_000, 20_000, 240, 153_600, true, true);
-        summary.complete_frame(30_000, 25_000, 120, 76_800, false, false);
-        summary.complete_frame(200_000, 60_000, 1, 2, true, false);
-        summary.record_transfer_failure();
+    fn amp_snapshot_distinguishes_unstable_schema_and_semantics() {
+        let mut payload = [0_u8; AMP_WORLD_SNAPSHOT_LEN];
+        payload[0..4].copy_from_slice(&AMP_WORLD_MAGIC.to_le_bytes());
+        payload[4..8].copy_from_slice(&7_u32.to_le_bytes());
+        payload[8..16].copy_from_slice(&(-65_536_i64).to_le_bytes());
+        payload[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        payload[20] = AMP_WORLD_SCHEMA;
+        payload[21] = 4;
+        payload[22] = 2;
+        payload[23] = 1;
+        assert_eq!(
+            decode_amp_world_snapshot(7, &payload, 7).unwrap(),
+            AmpWorldSnapshot {
+                generation: 7,
+                observed_yaw: -65_536,
+                sas: None,
+                shell: 4,
+                availability: Some(2),
+                notice: Some(1),
+            }
+        );
+        assert_eq!(
+            decode_amp_world_snapshot(7, &payload, 8),
+            Err(AmpSnapshotError::Unstable)
+        );
+        payload[20] = 99;
+        assert_eq!(
+            decode_amp_world_snapshot(7, &payload, 7),
+            Err(AmpSnapshotError::UnknownSchema)
+        );
+    }
 
-        assert_eq!(summary.update_requests, 3);
-        assert_eq!(summary.completed_frames, 3);
-        assert_eq!(summary.frames_within_budget, 1);
-        assert_eq!(summary.deadline_misses, 3);
-        assert_eq!(summary.max_consecutive_misses, 3);
-        assert_eq!(summary.stalls, 1);
-        assert_eq!(summary.transferred_lines, 361);
-        assert_eq!(summary.transferred_bytes, 230_402);
-        assert_eq!(summary.digest_updates, 2);
-        assert_eq!(summary.transfer_failures, 1);
-        assert_eq!(summary.render_max_us, 200_000);
-        assert_eq!(summary.transfer_max_us, 60_000);
+    #[test]
+    fn amp_touch_ring_reports_overflow_and_resumes_at_oldest_sample() {
+        let mut ring = AmpTouchRing::<2>::new();
+        ring.push(10, 20, true);
+        ring.push(11, 20, true);
+        ring.push(12, 20, false);
+        assert_eq!(ring.drops(), 1);
+        assert_eq!(ring.next_after(0).unwrap().generation, 2);
+        assert_eq!(ring.next_after(2).unwrap().generation, 3);
+        assert_eq!(ring.next_after(3), None);
+    }
+
+    #[test]
+    fn amp_command_and_target_mailboxes_overwrite_with_the_latest_generation() {
+        let mut command = AmpLatestValue::new();
+        let first = command.publish(1_u8);
+        let second = command.publish(3_u8);
+        assert_ne!(first, second);
+        assert_eq!(command.latest_after(0), Some((second, 3)));
+        assert_eq!(command.latest_after(second), None);
+
+        let mut target = AmpLatestValue::new();
+        let generation = target.publish(65_536_i64);
+        assert_eq!(target.latest_after(0), Some((generation, 65_536)));
     }
 }

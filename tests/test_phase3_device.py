@@ -19,26 +19,6 @@ class Phase3DeviceTests(unittest.TestCase):
     def profile(self):
         return {"schema_version": 1, "ssid": "fixture", "password": "fake-password", "host_ipv4": "192.168.10.2"}
 
-    def pet_benchmark_status(self):
-        status = bytearray(80)
-        status[0] = 1
-        status[26] = 2
-        for start, length, value in (
-            (30, 4, 60_010),
-            (34, 4, 1_200),
-            (38, 4, 1_200),
-            (42, 4, 12_000_000),
-            (46, 4, 24_000_000),
-            (50, 4, 20_000),
-            (54, 4, 30_000),
-            (58, 4, 1_140),
-            (68, 4, 288_000),
-            (72, 4, 184_320_000),
-            (76, 4, 1_200),
-        ):
-            status[start : start + length] = value.to_bytes(length, "big")
-        return bytes(status)
-
     def test_build_verifies_the_same_state_directory_it_uses(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -84,7 +64,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertNotIn("--domain", command)
         self.assertIn(str(build), command)
 
-    def test_amp_pipeline_benchmark_observes_progress_and_bounded_timings(self):
+    def test_world_benchmark_observes_progress_and_bounded_timings(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
@@ -95,7 +75,7 @@ class Phase3DeviceTests(unittest.TestCase):
         def status(*_args, **_kwargs):
             nonlocal generation
             generation += 3
-            response = bytearray(92)
+            response = bytearray(160)
             response[0] = 1
             response[27] = 1
             response[28:32] = generation.to_bytes(4, "big")
@@ -108,21 +88,38 @@ class Phase3DeviceTests(unittest.TestCase):
             response[57:61] = (14_000).to_bytes(4, "big")
             response[61:65] = (44_000).to_bytes(4, "big")
             response[74:78] = (3_000).to_bytes(4, "big")
-            response[80] = 2
+            response[80] = 1
+            response[81] = 2
             response[82:84] = (10).to_bytes(2, "big")
-            response[84:88] = (12_800).to_bytes(4, "big")
-            response[88:92] = (25_600).to_bytes(4, "big")
+            response[84:88] = (1_200).to_bytes(4, "big")
+            response[92:96] = generation.to_bytes(4, "big")
+            response[96:100] = generation.to_bytes(4, "big")
+            response[100:104] = generation.to_bytes(4, "big")
+            response[112:114] = (20).to_bytes(2, "big")
+            response[114:116] = (6).to_bytes(2, "big")
+            response[118] = 3
+            response[119] = 1
+            response[120:124] = (2_000).to_bytes(4, "big")
+            response[124:128] = (4_000).to_bytes(4, "big")
+            response[128:132] = (100).to_bytes(4, "big")
+            response[132:136] = (120).to_bytes(4, "big")
+            response[136:140] = (20).to_bytes(4, "big")
+            response[140:144] = (30).to_bytes(4, "big")
+            response[144:148] = (2_000).to_bytes(4, "big")
+            response[148:152] = (2_000).to_bytes(4, "big")
+            response[152:156] = (8_000).to_bytes(4, "big")
+            response[156:160] = (9_000).to_bytes(4, "big")
             return bytes(response)
 
         with mock.patch.object(device, "time", clock), mock.patch.object(
             device, "run_control", side_effect=status
         ) as run_control:
-            summary = device.amp_render_pipeline_benchmark("/dev/fake")
+            summary = device.world_benchmark("/dev/fake")
 
         self.assertEqual(summary["value"], "observed")
         self.assertGreater(summary["completed_frames"], 0)
         self.assertGreaterEqual(summary["measured_fps_milli"], 20_000)
-        self.assertLess(summary["observation_duration_ms"], summary["duration_ms"])
+        self.assertLessEqual(summary["observation_duration_ms"], summary["duration_ms"])
         self.assertGreaterEqual(summary["measurement_coverage_milli"], 800)
         self.assertLessEqual(summary["last_observation_age_ms"], 1_000)
         self.assertEqual(summary["last_availability"], 1)
@@ -130,27 +127,26 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertEqual(summary["transfer_max_us"], 44_000)
         self.assertEqual(summary["copy_last_us"], 3_000)
         self.assertEqual(summary["wire_last_us"], 39_000)
-        self.assertEqual(summary["dirty_rect_count"], 2)
-        self.assertEqual(summary["dirty_pixels"], 12_800)
-        self.assertEqual(summary["transferred_bytes"], 25_600)
+        self.assertEqual(summary["requested_updates"], 1_200)
         self.assertEqual(summary["pixel_dma_batches"], 10)
-        self.assertTrue(run_control.call_args_list[0].kwargs["recover_status_transport"])
-        self.assertFalse(run_control.call_args_list[1].kwargs["recover_status_transport"])
+        self.assertEqual(run_control.call_args_list[0].args[0], "world-benchmark-start")
+        self.assertTrue(run_control.call_args_list[1].kwargs["recover_status_transport"])
+        self.assertFalse(run_control.call_args_list[2].kwargs["recover_status_transport"])
 
-    def test_amp_pipeline_status_rejects_allocation_failure(self):
-        status = bytearray(80)
+    def test_world_status_rejects_allocation_failure(self):
+        status = bytearray(160)
         status[0] = 1
         status[27] = 1
         status[28:32] = (3).to_bytes(4, "big")
         status[40:44] = (2).to_bytes(4, "big")
         status[54] = 1
         status[56] = 1
-        decoded = device.decode_amp_pipeline_status(bytes(status))
+        decoded = device.decode_world_status(bytes(status))
 
         self.assertEqual(decoded["allocation_failures"], 1)
         self.assertEqual(decoded["completed_frames"], 2)
 
-    def test_amp_pipeline_measurement_reports_less_than_twenty_fps(self):
+    def test_world_measurement_reports_less_than_twenty_fps(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
@@ -160,7 +156,7 @@ class Phase3DeviceTests(unittest.TestCase):
         def status(*_args, **_kwargs):
             nonlocal generation
             generation += 1
-            response = bytearray(80)
+            response = bytearray(160)
             response[0] = 1
             response[27] = 1
             response[28:32] = generation.to_bytes(4, "big")
@@ -172,17 +168,25 @@ class Phase3DeviceTests(unittest.TestCase):
             response[56] = 1
             response[57:61] = (10_000).to_bytes(4, "big")
             response[61:65] = (40_000).to_bytes(4, "big")
+            response[80] = 1
+            response[81] = 2
+            response[84:88] = (1_200).to_bytes(4, "big")
+            response[92:96] = generation.to_bytes(4, "big")
+            response[96:100] = generation.to_bytes(4, "big")
+            response[112:114] = (20).to_bytes(2, "big")
+            response[114:116] = (6).to_bytes(2, "big")
+            response[118] = 4
             return bytes(response)
 
         with mock.patch.object(device, "time", clock), mock.patch.object(
             device, "run_control", side_effect=status
         ):
-            summary = device.amp_render_pipeline_benchmark("/dev/fake")
+            summary = device.world_benchmark("/dev/fake")
 
         self.assertEqual(summary["value"], "observed")
         self.assertLess(summary["measured_fps_milli"], 20_000)
 
-    def test_amp_pipeline_benchmark_rejects_renderer_that_stops_before_deadline(self):
+    def test_world_benchmark_rejects_renderer_that_stops_before_deadline(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
@@ -191,9 +195,9 @@ class Phase3DeviceTests(unittest.TestCase):
 
         def status(*_args, **_kwargs):
             nonlocal generation
-            response = bytearray(80)
+            response = bytearray(160)
             response[0] = 1
-            if clock.now < device.AMP_BENCHMARK_DURATION_SECONDS / 2:
+            if clock.now < device.WORLD_BENCHMARK_DURATION_SECONDS / 2:
                 generation += 5
                 response[27] = 1
                 response[28:32] = generation.to_bytes(4, "big")
@@ -212,9 +216,9 @@ class Phase3DeviceTests(unittest.TestCase):
         with mock.patch.object(device, "time", clock), mock.patch.object(
             device, "run_control", side_effect=status
         ), self.assertRaises(device.DeviceError):
-            device.amp_render_pipeline_benchmark("/dev/fake")
+            device.world_benchmark("/dev/fake")
 
-    def test_amp_pipeline_benchmark_rejects_fresh_renderer_failure(self):
+    def test_world_benchmark_rejects_fresh_renderer_failure(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
@@ -224,7 +228,7 @@ class Phase3DeviceTests(unittest.TestCase):
         def status(*_args, **_kwargs):
             nonlocal generation
             generation += 1
-            response = bytearray(80)
+            response = bytearray(160)
             response[0] = 1
             response[27] = 1
             response[28:32] = generation.to_bytes(4, "big")
@@ -232,43 +236,46 @@ class Phase3DeviceTests(unittest.TestCase):
             response[40:44] = generation.to_bytes(4, "big")
             response[44:48] = (10_000).to_bytes(4, "big")
             response[48:52] = (40_000).to_bytes(4, "big")
-            response[52] = 5 if clock.now >= device.AMP_BENCHMARK_DURATION_SECONDS - 0.25 else 4
+            response[52] = 5 if clock.now >= device.WORLD_BENCHMARK_DURATION_SECONDS - 0.25 else 4
             response[56] = 1
+            response[80] = 1
+            response[81] = 2
+            response[84:88] = (1_200).to_bytes(4, "big")
             return bytes(response)
 
         with mock.patch.object(device, "time", clock), mock.patch.object(
             device, "run_control", side_effect=status
-        ), self.assertRaises(device.AmpBenchmarkError) as raised:
-            device.amp_render_pipeline_benchmark("/dev/fake")
+        ), self.assertRaises(device.WorldBenchmarkError) as raised:
+            device.world_benchmark("/dev/fake")
 
-        self.assertEqual(raised.exception.error_type, "amp_pipeline_benchmark_failed")
+        self.assertEqual(raised.exception.error_type, "world_benchmark_failed")
         self.assertEqual(raised.exception.summary["renderer_stage"], 5)
         self.assertEqual(raised.exception.summary["status"], "error")
 
     def test_amp_benchmark_cli_records_measurement_failure_summary(self):
         summary = {
-            "operation": "amp_render_pipeline",
+            "operation": "world_benchmark",
             "status": "error",
-            "error_type": "amp_pipeline_benchmark_failed",
+            "error_type": "world_benchmark_failed",
             "duration_ms": 10_000,
             "renderer_stage": 5,
             "allocation_failures": 0,
             "transfer_failures": 0,
         }
-        failure = device.AmpBenchmarkError("amp_pipeline_benchmark_failed", summary)
+        failure = device.WorldBenchmarkError("world_benchmark_failed", summary)
         with mock.patch.object(
             device.sys,
             "argv",
-            ["phase3_device.py", "amp-benchmark", "--duration-seconds", "10"],
+            ["phase3_device.py", "benchmark", "--duration-seconds", "10"],
         ), mock.patch.object(
-            device, "amp_render_pipeline_benchmark", side_effect=failure
+            device, "world_benchmark", side_effect=failure
         ) as benchmark, mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
             device, "publish_result", return_value=Path("/tmp/result.json")
         ):
             exit_code = device.main()
 
         self.assertEqual(exit_code, 2)
-        benchmark.assert_called_once_with(None, device.AMP_BENCHMARK_DURATION_SECONDS)
+        benchmark.assert_called_once_with(None, device.WORLD_BENCHMARK_DURATION_SECONDS)
         self.assertEqual(publish_diagnostic.call_args.args[2], "error")
         self.assertEqual(publish_diagnostic.call_args.args[3], [summary])
 
@@ -276,7 +283,7 @@ class Phase3DeviceTests(unittest.TestCase):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
         self.assertIn("ASSERT(_end <= 0x3fce2000", linker)
 
-    def test_amp_supervisor_reserves_two_full_internal_framebuffers(self):
+    def test_amp_supervisor_reserves_two_full_psram_framebuffers(self):
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
         source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
         self.assertIn("CONFIG_ESP_SPIRAM=y", config)
@@ -284,8 +291,9 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
         self.assertIn("CONFIG_SPIRAM_MODE_QUAD=y", config)
         self.assertIn("CONFIG_SPIRAM_SPEED_80M=y", config)
-        self.assertIn("internal_framebuffer[2U][320U * 240U]", source)
-        self.assertNotIn("external_framebuffer", source)
+        self.assertIn("2U * 320U * 240U * sizeof(uint16_t)", source)
+        self.assertIn("renderer_framebuffer = renderer_heap", source)
+        self.assertNotIn("internal_framebuffer", source)
         self.assertIn("esp_psram_get_mapped_region", source)
         self.assertIn("mapped_heap_size / 2U < CONFIG_ESP_SPIRAM_HEAP_SIZE", source)
         self.assertIn("mapped_heap_size - renderer_heap_size", source)
@@ -295,7 +303,7 @@ class Phase3DeviceTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--slot-size 0x200000"',
+            'CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--slot-size 0x300000"',
             renderer_config,
         )
 
@@ -353,8 +361,8 @@ class Phase3DeviceTests(unittest.TestCase):
     def test_amp_renderer_releases_active_loop_before_direct_qoi_decode(self):
         renderer = (ROOT / "apps/core-s3-amp/renderer/src/lib.rs").read_text(encoding="utf-8")
         release = renderer.index("component.set_pet_atlas(Image::default())")
-        decode = renderer.index("let image = decode_loop", release)
-        install = renderer.index("component.set_pet_atlas(image)", decode)
+        decode = renderer.index("let next = decode_loop", release)
+        install = renderer.index("component.set_pet_atlas(next.image.clone())", decode)
         redraw = renderer.index("component.set_pet_frame_index(0)", install)
         self.assertLess(release, decode)
         self.assertLess(decode, install)
@@ -411,7 +419,7 @@ int main(void) {
                     "-Wextra",
                     "-Werror",
                     "-I",
-                    str(ROOT / "apps/core-s3-device/src"),
+                    str(ROOT / "apps/core-s3-service/src"),
                     str(harness),
                     "-o",
                     str(executable),
@@ -524,7 +532,7 @@ int main(void) {
             self.assertEqual(write.call_count, 1)
 
     def test_monitor_status_does_not_wait_for_transport_recovery(self):
-        status = bytearray(80)
+        status = bytearray(160)
         attributes = [0, 0, 0, 0, 0, 0, [0] * 32]
         with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
             device.os, "open", return_value=7
@@ -539,9 +547,9 @@ int main(void) {
         sleep.assert_called_once_with(0.0)
 
     def test_mutation_stops_at_closed_boot_failure(self):
-        status = bytearray(80)
+        status = bytearray(160)
         status[0] = 1
-        status[79] = 2
+        status[69] = 2
         with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
             device, "exchange", return_value=bytes(status)
         ) as exchange:
@@ -559,15 +567,15 @@ int main(void) {
         self.assertEqual(exchange.call_count, 1)
 
     def test_unknown_boot_failure_remains_closed(self):
-        status = bytearray(80)
-        status[79] = 255
+        status = bytearray(160)
+        status[69] = 255
         self.assertEqual(device.status_boot_error(bytes(status)), "boot_unknown")
 
     def test_status_waits_until_boot_is_complete(self):
-        starting = bytearray(80)
-        starting[78] = 8
+        starting = bytearray(160)
+        starting[68] = 8
         complete = bytearray(starting)
-        complete[78] = device.BOOT_COMPLETE_STAGE
+        complete[68] = device.BOOT_COMPLETE_STAGE
         with mock.patch.object(device, "run_control", return_value=bytes(complete)) as run_control, mock.patch.object(
             device.time, "sleep"
         ) as sleep:
@@ -577,21 +585,21 @@ int main(void) {
         run_control.assert_called_once_with("status", "/dev/fake", recover_status_transport=False)
 
     def test_status_boot_wait_is_bounded(self):
-        starting = bytearray(80)
-        starting[78] = 8
+        starting = bytearray(160)
+        starting[68] = 8
         with mock.patch.object(device.time, "monotonic", side_effect=[0.0, 15.0]):
             with self.assertRaisesRegex(device.DeviceError, "boot_not_ready"):
                 device.await_boot_complete(bytes(starting), "/dev/fake")
 
     def test_status_rejects_unknown_completed_boot_stage(self):
-        status = bytearray(80)
-        status[78] = 255
+        status = bytearray(160)
+        status[68] = 255
         with self.assertRaisesRegex(device.DeviceError, "boot_unknown"):
             device.await_boot_complete(bytes(status), "/dev/fake")
 
     def test_boot_failure_is_not_persisted_as_a_complete_diagnostic(self):
-        status = bytearray(80)
-        status[79] = 2
+        status = bytearray(160)
+        status[69] = 2
         with mock.patch.object(device.sys, "argv", ["phase3_device.py", "status"]), mock.patch.object(
             device, "run_control", return_value=bytes(status)
         ), mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
@@ -614,8 +622,9 @@ int main(void) {
         publish_diagnostic.assert_not_called()
 
     def test_successful_status_publishes_diagnostic(self):
-        status = bytearray(80)
-        status[78] = 9
+        status = bytearray(160)
+        status[0] = 1
+        status[68] = 9
         with mock.patch.object(device.sys, "argv", ["phase3_device.py", "status"]), mock.patch.object(
             device, "run_control", return_value=bytes(status)
         ), mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
@@ -627,10 +636,12 @@ int main(void) {
         publish_diagnostic.assert_called_once()
 
     def test_status_report_is_bounded_and_contains_no_payload(self):
-        status = bytearray(80)
+        status = bytearray(160)
+        status[0] = 1
         status[26] = 4
         status[27] = 1
-        status[78] = 7
+        status[80] = 1
+        status[68] = 7
         with mock.patch.object(device.sys, "stderr") as stderr:
             device.report_status(bytes(status))
         reported = json.loads("".join(call.args[0] for call in stderr.write.call_args_list))
@@ -639,8 +650,9 @@ int main(void) {
             {
                 "shell_state": 4,
                 "availability": 1,
-                "last_stage": "idle",
-                "last_error": None,
+                "heartbeat_freshness": 1,
+                "renderer_stage": 0,
+                "renderer_fault": 0,
                 "boot_stage": 7,
                 "boot_error": None,
             },
@@ -663,70 +675,42 @@ int main(void) {
     def test_run_success_requires_valid_result_and_rendered_correlations(self):
         record = {
             "shell_state": 4,
+            "availability": 1,
+            "generation": 7,
+            "completed_frames": 1,
+            "renderer_stage": 4,
+            "renderer_fault": 0,
+            "allocation_failures": 0,
+            "transfer_failures": 0,
+            "stale_snapshots": 0,
             "valid_availability_result": True,
-            "session_context_id": "11" * 16,
-            "operation_context_id": "22" * 16,
-            "rgb565_digest": "12345678",
-            "run_attempt": 7,
-            "result_attempt": 7,
-            "frame_attempt": 7,
+            "valid_view_generation": 6,
+            "view_generation": 7,
         }
         self.assertTrue(device.run_succeeded([record], 7))
+        self.assertTrue(device.run_succeeded([record | {"availability": 2}], 7))
         for key, invalid in (
+            ("availability", 0),
+            ("generation", 0),
+            ("completed_frames", 0),
             ("valid_availability_result", False),
-            ("session_context_id", "00" * 16),
-            ("operation_context_id", "00" * 16),
-            ("rgb565_digest", "00000000"),
+            ("valid_view_generation", 0),
+            ("renderer_fault", 1),
+            ("stale_snapshots", 1),
         ):
             self.assertFalse(device.run_succeeded([record | {key: invalid}], 7))
-        for key in ("run_attempt", "result_attempt", "frame_attempt"):
-            self.assertFalse(device.run_succeeded([record | {key: 6}], 7))
 
-    def test_pet_benchmark_gate_decodes_only_bounded_timing_and_counters(self):
-        summary = device.decode_pet_benchmark(self.pet_benchmark_status())
-        self.assertTrue(device.pet_benchmark_passed(summary))
-        self.assertEqual(summary["animation_update_requests"], 1_200)
-        self.assertEqual(summary["completed_frames"], 1_200)
-        self.assertEqual(summary["frames_within_50ms"], 1_140)
-        self.assertEqual(summary["frame_digest_updates"], 1_200)
-        self.assertNotIn("rgb565_digest", summary)
-        self.assertNotIn("asset_path", summary)
-
-        for key, value in (
-            ("state", 3),
-            ("duration_ms", 60_501),
-            ("animation_update_requests", 1_199),
-            ("completed_frames", 1_199),
-            ("frames_within_50ms", 1_139),
-            ("stalls_over_250ms", 1),
-            ("allocation_failures", 1),
-            ("display_transfer_failures", 1),
-            ("frame_digest_updates", 0),
-        ):
-            self.assertFalse(device.pet_benchmark_passed(summary | {key: value}), key)
-
-    def test_pet_benchmark_wait_avoids_usb_polling_during_measurement(self):
-        with mock.patch.object(device.time, "sleep") as sleep, mock.patch.object(
-            device, "run_control", return_value=self.pet_benchmark_status()
-        ) as run_control:
-            summary = device.await_pet_benchmark("/dev/fake")
-        self.assertTrue(device.pet_benchmark_passed(summary))
-        sleep.assert_called_once_with(60.5)
-        run_control.assert_called_once_with(
-            "pet-benchmark-status", "/dev/fake", recover_status_transport=False
-        )
-
-    def test_pet_benchmark_action_stops_application_before_start(self):
-        calls = []
-
-        def control(command, *args, **kwargs):
-            calls.append(command)
-            return bytes(80)
-
-        summary = device.decode_pet_benchmark(self.pet_benchmark_status())
+    def test_world_benchmark_uses_the_amp_product_observation_path(self):
+        summary = {
+            "operation": "world_benchmark",
+            "status": "success",
+            "error_type": None,
+            "duration_ms": 60_000,
+            "completed_frames": 1_200,
+        }
         with mock.patch.object(device.sys, "argv", ["phase3_device.py", "benchmark", "--device", "/dev/fake"]), mock.patch.object(
-            device, "run_control", side_effect=control
-        ), mock.patch.object(device, "await_pet_benchmark", return_value=summary), mock.patch.object(
+            device, "world_benchmark", return_value=summary
+        ) as benchmark, mock.patch.object(
             device, "publish_diagnostic"
         ) as publish_diagnostic, mock.patch.object(
             device, "publish_result", return_value=Path("/tmp/benchmark.json")
@@ -734,9 +718,9 @@ int main(void) {
             device.sys, "stderr", io.StringIO()
         ):
             self.assertEqual(device.main(), 0)
-        self.assertEqual(calls, ["shutdown", "pet-benchmark-start"])
+        benchmark.assert_called_once_with("/dev/fake", device.WORLD_BENCHMARK_DURATION_SECONDS)
         record = publish_diagnostic.call_args.args[3][0]
-        self.assertEqual(record["operation"], "pet_render_benchmark")
+        self.assertEqual(record["operation"], "world_benchmark")
         self.assertEqual(record["status"], "success")
         for forbidden in ("rgb565_digest", "asset_path", "pixel", "raw_packet"):
             self.assertNotIn(forbidden, record)
@@ -800,6 +784,9 @@ int main(void) {
                     "session_context_id": "00" * 16,
                     "operation_context_id": "11" * 16,
                     "rgb565_digest": "12345678",
+                    "sas": "123456",
+                    "asset_path": "/private/pet.qoi",
+                    "touch_coordinates": [[1, 2]],
                     "shell_state": 1,
                 }
             ]
@@ -809,7 +796,11 @@ int main(void) {
             self.assertEqual(len(list(diagnostics.glob("*.json"))), 10)
             self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in diagnostics.glob("*.json")))
             persisted = b"".join(path.read_bytes() for path in diagnostics.glob("*.json"))
-            for forbidden in (b"password", b"ssid", b"socket_address", b"authentication_string", b"private_key"):
+            for forbidden in (
+                b"password", b"ssid", b"socket_address", b"authentication_string",
+                b"private_key", b"rgb565_digest", b"12345678", b"sas",
+                b"asset_path", b"pet.qoi", b"touch_coordinates",
+            ):
                 self.assertNotIn(forbidden, persisted)
 
     def test_device_diagnostics_reject_symlink_root(self):

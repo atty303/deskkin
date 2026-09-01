@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: MIT
+
+[workspace]
+resolver = "2"
+
+[package]
+name = "deskkin-core-s3-supervisor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[lib]
+name = "rustapp"
+crate-type = ["staticlib"]
+
+[dependencies]
+deskkin-core-s3-service = { path = "../core-s3-service", default-features = false }
+zephyr = "=0.1.0"
+
+[profile.dev]
+codegen-units = 1
+debug = true
+lto = "fat"
+opt-level = 2
+panic = "abort"
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = "fat"
+opt-level = "s"
+panic = "abort"

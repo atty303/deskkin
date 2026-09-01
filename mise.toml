@@ -87,7 +87,6 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 python scripts/phase3_device.py build
-python scripts/phase3_device.py amp-build
 '''
 
 [tasks."simulator:desktop"]
@@ -141,18 +140,6 @@ run = "./scripts/bootstrap_core_s3.sh"
 [tasks."core-s3:build"]
 description = "Build the CoreS3 firmware without touching a device"
 run = "python scripts/phase3_device.py build"
-
-[tasks."core-s3:amp-build"]
-description = "Build the CoreS3 AMP Koyori QOI rendering pipeline firmware"
-run = "python scripts/phase3_device.py amp-build"
-
-[tasks."core-s3:amp-flash"]
-description = "Flash the CoreS3 AMP Koyori QOI rendering pipeline firmware"
-run = "python scripts/phase3_device.py amp-flash"
-
-[tasks."core-s3:amp-benchmark"]
-description = "Measure the APPCPU full-screen rendering pipeline through the PROCPU status surface"
-run = "python scripts/phase3_device.py amp-benchmark"
 
 [tasks."core-s3:flash"]
 description = "Flash the dedicated CoreS3 firmware after read-only device inspection"

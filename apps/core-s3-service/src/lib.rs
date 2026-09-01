@@ -4,27 +4,16 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, rc::Rc};
+use alloc::boxed::Box;
+use core::ffi::c_int;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
-use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
-use deskkin_presentation::PetAnimator;
 use embassy_time::Instant;
-use slint::platform::software_renderer::{
-    MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, Rgb565Pixel, TargetPixel,
-};
-use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
 use snow::params::{CipherChoice, DHChoice, HashChoice};
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 use snow::types::{Cipher, Dh, Hash, Random};
-use static_cell::StaticCell;
-use zephyr::embassy::Executor;
 use zeroize::Zeroize;
 
-slint::include_modules!();
-
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
-static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 static UI_ACTION: AtomicU8 = AtomicU8::new(0);
 static UI_SAS: AtomicU32 = AtomicU32::new(u32::MAX);
 static UI_VIEW: AtomicU8 = AtomicU8::new(0);
@@ -39,23 +28,6 @@ static LAST_ERROR: AtomicU8 = AtomicU8::new(0);
 static BOOT_STAGE: AtomicU8 = AtomicU8::new(BootStage::Starting as u8);
 static BOOT_ERROR: AtomicU8 = AtomicU8::new(BootError::None as u8);
 static APPLICATION_RUNNING: AtomicU8 = AtomicU8::new(1);
-static PET_BENCHMARK_STATE: AtomicU8 = AtomicU8::new(0);
-static PET_BENCHMARK_DURATION_MS: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_UPDATE_REQUESTS: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_COMPLETED_FRAMES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_RENDER_TOTAL_US: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_TRANSFER_TOTAL_US: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_RENDER_MAX_US: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_TRANSFER_MAX_US: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_WITHIN_BUDGET: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_STALLS: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_DEADLINE_MISSES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_MAX_CONSECUTIVE_MISSES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_TRANSFERRED_LINES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_TRANSFERRED_BYTES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_DIGEST_UPDATES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_TRANSFER_FAILURES: AtomicU32 = AtomicU32::new(0);
-static PET_BENCHMARK_ALLOCATION_FAILURES: AtomicU8 = AtomicU8::new(0);
 static SESSION_CONTEXT: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 static OPERATION_CONTEXT: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 static OWNER_GENERATION_HIGH: AtomicU32 = AtomicU32::new(0);
@@ -63,8 +35,6 @@ static OWNER_GENERATION_LOW: AtomicU32 = AtomicU32::new(0);
 static PEER_STATE: AtomicU8 = AtomicU8::new(deskkin_core_s3::PeerState::Unpaired as u8);
 static CONFIG_PRESENT: AtomicU8 = AtomicU8::new(0);
 static PEER_ID: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
-const WIDTH: usize = 320;
-const HEIGHT: usize = 240;
 
 unsafe extern "C" {
     fn deskkin_boot_trace(stage: u8, error: u8);
@@ -75,17 +45,7 @@ unsafe extern "C" {
     fn deskkin_nvs_read(record_id: u16, output: *mut u8, capacity: usize) -> c_int;
     fn deskkin_nvs_write_readback(record_id: u16, input: *const u8, length: usize) -> c_int;
     fn deskkin_nvs_delete(record_id: u16) -> c_int;
-    fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
-    fn deskkin_allocation_failures() -> u8;
     fn deskkin_control_trace() -> u8;
-    fn deskkin_display_submit(buffer_index: u8) -> c_int;
-    fn deskkin_display_take_completion(
-        buffer_index: *mut u8,
-        duration_us: *mut u32,
-        completed_at_us: *mut u64,
-    ) -> c_int;
-    fn deskkin_display_enable() -> c_int;
-    fn deskkin_take_touch(x: *mut i32, y: *mut i32) -> bool;
     fn deskkin_wifi_disconnect() -> c_int;
     fn deskkin_wifi_associate(
         ssid: *const u8,
@@ -101,6 +61,8 @@ unsafe extern "C" {
     fn deskkin_tcp_close(descriptor: c_int) -> c_int;
     fn deskkin_sleep_ms(delay_ms: u32);
     fn deskkin_uptime_ms() -> u64;
+    fn deskkin_amp_status_snapshot(command_id: *const u8, output: *mut u8) -> usize;
+    fn deskkin_amp_world_benchmark_start() -> c_int;
 }
 
 const IDENTITY_A: u16 = 0x100;
@@ -127,10 +89,6 @@ enum BootStage {
     Starting = 1,
     NoiseResolverReady = 4,
     ServiceWorkerReady = 5,
-    UiPlatformReady = 6,
-    UiComponentReady = 7,
-    FramebufferReady = 8,
-    FirstFrameReady = 9,
 }
 
 #[derive(Clone, Copy)]
@@ -139,20 +97,6 @@ enum BootError {
     None = 0,
     NoiseResolver = 2,
     ServiceWorker = 3,
-    UiPlatform = 4,
-    UiComponent = 5,
-    Framebuffer = 6,
-    DisplayTransfer = 7,
-    DisplayEnable = 8,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[repr(u8)]
-enum PetBenchmarkState {
-    Idle = 0,
-    Active = 1,
-    Complete = 2,
-    Failed = 3,
 }
 
 fn set_boot_stage(stage: BootStage) {
@@ -163,112 +107,6 @@ fn set_boot_stage(stage: BootStage) {
 fn fail_boot(error: BootError) {
     BOOT_ERROR.store(error as u8, Ordering::Release);
     unsafe { deskkin_boot_trace(BOOT_STAGE.load(Ordering::Acquire), error as u8) };
-}
-
-fn reset_pet_benchmark() {
-    for value in [
-        &PET_BENCHMARK_DURATION_MS,
-        &PET_BENCHMARK_UPDATE_REQUESTS,
-        &PET_BENCHMARK_COMPLETED_FRAMES,
-        &PET_BENCHMARK_RENDER_TOTAL_US,
-        &PET_BENCHMARK_TRANSFER_TOTAL_US,
-        &PET_BENCHMARK_RENDER_MAX_US,
-        &PET_BENCHMARK_TRANSFER_MAX_US,
-        &PET_BENCHMARK_WITHIN_BUDGET,
-        &PET_BENCHMARK_STALLS,
-        &PET_BENCHMARK_DEADLINE_MISSES,
-        &PET_BENCHMARK_MAX_CONSECUTIVE_MISSES,
-        &PET_BENCHMARK_TRANSFERRED_LINES,
-        &PET_BENCHMARK_TRANSFERRED_BYTES,
-        &PET_BENCHMARK_DIGEST_UPDATES,
-        &PET_BENCHMARK_TRANSFER_FAILURES,
-    ] {
-        value.store(0, Ordering::Relaxed);
-    }
-    PET_BENCHMARK_ALLOCATION_FAILURES
-        .store(unsafe { deskkin_allocation_failures() }, Ordering::Relaxed);
-    PET_BENCHMARK_STATE.store(PetBenchmarkState::Active as u8, Ordering::Release);
-}
-
-fn publish_pet_benchmark(summary: &deskkin_core_s3::PetBenchmarkSummary, state: PetBenchmarkState) {
-    PET_BENCHMARK_DURATION_MS.store(summary.duration_ms, Ordering::Relaxed);
-    PET_BENCHMARK_UPDATE_REQUESTS.store(summary.update_requests, Ordering::Relaxed);
-    PET_BENCHMARK_COMPLETED_FRAMES.store(summary.completed_frames, Ordering::Relaxed);
-    PET_BENCHMARK_RENDER_TOTAL_US.store(summary.render_total_us, Ordering::Relaxed);
-    PET_BENCHMARK_TRANSFER_TOTAL_US.store(summary.transfer_total_us, Ordering::Relaxed);
-    PET_BENCHMARK_RENDER_MAX_US.store(summary.render_max_us, Ordering::Relaxed);
-    PET_BENCHMARK_TRANSFER_MAX_US.store(summary.transfer_max_us, Ordering::Relaxed);
-    PET_BENCHMARK_WITHIN_BUDGET.store(summary.frames_within_budget, Ordering::Relaxed);
-    PET_BENCHMARK_STALLS.store(u32::from(summary.stalls), Ordering::Relaxed);
-    PET_BENCHMARK_DEADLINE_MISSES.store(u32::from(summary.deadline_misses), Ordering::Relaxed);
-    PET_BENCHMARK_MAX_CONSECUTIVE_MISSES
-        .store(u32::from(summary.max_consecutive_misses), Ordering::Relaxed);
-    PET_BENCHMARK_TRANSFERRED_LINES.store(summary.transferred_lines, Ordering::Relaxed);
-    PET_BENCHMARK_TRANSFERRED_BYTES.store(summary.transferred_bytes, Ordering::Relaxed);
-    PET_BENCHMARK_DIGEST_UPDATES.store(summary.digest_updates, Ordering::Relaxed);
-    PET_BENCHMARK_TRANSFER_FAILURES.store(u32::from(summary.transfer_failures), Ordering::Relaxed);
-    PET_BENCHMARK_ALLOCATION_FAILURES.store(summary.allocation_failures, Ordering::Relaxed);
-    PET_BENCHMARK_STATE.store(state as u8, Ordering::Release);
-}
-
-fn encode_pet_benchmark(output: &mut [u8]) {
-    output[26] = PET_BENCHMARK_STATE.load(Ordering::Acquire);
-    output[27] = PET_BENCHMARK_ALLOCATION_FAILURES.load(Ordering::Relaxed);
-    let transfer_failures = PET_BENCHMARK_TRANSFER_FAILURES
-        .load(Ordering::Relaxed)
-        .try_into()
-        .unwrap_or(u16::MAX);
-    output[28..30].copy_from_slice(&transfer_failures.to_be_bytes());
-    for (range, value) in [
-        (30..34, PET_BENCHMARK_DURATION_MS.load(Ordering::Relaxed)),
-        (
-            34..38,
-            PET_BENCHMARK_UPDATE_REQUESTS.load(Ordering::Relaxed),
-        ),
-        (
-            38..42,
-            PET_BENCHMARK_COMPLETED_FRAMES.load(Ordering::Relaxed),
-        ),
-        (
-            42..46,
-            PET_BENCHMARK_RENDER_TOTAL_US.load(Ordering::Relaxed),
-        ),
-        (
-            46..50,
-            PET_BENCHMARK_TRANSFER_TOTAL_US.load(Ordering::Relaxed),
-        ),
-        (50..54, PET_BENCHMARK_RENDER_MAX_US.load(Ordering::Relaxed)),
-        (
-            54..58,
-            PET_BENCHMARK_TRANSFER_MAX_US.load(Ordering::Relaxed),
-        ),
-        (58..62, PET_BENCHMARK_WITHIN_BUDGET.load(Ordering::Relaxed)),
-        (
-            68..72,
-            PET_BENCHMARK_TRANSFERRED_LINES.load(Ordering::Relaxed),
-        ),
-        (
-            72..76,
-            PET_BENCHMARK_TRANSFERRED_BYTES.load(Ordering::Relaxed),
-        ),
-        (76..80, PET_BENCHMARK_DIGEST_UPDATES.load(Ordering::Relaxed)),
-    ] {
-        output[range].copy_from_slice(&value.to_be_bytes());
-    }
-    for (range, value) in [
-        (62..64, PET_BENCHMARK_STALLS.load(Ordering::Relaxed)),
-        (
-            64..66,
-            PET_BENCHMARK_DEADLINE_MISSES.load(Ordering::Relaxed),
-        ),
-        (
-            66..68,
-            PET_BENCHMARK_MAX_CONSECUTIVE_MISSES.load(Ordering::Relaxed),
-        ),
-    ] {
-        let value = value.try_into().unwrap_or(u16::MAX);
-        output[range].copy_from_slice(&value.to_be_bytes());
-    }
 }
 
 struct ZephyrRandom;
@@ -307,122 +145,6 @@ impl CryptoResolver for ZephyrResolver {
 
     fn resolve_cipher(&self, choice: &CipherChoice) -> Option<Box<dyn Cipher>> {
         self.crypto.resolve_cipher(choice)
-    }
-}
-
-struct DevicePlatform {
-    window: Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>,
-}
-
-#[repr(transparent)]
-#[derive(Clone, Copy, Default)]
-struct Rgb565BePixel(u16);
-
-impl TargetPixel for Rgb565BePixel {
-    fn blend(&mut self, color: PremultipliedRgbaColor) {
-        let mut native = Rgb565Pixel(u16::from_be(self.0));
-        native.blend(color);
-        self.0 = native.0.to_be();
-    }
-
-    fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
-        let native = <Rgb565Pixel as TargetPixel>::from_rgb(red, green, blue);
-        Self(native.0.to_be())
-    }
-}
-
-struct Framebuffer {
-    pixels: [NonNull<u16>; 2],
-    back: usize,
-    _single_threaded: PhantomData<Rc<()>>,
-}
-
-impl Framebuffer {
-    fn new() -> Option<Self> {
-        Some(Self {
-            pixels: [
-                NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
-                NonNull::new(unsafe { deskkin_framebuffer_alloc(1) })?,
-            ],
-            back: 0,
-            _single_threaded: PhantomData,
-        })
-    }
-
-    fn pixels_mut(&mut self) -> &mut [Rgb565BePixel] {
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.pixels[self.back].as_ptr().cast::<Rgb565BePixel>(),
-                WIDTH * HEIGHT,
-            )
-        }
-    }
-
-    fn back_index(&self) -> u8 {
-        self.back as u8
-    }
-
-    fn swap(&mut self) {
-        self.back ^= 1;
-    }
-
-    fn digest(&self, buffer_index: u8) -> u32 {
-        let mut digest = 2_166_136_261_u32;
-        for index in 0..WIDTH * HEIGHT {
-            let pixel = unsafe {
-                self.pixels[usize::from(buffer_index)]
-                    .as_ptr()
-                    .add(index)
-                    .read()
-            };
-            digest ^= u32::from(pixel);
-            digest = digest.wrapping_mul(16_777_619);
-        }
-        digest
-    }
-}
-
-struct RenderedFrame {
-    buffer_index: u8,
-    render_us: u32,
-    digest: u32,
-    benchmark_deadline_us: Option<u64>,
-    benchmark_digest_changed: bool,
-}
-
-fn submit_ready_frame(
-    framebuffer: &mut Framebuffer,
-    ready: &mut Option<RenderedFrame>,
-    in_flight: &mut Option<RenderedFrame>,
-) -> Result<(), ()> {
-    if in_flight.is_some() {
-        return Ok(());
-    }
-    let Some(frame) = ready.take() else {
-        return Ok(());
-    };
-    if unsafe { deskkin_display_submit(frame.buffer_index) } != 0 {
-        *ready = Some(frame);
-        return Err(());
-    }
-    framebuffer.swap();
-    *in_flight = Some(frame);
-    Ok(())
-}
-
-fn elapsed_us(start: u64, end: u64) -> u32 {
-    end.saturating_sub(start).try_into().unwrap_or(u32::MAX)
-}
-
-impl Platform for DevicePlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
-        self.window.replace(Some(window.clone()));
-        Ok(window)
-    }
-
-    fn duration_since_start(&self) -> Duration {
-        Instant::now().duration_since(Instant::from_secs(0)).into()
     }
 }
 
@@ -1314,25 +1036,18 @@ fn availability_loop(
                             ))
                             .map_err(|_| SessionFailure::Protocol)?;
                         let timer = transition.effects.get(0).ok_or(SessionFailure::Protocol)?;
-                        VALID_RESULT.store(1, Ordering::Release);
                         RESULT_ATTEMPT
                             .store(RUN_ATTEMPT.load(Ordering::Acquire), Ordering::Release);
                         UI_VIEW.store(
-                            match transition.view {
-                                deskkin_application::ApplicationView::Availability(
-                                    deskkin_application::availability::Surface::Unknown,
-                                )
-                                | deskkin_application::ApplicationView::Empty
-                                | deskkin_application::ApplicationView::SyntheticNotice(_) => 0,
-                                deskkin_application::ApplicationView::Availability(
-                                    deskkin_application::availability::Surface::Available,
-                                ) => 1,
-                                deskkin_application::ApplicationView::Availability(
-                                    deskkin_application::availability::Surface::Unavailable,
-                                ) => 2,
+                            match transition.view.availability {
+                                None
+                                | Some(deskkin_application::availability::Surface::Unknown) => 0,
+                                Some(deskkin_application::availability::Surface::Available) => 1,
+                                Some(deskkin_application::availability::Surface::Unavailable) => 2,
                             },
                             Ordering::Release,
                         );
+                        VALID_RESULT.store(1, Ordering::Release);
                         LAST_STAGE.store(7, Ordering::Release);
                         LAST_ERROR.store(0, Ordering::Release);
                         application
@@ -1406,6 +1121,7 @@ fn availability_loop(
                 deskkin_application::Lifecycle::SessionInvalidated,
             ));
         }
+        VALID_RESULT.store(0, Ordering::Release);
         UI_VIEW.store(0, Ordering::Release);
     }
     result
@@ -1530,8 +1246,8 @@ fn pinned_session(
 }
 
 fn connect_once(pair_requested: bool) -> Result<(), SessionFailure> {
-    UI_VIEW.store(0, Ordering::Release);
     VALID_RESULT.store(0, Ordering::Release);
+    UI_VIEW.store(0, Ordering::Release);
     let fallback = match (load_identity(), load_config()) {
         (Ok(identity), Ok(config)) => {
             let fallback = if identity.state == deskkin_core_s3::PeerState::Unpaired {
@@ -1598,6 +1314,7 @@ fn connect_once(pair_requested: bool) -> Result<(), SessionFailure> {
         other => other,
     };
     if result.is_err() {
+        VALID_RESULT.store(0, Ordering::Release);
         UI_VIEW.store(0, Ordering::Release);
         refresh_setup_shell();
     }
@@ -1628,12 +1345,11 @@ unsafe extern "C" fn deskkin_rust_control_snapshot(
         deskkin_core_s3::ControlCommand::Status
             | deskkin_core_s3::ControlCommand::IdentityList
             | deskkin_core_s3::ControlCommand::WifiStatus
-            | deskkin_core_s3::ControlCommand::PetBenchmarkStatus
     ) || !control.payload.is_empty()
     {
         return 0;
     }
-    let output = unsafe { core::slice::from_raw_parts_mut(output, 80) };
+    let output = unsafe { core::slice::from_raw_parts_mut(output, 160) };
     output.fill(0);
     output[0] = 1;
     output[1] = ServiceStatus::Success as u8;
@@ -1653,9 +1369,17 @@ unsafe extern "C" fn deskkin_rust_control_snapshot(
         output[26] = CONFIG_PRESENT.load(Ordering::Acquire);
         return 27;
     }
-    if control.command == deskkin_core_s3::ControlCommand::PetBenchmarkStatus {
-        encode_pet_benchmark(output);
-        return 80;
+    if control.command == deskkin_core_s3::ControlCommand::Status {
+        let length = unsafe {
+            deskkin_amp_status_snapshot(control.command_id.as_ptr(), output.as_mut_ptr())
+        };
+        if length >= 27 {
+            output[18..26].copy_from_slice(&load_generation().to_be_bytes());
+            output[26] = UI_SHELL.load(Ordering::Acquire).min(4);
+            output[80] = UI_VIEW.load(Ordering::Acquire).min(2)
+                | (VALID_RESULT.load(Ordering::Acquire).min(1) << 7);
+        }
+        return length;
     }
     output[26] =
         UI_SHELL.load(Ordering::Acquire) | (VALID_RESULT.load(Ordering::Acquire).min(1) << 7);
@@ -1688,17 +1412,12 @@ fn handle_control(frame: deskkin_core_s3::ControlFrame<'_>) -> ServiceStatus {
     }
     match frame.command {
         ControlCommand::IdentityInit if frame.payload.is_empty() => identity_init(),
-        ControlCommand::IdentityList
-        | ControlCommand::WifiStatus
-        | ControlCommand::Status
-        | ControlCommand::PetBenchmarkStatus => ServiceStatus::Success,
+        ControlCommand::IdentityList | ControlCommand::WifiStatus | ControlCommand::Status => {
+            ServiceStatus::Success
+        }
         ControlCommand::WifiProvision => wifi_provision(frame.payload),
         ControlCommand::WifiClear if frame.payload.is_empty() => clear_config(),
         ControlCommand::Run if frame.payload.is_empty() => {
-            if PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Active as u8 {
-                return ServiceStatus::Busy;
-            }
-            PET_BENCHMARK_STATE.store(PetBenchmarkState::Idle as u8, Ordering::Release);
             APPLICATION_RUNNING.store(1, Ordering::Release);
             let attempt = RUN_ATTEMPT.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
             VALID_RESULT.store(0, Ordering::Release);
@@ -1713,17 +1432,16 @@ fn handle_control(frame: deskkin_core_s3::ControlFrame<'_>) -> ServiceStatus {
         ControlCommand::Shutdown if frame.payload.is_empty() => {
             APPLICATION_RUNNING.store(0, Ordering::Release);
             UI_ACTION.store(5, Ordering::Release);
+            VALID_RESULT.store(0, Ordering::Release);
             UI_VIEW.store(0, Ordering::Release);
             ServiceStatus::Success
         }
-        ControlCommand::PetBenchmarkStart if frame.payload.is_empty() => {
-            if APPLICATION_RUNNING.load(Ordering::Acquire) != 0
-                || PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Active as u8
-            {
-                return ServiceStatus::Busy;
+        ControlCommand::WorldBenchmarkStart if frame.payload.is_empty() => {
+            if unsafe { deskkin_amp_world_benchmark_start() } == 0 {
+                ServiceStatus::Success
+            } else {
+                ServiceStatus::Invalid
             }
-            reset_pet_benchmark();
-            ServiceStatus::Success
         }
         ControlCommand::IdentityUnpair => identity_unpair(frame.payload),
         _ => ServiceStatus::Invalid,
@@ -1743,7 +1461,7 @@ fn publish_control_completion(
     control: Option<deskkin_core_s3::ControlFrame<'_>>,
     status: ServiceStatus,
 ) {
-    let mut completion = zeroize::Zeroizing::new([0_u8; 80]);
+    let mut completion = zeroize::Zeroizing::new([0_u8; 160]);
     completion[0] = 1;
     completion[1] = status as u8;
     let mut completion_length = 2;
@@ -1765,29 +1483,20 @@ fn publish_control_completion(
                 }
             }
         } else if control.command == deskkin_core_s3::ControlCommand::Status {
-            completion[26] = UI_SHELL.load(Ordering::Acquire)
-                | (VALID_RESULT.load(Ordering::Acquire).min(1) << 7);
-            completion[27] = UI_VIEW.load(Ordering::Acquire);
-            completion[28..32]
-                .copy_from_slice(&UI_FRAME_DIGEST.load(Ordering::Acquire).to_be_bytes());
-            load_context(&SESSION_CONTEXT, &mut completion[32..48]);
-            load_context(&OPERATION_CONTEXT, &mut completion[48..64]);
-            completion[64..68].copy_from_slice(&RUN_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
-            completion[68..72]
-                .copy_from_slice(&RESULT_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
-            completion[72..76]
-                .copy_from_slice(&FRAME_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
-            completion[76] = LAST_STAGE.load(Ordering::Acquire);
-            completion[77] = LAST_ERROR.load(Ordering::Acquire);
-            completion[78] = BOOT_STAGE.load(Ordering::Acquire);
-            completion[79] = BOOT_ERROR.load(Ordering::Acquire);
-            completion_length = 80;
+            let length = unsafe {
+                deskkin_amp_status_snapshot(control.command_id.as_ptr(), completion.as_mut_ptr())
+            };
+            if length >= 27 {
+                completion[18..26].copy_from_slice(&generation.to_be_bytes());
+                completion[26] = UI_SHELL.load(Ordering::Acquire).min(4);
+                completion[80] = UI_VIEW.load(Ordering::Acquire).min(2)
+                    | (VALID_RESULT.load(Ordering::Acquire).min(1) << 7);
+            }
+            let _ = unsafe { deskkin_service_publish_completion(completion.as_ptr(), length) };
+            return;
         } else if control.command == deskkin_core_s3::ControlCommand::Run {
             completion[26..30].copy_from_slice(&RUN_ATTEMPT.load(Ordering::Acquire).to_be_bytes());
             completion_length = 30;
-        } else if control.command == deskkin_core_s3::ControlCommand::PetBenchmarkStatus {
-            encode_pet_benchmark(&mut *completion);
-            completion_length = 80;
         }
     }
     let _ = unsafe { deskkin_service_publish_completion(completion.as_ptr(), completion_length) };
@@ -1837,6 +1546,15 @@ fn poll_active_control(frame: &mut [u8]) -> Option<ActiveControl> {
                 }
             }
         }
+        deskkin_core_s3::ControlCommand::WorldBenchmarkStart if control.payload.is_empty() => {
+            let status = if unsafe { deskkin_amp_world_benchmark_start() } == 0 {
+                ServiceStatus::Success
+            } else {
+                ServiceStatus::Invalid
+            };
+            publish_control_completion(Some(control), status);
+            None
+        }
         _ => {
             publish_control_completion(Some(control), ServiceStatus::Busy);
             frame.zeroize();
@@ -1865,28 +1583,53 @@ fn finish_active_control(active: ActiveControl) {
     }
 }
 
-#[no_mangle]
-extern "C" fn rust_main() {
-    if prove_noise_resolver().is_err() {
-        fail_boot(BootError::NoiseResolver);
-        loop {
-            unsafe { deskkin_sleep_ms(1_000) };
-        }
-    }
+/// Starts the headless CoreS3 application service on the PROCPU.
+pub fn start() -> Result<(), ()> {
+    prove_noise_resolver()?;
     set_boot_stage(BootStage::NoiseResolverReady);
     if unsafe { deskkin_start_service_worker() } != 0 {
         fail_boot(BootError::ServiceWorker);
-        loop {
-            unsafe { deskkin_sleep_ms(1_000) };
-        }
+        return Err(());
     }
     set_boot_stage(BootStage::ServiceWorkerReady);
-    let executor = EXECUTOR.init(Executor::new());
-    executor.run(|spawner| {
-        if spawner.spawn(run_ui()).is_err() {
-            fail_boot(BootError::UiPlatform);
-        }
-    });
+    Ok(())
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_ui_command(command: u8) {
+    if (1..=3).contains(&command) {
+        UI_ACTION.store(command, Ordering::Release);
+    }
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_shell() -> u8 {
+    UI_SHELL.load(Ordering::Acquire).min(4)
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_sas() -> u32 {
+    UI_SAS.load(Ordering::Acquire)
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_availability() -> u8 {
+    UI_VIEW.load(Ordering::Acquire).min(2).saturating_add(1)
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_notice() -> u8 {
+    0
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_valid_result() -> u8 {
+    VALID_RESULT.load(Ordering::Acquire).min(1)
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_result_attempt() -> u32 {
+    RESULT_ATTEMPT.load(Ordering::Acquire)
 }
 
 #[no_mangle]
@@ -1932,7 +1675,6 @@ extern "C" fn deskkin_rust_service_worker() {
         let paired = load_identity()
             .is_ok_and(|identity| identity.state == deskkin_core_s3::PeerState::Paired);
         if connection.state() != deskkin_protocol_client::ConnectionState::Stopped
-            && PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Idle as u8
             && (pair_requested || running && paired)
             && now >= next_attempt_ms
         {
@@ -1982,299 +1724,5 @@ extern "C" fn deskkin_rust_service_worker() {
                 }
             }
         }
-    }
-}
-
-#[embassy_executor::task]
-async fn run_ui() {
-    let state = Rc::new(RefCell::new(None));
-    if slint::platform::set_platform(Box::new(DevicePlatform {
-        window: state.clone(),
-    }))
-    .is_err()
-    {
-        fail_boot(BootError::UiPlatform);
-        return;
-    }
-    set_boot_stage(BootStage::UiPlatformReady);
-    let Ok(component) = DeviceWindow::new() else {
-        fail_boot(BootError::UiComponent);
-        return;
-    };
-    let Some(window) = state.borrow().clone() else {
-        fail_boot(BootError::UiComponent);
-        return;
-    };
-    window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
-    component.set_shell_state("SetupRequired".into());
-    component.set_status_text("Unknown".into());
-    component.on_pair(|| UI_ACTION.store(1, Ordering::Release));
-    component.on_confirm(|| UI_ACTION.store(2, Ordering::Release));
-    component.on_cancel(|| UI_ACTION.store(3, Ordering::Release));
-    if component.show().is_err() {
-        fail_boot(BootError::UiComponent);
-        return;
-    }
-    set_boot_stage(BootStage::UiComponentReady);
-    let Some(mut framebuffer) = Framebuffer::new() else {
-        fail_boot(BootError::Framebuffer);
-        return;
-    };
-    set_boot_stage(BootStage::FramebufferReady);
-    let mut first_frame = true;
-    let mut pet_animator = PetAnimator::new();
-    let mut pet_updated_at_ms = Instant::now().as_millis();
-    let mut benchmark_animator = PetAnimator::new();
-    let mut benchmark_summary = deskkin_core_s3::PetBenchmarkSummary::default();
-    let mut benchmark_started_at_us = 0_u64;
-    let mut benchmark_next_deadline_us = 0_u64;
-    let mut benchmark_frame_deadline_us = 0_u64;
-    let mut benchmark_scheduled_frames = 0_u32;
-    let mut benchmark_frame_pending = false;
-    let mut benchmark_previous_digest = 0_u32;
-    let mut benchmark_was_active = false;
-    let mut next_render_at_us = 0_u64;
-    let mut ready_frame: Option<RenderedFrame> = None;
-    let mut in_flight: Option<RenderedFrame> = None;
-    loop {
-        let mut completed_buffer_index = 0_u8;
-        let mut transfer_us = 0_u32;
-        let mut completed_at_us = 0_u64;
-        let completion = unsafe {
-            deskkin_display_take_completion(
-                &mut completed_buffer_index,
-                &mut transfer_us,
-                &mut completed_at_us,
-            )
-        };
-        if completion != 0 {
-            let Some(frame) = in_flight.take() else {
-                fail_boot(BootError::DisplayTransfer);
-                return;
-            };
-            if completion < 0 || completed_buffer_index != frame.buffer_index {
-                if frame.benchmark_deadline_us.is_some() {
-                    benchmark_summary.record_transfer_failure();
-                    benchmark_summary.duration_ms =
-                        elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
-                    publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Failed);
-                }
-                fail_boot(BootError::DisplayTransfer);
-                return;
-            }
-            UI_FRAME_DIGEST.store(frame.digest, Ordering::Release);
-            if let Some(deadline_us) = frame.benchmark_deadline_us {
-                benchmark_summary.complete_frame(
-                    frame.render_us,
-                    transfer_us,
-                    HEIGHT as u32,
-                    (WIDTH * HEIGHT * core::mem::size_of::<u16>()) as u32,
-                    frame.benchmark_digest_changed,
-                    completed_at_us
-                        > deadline_us
-                            .saturating_add(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
-                );
-            }
-            if VALID_RESULT.load(Ordering::Acquire) == 1 {
-                FRAME_ATTEMPT.store(RESULT_ATTEMPT.load(Ordering::Acquire), Ordering::Release);
-                LAST_STAGE.store(8, Ordering::Release);
-            }
-            if first_frame {
-                if unsafe { deskkin_display_enable() } != 0 {
-                    fail_boot(BootError::DisplayEnable);
-                    return;
-                }
-                first_frame = false;
-                set_boot_stage(BootStage::FirstFrameReady);
-            }
-        }
-        if submit_ready_frame(&mut framebuffer, &mut ready_frame, &mut in_flight).is_err() {
-            if benchmark_was_active {
-                benchmark_summary.record_transfer_failure();
-                benchmark_summary.duration_ms =
-                    elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
-                publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Failed);
-            }
-            fail_boot(BootError::DisplayTransfer);
-            return;
-        }
-        slint::platform::update_timers_and_animations();
-        let benchmark_active =
-            PET_BENCHMARK_STATE.load(Ordering::Acquire) == PetBenchmarkState::Active as u8;
-        component.set_pet_benchmark_active(benchmark_active);
-        if benchmark_active {
-            let now_us = Instant::now().as_micros();
-            if !benchmark_was_active {
-                benchmark_summary = deskkin_core_s3::PetBenchmarkSummary::default();
-                benchmark_summary.allocation_failures = unsafe { deskkin_allocation_failures() };
-                benchmark_started_at_us = now_us;
-                benchmark_next_deadline_us = now_us;
-                benchmark_scheduled_frames = 0;
-                benchmark_frame_pending = false;
-                benchmark_previous_digest = UI_FRAME_DIGEST.load(Ordering::Acquire);
-                component.set_benchmark_frame(0);
-                let frame = benchmark_animator
-                    .set_state(deskkin_presentation::PetAnimationState::MoveRight);
-                component.set_pet_animation_state(i32::from(frame.state.loop_index()));
-                component.set_pet_frame_index(i32::from(frame.index));
-            }
-            if now_us >= benchmark_next_deadline_us
-                && benchmark_scheduled_frames < deskkin_core_s3::PET_BENCHMARK_REQUESTS
-            {
-                let remaining = deskkin_core_s3::PET_BENCHMARK_REQUESTS
-                    .saturating_sub(benchmark_scheduled_frames);
-                let due = ((now_us.saturating_sub(benchmark_next_deadline_us)
-                    / deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US)
-                    .saturating_add(1))
-                .min(u64::from(remaining));
-                let due = u32::try_from(due).unwrap_or(remaining);
-                benchmark_summary.request_updates(due);
-                let elapsed_frames = if benchmark_scheduled_frames == 0 {
-                    due.saturating_sub(1)
-                } else {
-                    due
-                };
-                let frame = benchmark_animator.advance(elapsed_frames.saturating_mul(50));
-                component.set_pet_animation_state(i32::from(frame.state.loop_index()));
-                component.set_pet_frame_index(i32::from(frame.index));
-                benchmark_frame_deadline_us = benchmark_next_deadline_us.saturating_add(
-                    u64::from(due.saturating_sub(1))
-                        .saturating_mul(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
-                );
-                benchmark_next_deadline_us = benchmark_next_deadline_us.saturating_add(
-                    u64::from(due).saturating_mul(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US),
-                );
-                benchmark_scheduled_frames = benchmark_scheduled_frames.saturating_add(due);
-                component.set_benchmark_frame(
-                    i32::try_from(benchmark_scheduled_frames).unwrap_or(i32::MAX),
-                );
-                benchmark_frame_pending = true;
-            }
-        } else {
-            let now_ms = Instant::now().as_millis();
-            let elapsed_ms =
-                u32::try_from(now_ms.saturating_sub(pet_updated_at_ms)).unwrap_or(u32::MAX);
-            pet_updated_at_ms = now_ms;
-            let pet_frame = pet_animator.advance(elapsed_ms);
-            component.set_pet_animation_state(i32::from(pet_frame.state.loop_index()));
-            component.set_pet_frame_index(i32::from(pet_frame.index));
-        }
-        benchmark_was_active = benchmark_active;
-        let sas = UI_SAS.load(Ordering::Acquire);
-        if sas == u32::MAX {
-            component.set_authentication_string("".into());
-        } else {
-            let mut digits = [b'0'; 6];
-            let mut value = sas;
-            for index in (0..6).rev() {
-                digits[index] = b'0' + (value % 10) as u8;
-                value /= 10;
-            }
-            let text = core::str::from_utf8(&digits).expect("digits are UTF-8");
-            component.set_authentication_string(text.into());
-            UI_SHELL.store(3, Ordering::Release);
-        }
-        component.set_shell_state(
-            match UI_SHELL.load(Ordering::Acquire) {
-                1 => "ReadyToPair",
-                2 => "Connecting",
-                3 => "PairingConfirmation",
-                4 => "Paired",
-                _ => "SetupRequired",
-            }
-            .into(),
-        );
-        match UI_VIEW.load(Ordering::Acquire) {
-            1 => {
-                component.set_shell_state("Paired".into());
-                component.set_status_text("Available".into());
-                component.set_status_color(slint::Color::from_rgb_u8(0x36, 0xc9, 0x82));
-            }
-            2 => {
-                component.set_shell_state("Paired".into());
-                component.set_status_text("Unavailable".into());
-                component.set_status_color(slint::Color::from_rgb_u8(0xf0, 0x5d, 0x5e));
-            }
-            _ => {
-                component.set_status_text("Unknown".into());
-                component.set_status_color(slint::Color::from_rgb_u8(0xf3, 0xb3, 0x3d));
-            }
-        }
-        match unsafe { deskkin_control_trace() } {
-            1 => component.set_status_text("USB RX".into()),
-            2 => component.set_status_text("USB SNAP".into()),
-            3 => component.set_status_text("USB TX".into()),
-            _ => {}
-        }
-        let mut x = 0;
-        let mut y = 0;
-        if unsafe { deskkin_take_touch(&mut x, &mut y) } {
-            let position = LogicalPosition::new(x as f32, y as f32);
-            window.dispatch_event(WindowEvent::PointerPressed {
-                position,
-                button: PointerEventButton::Left,
-            });
-            window.dispatch_event(WindowEvent::PointerReleased {
-                position,
-                button: PointerEventButton::Left,
-            });
-        }
-        let now_us = Instant::now().as_micros();
-        if ready_frame.is_none() && now_us >= next_render_at_us {
-            let render_started_us = Instant::now().as_micros();
-            let rendered = window.draw_if_needed(|renderer| {
-                let _ = renderer.render(framebuffer.pixels_mut(), WIDTH);
-            });
-            let render_ended_us = Instant::now().as_micros();
-            next_render_at_us =
-                render_started_us.saturating_add(deskkin_core_s3::PET_BENCHMARK_FRAME_PERIOD_US);
-            if rendered {
-                let buffer_index = framebuffer.back_index();
-                let digest = framebuffer.digest(buffer_index);
-                let benchmark_deadline_us =
-                    benchmark_frame_pending.then_some(benchmark_frame_deadline_us);
-                let benchmark_digest_changed =
-                    benchmark_deadline_us.is_some() && digest != benchmark_previous_digest;
-                if benchmark_deadline_us.is_some() {
-                    benchmark_previous_digest = digest;
-                    benchmark_frame_pending = false;
-                }
-                ready_frame = Some(RenderedFrame {
-                    buffer_index,
-                    render_us: elapsed_us(render_started_us, render_ended_us),
-                    digest,
-                    benchmark_deadline_us,
-                    benchmark_digest_changed,
-                });
-            }
-        }
-        if submit_ready_frame(&mut framebuffer, &mut ready_frame, &mut in_flight).is_err() {
-            if benchmark_active {
-                benchmark_summary.record_transfer_failure();
-                benchmark_summary.duration_ms =
-                    elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
-                publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Failed);
-            }
-            fail_boot(BootError::DisplayTransfer);
-            return;
-        }
-        if benchmark_active
-            && Instant::now().as_micros()
-                >= benchmark_started_at_us
-                    .saturating_add(u64::from(deskkin_core_s3::PET_BENCHMARK_DURATION_MS) * 1_000)
-            && benchmark_scheduled_frames == deskkin_core_s3::PET_BENCHMARK_REQUESTS
-            && !benchmark_frame_pending
-            && ready_frame
-                .as_ref()
-                .is_none_or(|frame| frame.benchmark_deadline_us.is_none())
-            && in_flight
-                .as_ref()
-                .is_none_or(|frame| frame.benchmark_deadline_us.is_none())
-        {
-            benchmark_summary.duration_ms =
-                elapsed_us(benchmark_started_at_us, Instant::now().as_micros()) / 1_000;
-            publish_pet_benchmark(&benchmark_summary, PetBenchmarkState::Complete);
-        }
-        embassy_time::Timer::after_millis(1).await;
     }
 }

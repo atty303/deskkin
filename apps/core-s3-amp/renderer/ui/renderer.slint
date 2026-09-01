@@ -1,17 +1,53 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { PetSurface } from "../../../../ui/pet-surface.slint";
+import { Button } from "std-widgets.slint";
+import { AvailabilityBillboard, NoticeBillboard } from "../../../../ui/application-surface.slint";
+import { StatusSurface } from "../../../../ui/status-surface.slint";
 
 export component RendererWindow inherits Window {
     width: 320px;
     height: 240px;
     in-out property <image> pet-atlas;
     in-out property <int> pet-frame-index: 0;
+    in property <string> shell-state: "SetupRequired";
+    in property <string> authentication-string: "";
+    callback pair();
+    callback confirm();
+    callback cancel();
 
-    PetSurface {
-        width: 100%;
-        height: 100%;
-        atlas: root.pet-atlas;
-        frame-index: root.pet-frame-index;
+    background: #16191d;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+        Text { text: root.shell-state; color: #d7e3f4; font-size: 20px; }
+        StatusSurface {
+            height: 124px;
+            status-text: root.authentication-string == "" ? "Setup required" : root.authentication-string;
+            status-color: #f3b33d;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "Pair"; visible: root.shell-state == "ReadyToPair"; clicked => { root.pair(); } }
+            Button { text: "Confirm"; visible: root.authentication-string != ""; clicked => { root.confirm(); } }
+            Button { text: "Cancel"; visible: root.authentication-string != ""; clicked => { root.cancel(); } }
+        }
+    }
+}
+
+export component BillboardWindow inherits Window {
+    width: 272px;
+    height: 124px;
+    in property <bool> notice: false;
+    in property <string> status-text: "Unknown";
+    in property <color> status-color: #f3b33d;
+
+    AvailabilityBillboard {
+        width: 100%; height: 100%; visible: !root.notice;
+        status-text: root.status-text; status-color: root.status-color;
+    }
+    NoticeBillboard {
+        width: 100%; height: 100%; visible: root.notice;
+        notice-text: "Deskkin notice";
     }
 }

@@ -4,7 +4,7 @@
 resolver = "2"
 
 [package]
-name = "deskkin-core-s3-device"
+name = "deskkin-core-s3-service"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
@@ -12,8 +12,8 @@ license = "GPL-3.0-only"
 publish = false
 
 [lib]
-name = "rustapp"
-crate-type = ["staticlib"]
+name = "deskkin_core_s3_service"
+crate-type = ["rlib"]
 
 [dependencies]
 deskkin-application = { path = "../../crates/deskkin-application" }
@@ -23,18 +23,9 @@ deskkin-protocol = { path = "../../crates/deskkin-protocol" }
 deskkin-protocol-client = { path = "../../crates/deskkin-protocol-client" }
 deskkin-presentation = { path = "../../crates/deskkin-presentation" }
 embassy-time = { version = "=0.4.0", features = ["tick-hz-10_000"] }
-slint = { version = "=1.17.1", default-features = false, features = ["compat-1-2", "renderer-software", "unsafe-single-threaded", "libm"] }
 snow = { version = "=0.10.0", default-features = false, features = ["default-resolver", "use-blake2", "use-chacha20poly1305", "use-curve25519"] }
-static_cell = "=2.1.1"
 zephyr = { version = "=0.1.0", features = ["executor-zephyr", "time-driver"] }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
-
-[dependencies.embassy-executor]
-version = "=0.7.0"
-features = ["log", "task-arena-size-8192"]
-
-[build-dependencies]
-slint-build = "=1.17.1"
 
 [profile.dev]
 codegen-units = 1

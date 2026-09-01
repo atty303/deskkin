@@ -35,17 +35,15 @@ COMMANDS = {
     "run": 7,
     "status": 8,
     "shutdown": 9,
-    "pet-benchmark-start": 10,
-    "pet-benchmark-status": 11,
+    "world-benchmark-start": 10,
 }
 
-PET_BENCHMARK_DURATION_SECONDS = 60.0
-PET_BENCHMARK_REQUESTS = 1_200
-AMP_BENCHMARK_DURATION_SECONDS = 60.0
-AMP_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS = 1.0
-AMP_BENCHMARK_MIN_COVERAGE_MILLI = 800
-AMP_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
-AMP_BENCHMARK_MIN_STATUS_RESPONSES = 20
+WORLD_BENCHMARK_DURATION_SECONDS = 60.0
+WORLD_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS = 1.0
+WORLD_BENCHMARK_MIN_COVERAGE_MILLI = 800
+WORLD_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
+WORLD_BENCHMARK_MIN_STATUS_RESPONSES = 20
+STATUS_RESPONSE_SIZE = 160
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -56,6 +54,7 @@ BOOT_ERRORS = {
     6: "boot_framebuffer",
     7: "boot_display_transfer",
     8: "boot_display_enable",
+    9: "boot_shared_channel",
 }
 
 OPERATION_STAGES = (
@@ -89,7 +88,7 @@ class DeviceError(Exception):
     pass
 
 
-class AmpBenchmarkError(DeviceError):
+class WorldBenchmarkError(DeviceError):
     def __init__(self, error_type: str, summary: dict[str, object]) -> None:
         super().__init__(error_type)
         self.error_type = error_type
@@ -325,7 +324,7 @@ def read_control_response(descriptor: int, frame: bytearray, timeout: float) -> 
         candidate_start: int | None = None
         for start in range(max(0, len(buffered) - 1)):
             length = int.from_bytes(buffered[start : start + 2], "big")
-            if not 18 <= length <= 92 or start + 3 > len(buffered):
+            if not 18 <= length <= 160 or start + 3 > len(buffered):
                 continue
             if buffered[start + 2] != SCHEMA:
                 continue
@@ -356,7 +355,14 @@ def read_control_response(descriptor: int, frame: bytearray, timeout: float) -> 
     raise DeviceError("control_response_length")
 
 
-def exchange_once(device: Path, frame: bytearray, startup_delay: float, response_timeout: float) -> bytes:
+def exchange_once(
+    device: Path,
+    frame: bytearray,
+    startup_delay: float,
+    response_timeout: float,
+    total_timeout: float | None = None,
+) -> bytes:
+    transaction_deadline = None if total_timeout is None else time.monotonic() + total_timeout
     descriptor = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
         attributes = termios.tcgetattr(descriptor)
@@ -369,8 +375,18 @@ def exchange_once(device: Path, frame: bytearray, startup_delay: float, response
         termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
         time.sleep(startup_delay)
         termios.tcflush(descriptor, termios.TCIOFLUSH)
-        write_all(descriptor, frame, 2.0)
-        return read_control_response(descriptor, frame, response_timeout)
+        write_timeout = (
+            2.0
+            if transaction_deadline is None
+            else max(0.0, transaction_deadline - time.monotonic())
+        )
+        write_all(descriptor, frame, write_timeout)
+        read_timeout = (
+            response_timeout
+            if transaction_deadline is None
+            else max(0.0, transaction_deadline - time.monotonic())
+        )
+        return read_control_response(descriptor, frame, read_timeout)
     finally:
         # USB Serial/JTAG can retain unsent host output when device RX is not
         # draining.  Discard it so closing a diagnostic/control attempt cannot
@@ -382,10 +398,16 @@ def exchange_once(device: Path, frame: bytearray, startup_delay: float, response
         os.close(descriptor)
 
 
-def exchange(device: Path, frame: bytearray, recover_status_transport: bool = True) -> bytes:
-    if frame[3] in {COMMANDS["status"], COMMANDS["pet-benchmark-status"]} and not recover_status_transport:
-        return exchange_once(device, frame, 0.0, 2.0)
-    if frame[3] not in {COMMANDS["status"], COMMANDS["pet-benchmark-status"]}:
+def exchange(
+    device: Path,
+    frame: bytearray,
+    recover_status_transport: bool = True,
+    status_timeout: float | None = None,
+) -> bytes:
+    if frame[3] == COMMANDS["status"] and not recover_status_transport:
+        timeout = 2.0 if status_timeout is None else status_timeout
+        return exchange_once(device, frame, 0.0, timeout, total_timeout=status_timeout)
+    if frame[3] != COMMANDS["status"]:
         return exchange_once(device, frame, 0.25, 2.0)
     # A flash/reset can leave USB Serial/JTAG visible before its device-side RX
     # service is ready.  Send immediately first, then reopen the tty for a
@@ -402,22 +424,24 @@ def exchange(device: Path, frame: bytearray, recover_status_transport: bool = Tr
 
 
 def status_boot_error(status: bytes) -> str | None:
-    if len(status) < 80 or status[79] == 0:
+    if len(status) != STATUS_RESPONSE_SIZE or status[69] == 0:
         return None
-    return BOOT_ERRORS.get(status[79], "boot_unknown")
+    return BOOT_ERRORS.get(status[69], "boot_unknown")
 
 
 def report_status(status: bytes) -> None:
-    if len(status) < 80:
+    if len(status) != STATUS_RESPONSE_SIZE:
         raise DeviceError("control_invalid")
+    decoded = decode_world_status(status)
     print(
         json.dumps(
             {
-                "shell_state": status[26] & 0x7F,
-                "availability": min(status[27], 2),
-                "last_stage": OPERATION_STAGES[min(status[76], len(OPERATION_STAGES) - 1)],
-                "last_error": operation_error(status[76], status[77]),
-                "boot_stage": status[78],
+                "shell_state": status[26],
+                "availability": decoded["semantic_availability"],
+                "heartbeat_freshness": decoded["heartbeat_freshness"],
+                "renderer_stage": decoded["stage"],
+                "renderer_fault": decoded["fault"],
+                "boot_stage": decoded["procpu_boot_stage"],
                 "boot_error": status_boot_error(status),
             },
             separators=(",", ":"),
@@ -429,11 +453,11 @@ def report_status(status: bytes) -> None:
 def await_boot_complete(status: bytes, device_arg: str | None, timeout: float = 15.0) -> bytes:
     deadline = time.monotonic() + timeout
     while True:
-        if len(status) != 80:
+        if len(status) != STATUS_RESPONSE_SIZE:
             raise DeviceError("control_invalid")
-        if status_boot_error(status) is not None or status[78] == BOOT_COMPLETE_STAGE:
+        if status_boot_error(status) is not None or status[68] == BOOT_COMPLETE_STAGE:
             return status
-        if status[78] > BOOT_COMPLETE_STAGE:
+        if status[68] > BOOT_COMPLETE_STAGE:
             raise DeviceError("boot_unknown")
         if time.monotonic() >= deadline:
             raise DeviceError("boot_not_ready")
@@ -452,14 +476,15 @@ def run_control(
     device_arg: str | None,
     payload: bytearray | bytes = b"",
     recover_status_transport: bool = True,
+    status_timeout: float | None = None,
 ) -> bytes:
     device = discover_device(device_arg)
     generation = 0
-    if command in {"identity-init", "identity-unpair", "wifi-provision", "wifi-clear", "run", "shutdown", "pet-benchmark-start"}:
+    if command in {"identity-init", "identity-unpair", "wifi-provision", "wifi-clear", "run", "shutdown", "world-benchmark-start"}:
         status_frame = control_frame("status", 0)
         try:
             status = exchange(device, status_frame, recover_status_transport)
-            if len(status) != 80:
+            if len(status) != STATUS_RESPONSE_SIZE:
                 raise DeviceError("control_invalid")
             if status[1] != 0:
                 raise DeviceError("device_rejected")
@@ -470,7 +495,7 @@ def run_control(
             zeroize(status_frame)
     frame = control_frame(command, generation, payload)
     try:
-        result = exchange(device, frame, recover_status_transport)
+        result = exchange(device, frame, recover_status_transport, status_timeout)
         if result[1] != 0:
             raise DeviceError("device_rejected")
         if command == "identity-list":
@@ -505,36 +530,12 @@ def device_environment(root: Path) -> tuple[Path, dict[str, str]]:
 
 
 def build(root: Path) -> None:
+    build_amp(root)
     state, environment = device_environment(root)
     environment["DESKKIN_STATE_DIR"] = str(state)
-    subprocess.run(
-        [str(root / "scripts/bootstrap_core_s3.sh"), "--verify-only"],
-        check=True,
-        cwd=root,
-        env=environment,
-        stdout=sys.stderr,
-    )
     device_state = state / "phase3-device"
     ensure_private_directory(device_state)
-    build_dir = device_state / "build"
     west = state / "venv/bin/west"
-    subprocess.run(
-        [
-            str(west),
-            "build",
-            "--pristine",
-            "always",
-            "--board",
-            "m5stack_cores3/esp32s3/procpu",
-            "--build-dir",
-            str(build_dir),
-            str(root / "apps/core-s3-device"),
-        ],
-        check=True,
-        cwd=state / "west",
-        env=environment,
-        stdout=sys.stderr,
-    )
     subprocess.run(
         [
             str(west),
@@ -615,15 +616,15 @@ def flash_amp(root: Path, device_arg: str | None) -> None:
     )
 
 
-def decode_amp_pipeline_status(status: bytes) -> dict[str, int]:
-    if len(status) not in {80, 92} or status[0] != SCHEMA or status[1] != 0:
+def decode_world_status(status: bytes) -> dict[str, int]:
+    if len(status) != STATUS_RESPONSE_SIZE or status[0] != SCHEMA or status[1] != 0:
         raise DeviceError("control_invalid")
 
     def unsigned(start: int, end: int) -> int:
         return int.from_bytes(status[start:end], "big")
 
     decoded = {
-        "availability": status[27],
+        "heartbeat_freshness": status[27],
         "generation": unsigned(28, 32),
         "heartbeat_received_ms": unsigned(32, 40),
         "completed_frames": unsigned(40, 44),
@@ -643,21 +644,45 @@ def decode_amp_pipeline_status(status: bytes) -> dict[str, int]:
         "procpu_boot_error": status[69],
         "display_spi_hz": unsigned(70, 74),
         "copy_us": unsigned(74, 78),
+        "deadline_misses": unsigned(78, 80),
+        "benchmark_state": status[81],
+        "requested_updates": unsigned(84, 88),
+        "semantic_availability": status[80] & 0x7F,
+        "valid_availability_result": (status[80] & 0x80) != 0,
+        "valid_view_generation": unsigned(88, 92),
     }
     decoded.update(
         {
-            "dirty_rect_count": status[80] if len(status) >= 92 else 0,
-            "pixel_dma_batches": unsigned(82, 84) if len(status) >= 92 else 0,
-            "dirty_pixels": unsigned(84, 88) if len(status) >= 92 else 0,
-            "transferred_bytes": unsigned(88, 92) if len(status) >= 92 else 0,
+            "pixel_dma_batches": unsigned(82, 84),
+            "view_generation": unsigned(92, 96),
+            "pose_generation": unsigned(96, 100) if len(status) >= 160 else 0,
+            "input_generation": unsigned(100, 104) if len(status) >= 160 else 0,
+            "stale_snapshots": unsigned(104, 108) if len(status) >= 160 else 0,
+            "touch_drops": unsigned(108, 112) if len(status) >= 160 else 0,
+            "atlas_cache_hits": unsigned(112, 114) if len(status) >= 160 else 0,
+            "atlas_cache_misses": unsigned(114, 116) if len(status) >= 160 else 0,
+            "atlas_cache_failures": unsigned(116, 118) if len(status) >= 160 else 0,
+            "visible_billboards": status[118] if len(status) >= 160 else 0,
+            "culled_billboards": status[119] if len(status) >= 160 else 0,
+            "nearest_samples": unsigned(120, 124) if len(status) >= 160 else 0,
+            "bilinear_samples": unsigned(124, 128) if len(status) >= 160 else 0,
+            "projection_us": unsigned(128, 132) if len(status) >= 160 else 0,
+            "projection_max_us": unsigned(132, 136) if len(status) >= 160 else 0,
+            "sort_us": unsigned(136, 140) if len(status) >= 160 else 0,
+            "sort_max_us": unsigned(140, 144) if len(status) >= 160 else 0,
+            "texture_us": unsigned(144, 148) if len(status) >= 160 else 0,
+            "texture_max_us": unsigned(148, 152) if len(status) >= 160 else 0,
+            "world_raster_us": unsigned(152, 156) if len(status) >= 160 else 0,
+            "world_raster_max_us": unsigned(156, 160) if len(status) >= 160 else 0,
         }
     )
     return decoded
 
 
-def amp_render_pipeline_benchmark(
-    device_arg: str | None, duration_seconds: float = AMP_BENCHMARK_DURATION_SECONDS
+def world_benchmark(
+    device_arg: str | None, duration_seconds: float = WORLD_BENCHMARK_DURATION_SECONDS
 ) -> dict[str, object]:
+    run_control("world-benchmark-start", device_arg, recover_status_transport=True)
     benchmark_started = time.monotonic()
     deadline = benchmark_started + duration_seconds
     responses = 0
@@ -667,6 +692,7 @@ def amp_render_pipeline_benchmark(
     last: dict[str, int] | None = None
     first_observed_at: float | None = None
     last_observed_at: float | None = None
+    maximum_observation_gap_ms = 0
     last_sample: dict[str, int] | None = None
     while time.monotonic() < deadline:
         started = time.monotonic()
@@ -679,22 +705,63 @@ def amp_render_pipeline_benchmark(
         response_ms = int((time.monotonic() - started) * 1000)
         max_response_ms = max(max_response_ms, response_ms)
         responses += 1
-        sample = decode_amp_pipeline_status(raw_status)
+        sample = decode_world_status(raw_status)
         last_sample = sample
-        if sample["availability"] == 1 and sample["generation"] > 0:
+        if sample["heartbeat_freshness"] == 1 and sample["generation"] > 0:
+            observed_at = time.monotonic()
             if first is None:
                 first = sample
-                first_observed_at = time.monotonic()
+                first_observed_at = observed_at
+            if last_observed_at is not None:
+                maximum_observation_gap_ms = max(
+                    maximum_observation_gap_ms,
+                    int((observed_at - last_observed_at) * 1000),
+                )
             last = sample
-            last_observed_at = time.monotonic()
+            last_observed_at = observed_at
         time.sleep(0.25)
+    # A terminal observation is mandatory: it proves that the device, rather
+    # than the host's wall clock, completed the 1,200-update schedule. Allow a
+    # bounded grace period for a status request racing the final 20 Hz publish.
+    terminal = None
+    terminal_deadline = time.monotonic() + 1.0
+    while terminal is None or terminal["benchmark_state"] != 2:
+        remaining_grace = terminal_deadline - time.monotonic()
+        if remaining_grace <= 0:
+            break
+        try:
+            raw_status = run_control(
+                "status",
+                device_arg,
+                recover_status_transport=False,
+                status_timeout=min(1.0, remaining_grace),
+            )
+            responses += 1
+            terminal = decode_world_status(raw_status)
+            last_sample = terminal
+            observed_at = time.monotonic()
+            if terminal["heartbeat_freshness"] == 1 and terminal["generation"] > 0:
+                if last_observed_at is not None:
+                    maximum_observation_gap_ms = max(
+                        maximum_observation_gap_ms,
+                        int((observed_at - last_observed_at) * 1000),
+                    )
+                last = terminal
+                last_observed_at = observed_at
+        except DeviceError:
+            pass
+        if terminal is not None and terminal["benchmark_state"] == 2:
+            break
+        if time.monotonic() >= terminal_deadline:
+            break
+        time.sleep(0.05)
     if first is None or last is None:
         summary: dict[str, object] = {
-            "operation": "amp_render_pipeline",
+            "operation": "world_benchmark",
             "operation_id": 1,
             "parent_operation_id": None,
             "status": "error",
-            "error_type": "amp_pipeline_not_observed",
+            "error_type": "world_not_observed",
             "effect_id": None,
             "virtual_time_ms": 0,
             "end_virtual_time_ms": int((time.monotonic() - benchmark_started) * 1000),
@@ -702,13 +769,13 @@ def amp_render_pipeline_benchmark(
             "value": "unavailable",
             "status_responses": responses,
             "max_status_response_ms": max_response_ms,
-            "last_availability": last_sample["availability"] if last_sample is not None else 0,
+            "last_availability": last_sample["semantic_availability"] if last_sample is not None else 0,
             "renderer_stage": last_sample["stage"] if last_sample is not None else 0,
             "allocation_failures": last_sample["allocation_failures"] if last_sample is not None else 0,
             "transfer_failures": last_sample["transfer_failures"] if last_sample is not None else 0,
         }
         print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
-        raise AmpBenchmarkError("amp_pipeline_not_observed", summary)
+        raise WorldBenchmarkError("world_not_observed", summary)
     benchmark_finished = time.monotonic()
     duration_ms = int((benchmark_finished - benchmark_started) * 1000)
     assert first_observed_at is not None
@@ -723,25 +790,35 @@ def amp_render_pipeline_benchmark(
     completed_frames = last["completed_frames"] - first["completed_frames"]
     measured_fps_milli = completed_frames * 1_000_000 // measurement_duration_ms
     passed = (
-        responses >= AMP_BENCHMARK_MIN_STATUS_RESPONSES
-        and max_response_ms <= AMP_BENCHMARK_MAX_STATUS_RESPONSE_MS
+        responses >= WORLD_BENCHMARK_MIN_STATUS_RESPONSES
+        and max_response_ms <= WORLD_BENCHMARK_MAX_STATUS_RESPONSE_MS
         and last_sample is not None
-        and last_sample["availability"] == 1
-        and last_observation_age_ms <= int(AMP_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS * 1000)
-        and measurement_coverage_milli >= AMP_BENCHMARK_MIN_COVERAGE_MILLI
+        and last_sample["heartbeat_freshness"] == 1
+        and last_observation_age_ms <= int(WORLD_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS * 1000)
+        and measurement_coverage_milli >= WORLD_BENCHMARK_MIN_COVERAGE_MILLI
+        and maximum_observation_gap_ms <= int(WORLD_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS * 1000)
+        and terminal is not None
+        and terminal["benchmark_state"] == 2
+        and terminal["requested_updates"] == 1_200
         and last["generation"] > first["generation"]
+        and completed_frames > 0
         and last["stage"] != 5
         and last["display_ready"] == 1
         and last["fault"] == 0
         and last["allocation_failures"] == 0
         and last["transfer_failures"] == 0
+        and last["stale_snapshots"] == 0
+        and last["atlas_cache_failures"] == 0
+        and last["view_generation"] > first["view_generation"]
+        and last["pose_generation"] > first["pose_generation"]
+        and last["visible_billboards"] + last["culled_billboards"] == 4
     )
     summary: dict[str, object] = {
-        "operation": "amp_render_pipeline",
+        "operation": "world_benchmark",
         "operation_id": 1,
         "parent_operation_id": None,
         "status": "success" if passed else "error",
-        "error_type": None if passed else "amp_pipeline_benchmark_failed",
+        "error_type": None if passed else "world_benchmark_failed",
         "effect_id": None,
         "virtual_time_ms": 0,
         "end_virtual_time_ms": duration_ms,
@@ -749,13 +826,16 @@ def amp_render_pipeline_benchmark(
         "measurement_duration_ms": measurement_duration_ms,
         "observation_duration_ms": observation_duration_ms,
         "measurement_coverage_milli": measurement_coverage_milli,
+        "maximum_observation_gap_ms": maximum_observation_gap_ms,
         "last_observation_age_ms": last_observation_age_ms,
-        "last_availability": last_sample["availability"] if last_sample is not None else 0,
+        "last_availability": last_sample["semantic_availability"] if last_sample is not None else 0,
         "render_width": 320,
         "render_height": 240,
         "value": "observed" if passed else "unavailable",
         "status_responses": responses,
         "completed_frames": completed_frames,
+        "requested_updates": terminal["requested_updates"] if terminal is not None else 0,
+        "deadline_misses": (last["deadline_misses"] - first["deadline_misses"]) & 0xFFFF,
         "measured_fps_milli": measured_fps_milli,
         "first_generation": first["generation"],
         "last_generation": last["generation"],
@@ -776,43 +856,36 @@ def amp_render_pipeline_benchmark(
         "display_spi_hz": last["display_spi_hz"],
         "copy_last_us": last["copy_us"],
         "wire_last_us": max(0, last["transfer_us"] - last["copy_us"]),
-        "dirty_rect_count": last["dirty_rect_count"],
-        "dirty_pixels": last["dirty_pixels"],
-        "transferred_bytes": last["transferred_bytes"],
         "pixel_dma_batches": last["pixel_dma_batches"],
+        "view_generation": last["view_generation"],
+        "pose_generation": last["pose_generation"],
+        "input_generation": last["input_generation"],
+        "stale_snapshots": last["stale_snapshots"],
+        "touch_drops": last["touch_drops"],
+        "atlas_cache_hits": last["atlas_cache_hits"],
+        "atlas_cache_misses": last["atlas_cache_misses"],
+        "atlas_cache_failures": last["atlas_cache_failures"],
+        "visible_billboards": last["visible_billboards"],
+        "culled_billboards": last["culled_billboards"],
+        "nearest_samples": last["nearest_samples"],
+        "bilinear_samples": last["bilinear_samples"],
+        "projection_last_us": last["projection_us"],
+        "projection_max_us": last["projection_max_us"],
+        "sort_last_us": last["sort_us"],
+        "sort_max_us": last["sort_max_us"],
+        "texture_last_us": last["texture_us"],
+        "texture_max_us": last["texture_max_us"],
+        "world_raster_last_us": last["world_raster_us"],
+        "world_raster_max_us": last["world_raster_max_us"],
     }
     print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
     if not passed:
-        raise AmpBenchmarkError("amp_pipeline_benchmark_failed", summary)
+        raise WorldBenchmarkError("world_benchmark_failed", summary)
     return summary
 
 
 def flash(root: Path, device_arg: str | None) -> None:
-    device = discover_device(device_arg)
-    state, environment = device_environment(root)
-    build_dir = state / "phase3-device/build"
-    if not (build_dir / "zephyr/zephyr.elf").is_file():
-        raise DeviceError("firmware_build_required")
-    subprocess.run(
-        [
-            str(state / "venv/bin/west"),
-            "flash",
-            "--no-rebuild",
-            "--build-dir",
-            str(build_dir),
-            "--runner",
-            "esp32",
-            "--",
-            "--esp-device",
-            str(device),
-            "--esp-baud-rate",
-            "460800",
-        ],
-        check=True,
-        cwd=state / "west",
-        env=environment,
-        stdout=sys.stderr,
-    )
+    flash_amp(root, device_arg)
 
 
 def recover(root: Path, device_arg: str | None) -> None:
@@ -892,6 +965,30 @@ def publish_result(root: Path, action: str, result: str, run_id: str) -> Path:
     return path
 
 
+DIAGNOSTIC_RECORD_KEYS = frozenset(
+    {
+        "operation", "operation_id", "parent_operation_id", "status", "error_type",
+        "effect_id", "virtual_time_ms", "end_virtual_time_ms", "duration_ms",
+        "measurement_duration_ms", "observation_duration_ms", "measurement_coverage_milli",
+        "maximum_observation_gap_ms", "last_observation_age_ms", "last_availability",
+        "render_width", "render_height", "value", "status_responses", "completed_frames",
+        "requested_updates", "deadline_misses", "measured_fps_milli", "first_generation",
+        "last_generation", "generation", "render_last_us", "transfer_last_us",
+        "render_max_us", "transfer_max_us", "renderer_stage", "renderer_fault",
+        "display_ready", "max_status_response_ms", "allocation_failures", "transfer_failures",
+        "appcpu_boot_stage", "appcpu_core_id", "mailbox_published", "procpu_boot_stage",
+        "procpu_boot_error", "display_spi_hz", "copy_last_us", "wire_last_us",
+        "pixel_dma_batches", "view_generation", "valid_view_generation",
+        "pose_generation", "input_generation", "stale_snapshots", "touch_drops",
+        "atlas_cache_hits", "atlas_cache_misses", "atlas_cache_failures",
+        "visible_billboards", "culled_billboards", "nearest_samples", "bilinear_samples",
+        "projection_last_us", "projection_max_us", "sort_last_us", "sort_max_us",
+        "texture_last_us", "texture_max_us", "world_raster_last_us", "world_raster_max_us",
+        "shell_state", "availability", "heartbeat_freshness", "valid_availability_result",
+    }
+)
+
+
 def publish_diagnostic(root: Path, run_id: str, outcome: str, records: list[dict[str, object]]) -> None:
     directory = root / ".deskkin/phase3/device/diagnostics"
     for ancestor in (root / ".deskkin", root / ".deskkin/phase3", root / ".deskkin/phase3/device", directory):
@@ -903,16 +1000,14 @@ def publish_diagnostic(root: Path, run_id: str, outcome: str, records: list[dict
     lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
     created = int(time.time() * 1000)
-    latest = records[-1] if records else {}
-    session_context = latest.get("session_context_id")
-    operation_context = latest.get("operation_context_id")
+    records = [{key: value for key, value in record.items() if key in DIAGNOSTIC_RECORD_KEYS} for record in records]
     value = {
         "schema_version": 1,
         "resource": {"program": "deskkin-core-s3-runner", "version": "0.1.0", "role": "physical_device"},
         "run_id": run_id,
         "scenario_run_id": run_id,
-        "session_context_id": session_context if session_context and session_context != "00" * 16 else None,
-        "operation_context_id": operation_context if operation_context and operation_context != "00" * 16 else None,
+        "session_context_id": None,
+        "operation_context_id": None,
         "outcome": outcome,
         "completeness": "complete",
         "health": "healthy",
@@ -962,36 +1057,28 @@ def publish_diagnostic(root: Path, run_id: str, outcome: str, records: list[dict
 
 
 def monitor_device(device_arg: str | None, duration_seconds: float, expected_attempt: int) -> list[dict[str, object]]:
+    del expected_attempt
     records: list[dict[str, object]] = []
     started = time.monotonic()
     last_elapsed = 0
-    previous: tuple[int, int, int, bytes, bytes, bool, int, int, int, int, int] | None = None
+    previous: tuple[int, ...] | None = None
     try:
         while duration_seconds <= 0 or time.monotonic() - started < duration_seconds:
             result = run_control("status", device_arg, recover_status_transport=False)
-            if len(result) < 78:
-                raise DeviceError("control_invalid")
-            shell_and_valid = result[26]
+            status = decode_world_status(result)
             value = (
-                shell_and_valid & 0x7F,
-                result[27],
-                int.from_bytes(result[28:32], "big"),
-                result[32:48],
-                result[48:64],
-                bool(shell_and_valid & 0x80),
-                int.from_bytes(result[64:68], "big"),
-                int.from_bytes(result[68:72], "big"),
-                int.from_bytes(result[72:76], "big"),
-                result[76],
-                result[77],
+                result[26], status["semantic_availability"], status["generation"],
+                status["completed_frames"], status["stage"], status["fault"],
+                status["allocation_failures"], status["transfer_failures"],
+                status["stale_snapshots"], int(status["valid_availability_result"]),
+                status["valid_view_generation"], status["view_generation"],
             )
             if value != previous:
                 elapsed = int((time.monotonic() - started) * 1000)
-                stage = OPERATION_STAGES[min(value[9], len(OPERATION_STAGES) - 1)]
-                error_type = operation_error(value[9], value[10])
+                error_type = "renderer_fault" if value[5] != 0 else None
                 records.append(
                     {
-                        "operation": stage,
+                        "operation": "device_ui",
                         "operation_id": len(records) + 1,
                         "parent_operation_id": None,
                         "status": "success" if error_type is None else "error",
@@ -1003,15 +1090,19 @@ def monitor_device(device_arg: str | None, duration_seconds: float, expected_att
                         "render_width": 320,
                         "render_height": 240,
                         "value": ("unknown", "available", "unavailable")[min(value[1], 2)],
-                        "session_context_id": value[3].hex(),
-                        "operation_context_id": value[4].hex(),
-                        "rgb565_digest": f"{value[2]:08x}",
                         "shell_state": value[0],
-                        "valid_availability_result": value[5],
-                        "run_attempt": value[6],
-                        "result_attempt": value[7],
-                        "frame_attempt": value[8],
-                        "stage": stage,
+                        "availability": value[1],
+                        "generation": value[2],
+                        "completed_frames": value[3],
+                        "renderer_stage": value[4],
+                        "renderer_fault": value[5],
+                        "allocation_failures": value[6],
+                        "transfer_failures": value[7],
+                        "stale_snapshots": value[8],
+                        "valid_availability_result": bool(value[9]),
+                        "valid_view_generation": value[10],
+                        "view_generation": value[11],
+                        "heartbeat_freshness": status["heartbeat_freshness"],
                     }
                 )
                 last_elapsed = elapsed
@@ -1023,113 +1114,33 @@ def monitor_device(device_arg: str | None, duration_seconds: float, expected_att
 
 
 def run_succeeded(records: list[dict[str, object]], expected_attempt: int) -> bool:
-    zero_context = "00" * 16
+    del expected_attempt
     return any(
         record.get("shell_state") == 4
+        and record.get("availability") in {1, 2}
         and record.get("valid_availability_result") is True
-        and record.get("session_context_id") != zero_context
-        and record.get("operation_context_id") != zero_context
-        and record.get("rgb565_digest") not in {None, "00000000"}
-        and record.get("run_attempt") == expected_attempt
-        and record.get("result_attempt") == expected_attempt
-        and record.get("frame_attempt") == expected_attempt
+        and 0 < int(record.get("valid_view_generation", 0)) <= int(record.get("view_generation", 0))
+        and int(record.get("generation", 0)) > 0
+        and int(record.get("completed_frames", 0)) > 0
+        and record.get("renderer_stage") != 5
+        and record.get("renderer_fault") == 0
+        and record.get("allocation_failures") == 0
+        and record.get("transfer_failures") == 0
+        and record.get("stale_snapshots") == 0
         for record in records
     )
-
-
-def decode_pet_benchmark(status: bytes) -> dict[str, int]:
-    if len(status) != 80 or status[0] != SCHEMA or status[1] != 0:
-        raise DeviceError("control_invalid")
-
-    def unsigned(start: int, end: int) -> int:
-        return int.from_bytes(status[start:end], "big")
-
-    return {
-        "state": status[26],
-        "allocation_failures": status[27],
-        "display_transfer_failures": unsigned(28, 30),
-        "duration_ms": unsigned(30, 34),
-        "animation_update_requests": unsigned(34, 38),
-        "completed_frames": unsigned(38, 42),
-        "render_total_us": unsigned(42, 46),
-        "display_transfer_total_us": unsigned(46, 50),
-        "render_max_us": unsigned(50, 54),
-        "display_transfer_max_us": unsigned(54, 58),
-        "frames_within_50ms": unsigned(58, 62),
-        "stalls_over_250ms": unsigned(62, 64),
-        "deadline_misses": unsigned(64, 66),
-        "max_consecutive_misses": unsigned(66, 68),
-        "transferred_lines": unsigned(68, 72),
-        "transferred_bytes": unsigned(72, 76),
-        "frame_digest_updates": unsigned(76, 80),
-    }
-
-
-def pet_benchmark_passed(summary: dict[str, int]) -> bool:
-    completed = summary["completed_frames"]
-    return (
-        summary["state"] == 2
-        and 60_000 <= summary["duration_ms"] <= 60_500
-        and summary["animation_update_requests"] == PET_BENCHMARK_REQUESTS
-        and completed == PET_BENCHMARK_REQUESTS
-        and summary["frames_within_50ms"] * 100 >= completed * 95
-        and summary["stalls_over_250ms"] == 0
-        and summary["allocation_failures"] == 0
-        and summary["display_transfer_failures"] == 0
-        and summary["frame_digest_updates"] > 0
-        and summary["transferred_lines"] == completed * 240
-        and summary["transferred_bytes"] == completed * 320 * 240 * 2
-    )
-
-
-def pet_benchmark_record(summary: dict[str, int], passed: bool) -> dict[str, object]:
-    completed = summary["completed_frames"]
-    return {
-        "operation": "pet_render_benchmark",
-        "operation_id": 1,
-        "parent_operation_id": None,
-        "status": "success" if passed else "error",
-        "error_type": None if passed else "benchmark_gate_failed",
-        "effect_id": None,
-        "virtual_time_ms": 0,
-        "end_virtual_time_ms": summary["duration_ms"],
-        "duration_ms": summary["duration_ms"],
-        "render_width": 320,
-        "render_height": 240,
-        "value": "pass" if passed else "fail",
-        **summary,
-        "render_mean_us": summary["render_total_us"] // completed if completed else None,
-        "display_transfer_mean_us": summary["display_transfer_total_us"] // completed if completed else None,
-    }
-
-
-def await_pet_benchmark(device_arg: str | None) -> dict[str, int]:
-    time.sleep(PET_BENCHMARK_DURATION_SECONDS + 0.5)
-    deadline = time.monotonic() + 5.0
-    while True:
-        summary = decode_pet_benchmark(
-            run_control("pet-benchmark-status", device_arg, recover_status_transport=False)
-        )
-        if summary["state"] in {2, 3}:
-            return summary
-        if summary["state"] != 1 or time.monotonic() >= deadline:
-            raise DeviceError("benchmark_timeout")
-        time.sleep(0.1)
 
 
 def action_record(action: str, status: str, error_type: str | None = None) -> dict[str, object]:
     operation = {
         "profile": "control_route",
         "build": "control_route",
-        "amp-build": "control_route",
-        "amp-flash": "device_ui",
-        "amp-benchmark": "amp_render_pipeline",
         "flash": "device_ui",
         "identity": "identity_init",
         "provision": "nvs_publication",
         "status": "device_ui",
         "run": "device_ui",
-        "benchmark": "pet_render_benchmark",
+        "benchmark": "world_benchmark",
         "recover": "nvs_publication",
     }[action]
     return {
@@ -1150,7 +1161,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("profile", "build", "amp-build", "amp-flash", "amp-benchmark", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
+    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
     parser.add_argument("identity_action", nargs="?")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--age-identity", type=Path)
@@ -1174,12 +1185,6 @@ def main() -> int:
             create_profile(profile, identity)
         elif args.action == "build":
             build(root)
-        elif args.action == "amp-build":
-            build_amp(root)
-        elif args.action == "amp-flash":
-            flash_amp(root, args.device)
-        elif args.action == "amp-benchmark":
-            records = [amp_render_pipeline_benchmark(args.device, AMP_BENCHMARK_DURATION_SECONDS)]
         elif args.action == "flash":
             flash(root, args.device)
         elif args.action == "recover":
@@ -1230,19 +1235,12 @@ def main() -> int:
             if not run_succeeded(records, expected_attempt):
                 raise DeviceError("availability_timeout")
         elif args.action == "benchmark":
-            run_control("shutdown", args.device)
-            run_control("pet-benchmark-start", args.device)
-            summary = await_pet_benchmark(args.device)
-            passed = pet_benchmark_passed(summary)
-            records = [pet_benchmark_record(summary, passed)]
-            print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
-            if not passed:
-                raise DeviceError("benchmark_gate_failed")
+            records = [world_benchmark(args.device, WORLD_BENCHMARK_DURATION_SECONDS)]
         result = "success"
         exit_code = 0
     except (DeviceError, OSError, subprocess.SubprocessError, UnicodeError, ValueError) as error:
         message = str(error) if isinstance(error, DeviceError) else "device_operation_failed"
-        if isinstance(error, AmpBenchmarkError):
+        if isinstance(error, WorldBenchmarkError):
             records = [error.summary]
         boot_failure = message in {*BOOT_ERRORS.values(), "boot_unknown", "boot_not_ready"}
         control_failure = message in {"control_invalid", "control_timeout", "control_response_length"}
@@ -1257,8 +1255,8 @@ def main() -> int:
             "availability_timeout",
             "benchmark_gate_failed",
             "benchmark_timeout",
-            "amp_pipeline_not_observed",
-            "amp_pipeline_benchmark_failed",
+            "world_not_observed",
+            "world_benchmark_failed",
         } else None if boot_failure else "store_failed"
         print(message, file=sys.stderr)
     if not records:

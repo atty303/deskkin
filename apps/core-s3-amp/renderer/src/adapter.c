@@ -79,10 +79,67 @@ static atomic_t dirty_rect_count;
 static atomic_t pixel_dma_batches;
 static atomic_t dirty_pixels;
 static atomic_t transferred_bytes;
+static atomic_t view_generation;
+static atomic_t pose_generation;
+static atomic_t input_generation;
+static atomic_t stale_snapshots;
+static atomic_t touch_drops;
+static atomic_t atlas_cache_hits;
+static atomic_t atlas_cache_misses;
+static atomic_t atlas_cache_failures;
+static atomic_t visible_billboards;
+static atomic_t culled_billboards;
+static atomic_t nearest_samples;
+static atomic_t bilinear_samples;
+static atomic_t projection_last_us;
+static atomic_t projection_max_us;
+static atomic_t sort_last_us;
+static atomic_t sort_max_us;
+static atomic_t texture_last_us;
+static atomic_t texture_max_us;
+static atomic_t world_raster_last_us;
+static atomic_t world_raster_max_us;
+static atomic_t deadline_misses;
 
 extern void rust_main(void);
 void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 			      uint32_t transfer_us);
+
+static void observe_max(atomic_t *maximum, uint32_t value)
+{
+	atomic_val_t current = atomic_get(maximum);
+	while (value > (uint32_t)current &&
+	       !atomic_cas(maximum, current, (atomic_val_t)value)) {
+		current = atomic_get(maximum);
+	}
+}
+
+void deskkin_world_observe(uint32_t generation, uint32_t input, uint32_t drops,
+			   uint16_t cache_hits, uint16_t cache_misses, uint16_t cache_failures,
+			   uint8_t visible, uint8_t culled, uint32_t nearest,
+			   uint32_t bilinear, uint32_t projection_us, uint32_t sort_us,
+			   uint32_t texture_us, uint32_t raster_us)
+{
+	atomic_set(&view_generation, (atomic_val_t)generation);
+	atomic_set(&pose_generation, (atomic_val_t)generation);
+	atomic_set(&input_generation, (atomic_val_t)input);
+	atomic_set(&touch_drops, (atomic_val_t)drops);
+	atomic_set(&atlas_cache_hits, cache_hits);
+	atomic_set(&atlas_cache_misses, cache_misses);
+	atomic_set(&atlas_cache_failures, cache_failures);
+	atomic_set(&visible_billboards, visible);
+	atomic_set(&culled_billboards, culled);
+	atomic_set(&nearest_samples, (atomic_val_t)nearest);
+	atomic_set(&bilinear_samples, (atomic_val_t)bilinear);
+	atomic_set(&projection_last_us, (atomic_val_t)projection_us);
+	atomic_set(&sort_last_us, (atomic_val_t)sort_us);
+	atomic_set(&texture_last_us, (atomic_val_t)texture_us);
+	atomic_set(&world_raster_last_us, (atomic_val_t)raster_us);
+	observe_max(&projection_max_us, projection_us);
+	observe_max(&sort_max_us, sort_us);
+	observe_max(&texture_max_us, texture_us);
+	observe_max(&world_raster_max_us, raster_us);
+}
 
 void *malloc(size_t size)
 {
@@ -166,9 +223,31 @@ void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 		.allocation_failures = (uint8_t)atomic_get(&allocation_failures),
 		.transfer_failures = (uint8_t)atomic_get(&transfer_failures),
 		.dirty_rect_count = (uint8_t)atomic_get(&dirty_rect_count),
+		.schema = DESKKIN_CHANNEL_SCHEMA,
 		.pixel_dma_batches = (uint16_t)atomic_get(&pixel_dma_batches),
 		.dirty_pixels = (uint32_t)atomic_get(&dirty_pixels),
 		.transferred_bytes = (uint32_t)atomic_get(&transferred_bytes),
+		.view_generation = (uint32_t)atomic_get(&view_generation),
+		.pose_generation = (uint32_t)atomic_get(&pose_generation),
+		.input_generation = (uint32_t)atomic_get(&input_generation),
+		.stale_snapshots = (uint32_t)atomic_get(&stale_snapshots),
+		.touch_drops = (uint32_t)atomic_get(&touch_drops),
+		.atlas_cache_hits = (uint16_t)atomic_get(&atlas_cache_hits),
+		.atlas_cache_misses = (uint16_t)atomic_get(&atlas_cache_misses),
+		.atlas_cache_failures = (uint16_t)atomic_get(&atlas_cache_failures),
+		.visible_billboards = (uint8_t)atomic_get(&visible_billboards),
+		.culled_billboards = (uint8_t)atomic_get(&culled_billboards),
+		.nearest_samples = (uint32_t)atomic_get(&nearest_samples),
+		.bilinear_samples = (uint32_t)atomic_get(&bilinear_samples),
+		.projection_us = (uint32_t)atomic_get(&projection_last_us),
+		.projection_max_us = (uint32_t)atomic_get(&projection_max_us),
+		.sort_us = (uint32_t)atomic_get(&sort_last_us),
+		.sort_max_us = (uint32_t)atomic_get(&sort_max_us),
+		.texture_us = (uint32_t)atomic_get(&texture_last_us),
+		.texture_max_us = (uint32_t)atomic_get(&texture_max_us),
+		.world_raster_us = (uint32_t)atomic_get(&world_raster_last_us),
+		.world_raster_max_us = (uint32_t)atomic_get(&world_raster_max_us),
+		.deadline_misses = (uint32_t)atomic_get(&deadline_misses),
 	};
 	/* Zero marks the payload unstable while the next snapshot is copied. */
 	__atomic_store_n(&AMP_SHARED->renderer_publication, 0U, __ATOMIC_SEQ_CST);
@@ -251,6 +330,108 @@ int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us
 void deskkin_yield(void)
 {
 	k_yield();
+}
+
+int deskkin_world_snapshot(struct deskkin_world_snapshot *output)
+{
+	if (output == NULL) {
+		return -EINVAL;
+	}
+	for (size_t attempt = 0; attempt < 3U; ++attempt) {
+		const uint32_t publication =
+			__atomic_load_n(&AMP_SHARED->world_publication, __ATOMIC_ACQUIRE);
+		if (publication == 0U) {
+			return -EAGAIN;
+		}
+		memcpy(output, (const void *)&AMP_SHARED->world, sizeof(*output));
+		const uint32_t after =
+			__atomic_load_n(&AMP_SHARED->world_publication, __ATOMIC_ACQUIRE);
+		if (publication == after && output->generation == publication) {
+			if (output->magic != DESKKIN_WORLD_MAGIC ||
+			    output->schema != DESKKIN_WORLD_SCHEMA ||
+			    output->shell > DESKKIN_SHELL_PAIRED || output->availability > 3U ||
+			    output->notice > 1U ||
+			    (output->sas != UINT32_MAX && output->sas > 999999U)) {
+				return -EPROTO;
+			}
+			return 1;
+		}
+	}
+	atomic_inc(&stale_snapshots);
+	return -EAGAIN;
+}
+
+int deskkin_touch_read(uint32_t after_generation, struct deskkin_touch_sample *output,
+		       uint32_t *drop_count)
+{
+	if (output == NULL || drop_count == NULL) {
+		return -EINVAL;
+	}
+	const uint32_t latest =
+		__atomic_load_n(&AMP_SHARED->touch.write_generation, __ATOMIC_ACQUIRE);
+	*drop_count = __atomic_load_n(&AMP_SHARED->touch.drop_count, __ATOMIC_ACQUIRE);
+	if (latest == 0U || latest == after_generation) {
+		return 0;
+	}
+	uint32_t wanted = after_generation + 1U;
+	uint32_t skipped = 0U;
+	if (latest - wanted >= DESKKIN_TOUCH_CAPACITY) {
+		const uint32_t oldest = latest - DESKKIN_TOUCH_CAPACITY + 1U;
+		skipped = oldest - wanted;
+		wanted = oldest;
+	}
+	const uint32_t index = (wanted - 1U) % DESKKIN_TOUCH_CAPACITY;
+	volatile struct deskkin_touch_sample *slot = &AMP_SHARED->touch.samples[index];
+	const uint32_t before = __atomic_load_n(&slot->publication, __ATOMIC_ACQUIRE);
+	if (before == 0U || before != wanted) {
+		return -EAGAIN;
+	}
+	memcpy(output, (const void *)slot, sizeof(*output));
+	const uint32_t after = __atomic_load_n(&slot->publication, __ATOMIC_ACQUIRE);
+	if (before != after) {
+		return -EAGAIN;
+	}
+	if (output->generation != wanted || output->schema != DESKKIN_CHANNEL_SCHEMA ||
+	    output->pressed > 1U || output->x < 0 || output->x >= 320 || output->y < 0 ||
+	    output->y >= 240) {
+		return -EPROTO;
+	}
+	if (skipped != 0U) {
+		*drop_count = __atomic_add_fetch(&AMP_SHARED->touch.drop_count, skipped,
+						 __ATOMIC_ACQ_REL);
+	}
+	return 1;
+}
+
+void deskkin_publish_target_yaw(int64_t value)
+{
+	const uint32_t generation = AMP_SHARED->target_yaw.generation + 1U;
+	__atomic_store_n(&AMP_SHARED->target_yaw_publication, 0U, __ATOMIC_SEQ_CST);
+	const struct deskkin_target_yaw target = {
+		.generation = generation == 0U ? 1U : generation,
+		.schema = DESKKIN_CHANNEL_SCHEMA,
+		.value = value,
+	};
+	memcpy((void *)&AMP_SHARED->target_yaw, &target, sizeof(target));
+	__atomic_store_n(&AMP_SHARED->target_yaw_publication, target.generation, __ATOMIC_SEQ_CST);
+}
+
+void deskkin_publish_ui_command(uint8_t command)
+{
+	const uint32_t generation = AMP_SHARED->command.generation + 1U;
+	__atomic_store_n(&AMP_SHARED->command_publication, 0U, __ATOMIC_SEQ_CST);
+	const struct deskkin_ui_command message = {
+		.generation = generation == 0U ? 1U : generation,
+		.command = command,
+		.schema = DESKKIN_CHANNEL_SCHEMA,
+	};
+	memcpy((void *)&AMP_SHARED->command, &message, sizeof(message));
+	__atomic_store_n(&AMP_SHARED->command_publication, message.generation, __ATOMIC_SEQ_CST);
+}
+
+void deskkin_deadline_missed(void)
+{
+	atomic_inc(&deadline_misses);
 }
 
 int deskkin_display_enable(void)

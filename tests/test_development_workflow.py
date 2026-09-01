@@ -35,7 +35,6 @@ HOST_COMMANDS = (
 )
 CORE_S3_COMMANDS = (
     "python scripts/phase3_device.py build",
-    "python scripts/phase3_device.py amp-build",
 )
 AGGREGATE_COMMANDS = ("mise run test:host", "mise run test:core-s3")
 

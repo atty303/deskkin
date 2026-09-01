@@ -3,11 +3,13 @@
 /*
  * The CoreS3 carries 16 MiB of flash, while Zephyr's generic ESP32-S3 AMP
  * layout only assigns 448 KiB to each APPCPU image. Keep the existing PROCPU
- * slots and give the renderer two 2 MiB slots. All AMP domains include this
- * file so MCUboot and both CPUs agree on every offset.
+ * slots and give the renderer two 3 MiB slots. Keep the NVS, scratch, and
+ * coredump offsets unchanged so installing the world renderer does not move
+ * persistent product state. All AMP domains include this file so MCUboot and
+ * both CPUs agree on every offset.
  */
 &slot0_appcpu_partition {
-	reg = <0x2c0000 0x200000>;
+	reg = <0x2c0000 0x300000>;
 };
 
 &flash0 {
@@ -19,9 +21,9 @@
 		/delete-node/ partition@3e0000;
 		/delete-node/ partition@3ff000;
 
-		slot1_appcpu_partition: partition@4c0000 {
+		slot1_appcpu_partition: partition@800000 {
 			label = "image-1-appcpu";
-			reg = <0x4c0000 0x200000>;
+			reg = <0x800000 0x300000>;
 		};
 
 		slot0_lpcore_partition: partition@6c0000 {
