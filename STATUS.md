@@ -59,20 +59,22 @@ simulator, presentation, scenario, and diagnostic suites and a pristine CoreS3
 build of MCUboot, PROCPU, APPCPU, and inert recovery. A fresh independent review
 and its follow-up review are clean after resolving publication ordering,
 semantic-result correlation, deadline/drop accounting, and schema-fault
-handling. No firmware from this slice has been flashed, so live frame timings
-and the 60-second benchmark remain unmeasured.
+handling. The AMP product was flashed to `/dev/ttyACM2`; MCUboot, PROCPU, and
+APPCPU writes, readback hashes, and resets all completed successfully. The
+post-flash USB control status request times out because the application hangs
+before it serves control responses. ROM bootloader access remains available and
+was confirmed with an `esptool` probe, so the target remains reflashable. Live
+frame timings and the 60-second benchmark remain unmeasured.
 
-The target CoreS3 was confirmed read-only on the host as the Espressif USB
-JTAG/serial device at `/dev/ttyACM2`. No device node was opened and no reset or
-write was performed.
+The target CoreS3 is the Espressif USB JTAG/serial device at `/dev/ttyACM2`.
 
 ## Next work
 
-Stop for explicit approval before flashing the AMP product to the confirmed
-`/dev/ttyACM2` target.
+Determine the earliest boot stage reached by the flashed AMP product and repair
+the application hang before attempting identity/profile checks or a benchmark.
 
-After approved flash and existing identity/profile checks, run the normal
-application and 60-second world benchmark. Physical acceptance still requires
+After the boot hang is resolved, check the existing identity/profile and run the
+normal application and 60-second world benchmark. Physical acceptance requires
 the user's visual confirmation of no cylinder primitive, camera-facing boards,
 Availability plus Notice coexistence, Character/object parallax, continuous
 320 px turns without a seam jump, 180 degrees/s observed following, and intact
