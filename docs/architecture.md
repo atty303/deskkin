@@ -48,8 +48,7 @@ filesystems, sockets, provider types, or runtime executors.
 ## Portable application
 
 `application-core` is allocation-free `no_std` Rust. It owns only
-feature-neutral lifecycle values, local effect identities, and surface-class
-vocabulary.
+feature-neutral lifecycle values and local effect identities.
 
 `application-features` depends only on `application-core`. It contains the
 availability state machine and a bounded synthetic-notice feature used for
@@ -59,76 +58,74 @@ connectors, or platform APIs.
 
 `deskkin-application` is the sole concrete composition root. It owns the closed
 compile-time feature registry, registry-order lifecycle broadcast, namespaced
-effect identities, exact completion routing, and deterministic surface
-selection. `Information` surfaces precede `Ambient`; equal classes use fixed
-registry order. Rejected input, capacity exhaustion, and identity exhaustion
-are transactional and publish no partial state or effect.
+effect identities, exact completion routing, and the bounded `ApplicationViews`
+snapshot. Availability and synthetic notice are independent optional members,
+so both can remain present without a surface arbiter. Rejected input, capacity
+exhaustion, and identity exhaustion are transactional and publish no partial
+state or effect.
 
 The same composition and presenter model run on the simulator and CoreS3.
 Small features remain modules in `application-features`; a feature receives a
 separate crate only when it has a materially independent dependency or reuse
 boundary. Dynamic device plugins are not supported.
 
-`deskkin-presentation` is allocation-free `no_std` Rust. It owns only the
-presentation-time Pet animation state and normalized loop/frame coordinates. It is
-not a character domain model and does not own application semantics, assets,
-Slint properties, clocks, or hardware motion. UI owners supply elapsed time and
-adapt its closed frame result to the shared Slint Pet surface.
+`deskkin-presentation` is allocation-free `no_std` Rust. It owns Pet animation
+state and the shared continuous-world implementation: signed Q16.16 world units,
+unwrapped turn angles, cylindrical entity/camera poses, camera-facing billboard
+projection, stable far-to-near sorting, touch-to-target yaw, rate-limited
+observed yaw, and direct RGB565 rasterization. A generated 1,024-entry Q1.15
+trigonometric table with linear residual interpolation keeps simulator and
+CoreS3 integer behavior identical. Callers provide bounded slices; there is no
+dynamic entity registry.
 
 ## User interface and runtime
 
-Slint is the shared declarative UI. One owner controls each Slint instance.
-Runtime tasks and callbacks exchange typed application inputs and views with
-that owner rather than mutating UI state directly.
+Slint remains the shared declarative UI, with exactly one owner per instance.
+The unpaired Setup/Pair/Confirm/Cancel shell is a full-screen Slint component.
+In paired mode, Availability and CompositionCheck are rendered from a reusable
+272×124 Slint billboard template into opaque canonical RGB565 textures. Camera
+movement never redraws those templates. A custom renderer clears to `#16191d`,
+projects and sorts billboards, and writes clipped scaled pixels directly into
+the final 320×240 RGB565 framebuffer. Information textures use fixed-point
+bilinear sampling; Character and the fixed generic object use nearest sampling
+and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
+floor, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
 
-The embedded Koyori skin is four normalized horizontal QOI loop atlases. Its
-Codex Pet JSON and WebP source are not runtime inputs. The simulator and CoreS3
-use the same native 144×156 Slint crop geometry; only a physical CoreS3 benchmark can make
-claims about sustained rendering rate or display-transfer latency.
+The initial paired scene contains a moving Character, Availability board,
+optional Notice board, and radially moving generic object. All are screen-axis
+aligned camera-facing billboards. Camera radius is 4.0, entity radius is bounded
+to 0..=3.0, the near plane is 0.25, horizontal FOV is 90 degrees, and focal
+length is 160 px. Touch maps each positive 320 px horizontal drag to one
+unwrapped target turn. Only observed yaw affects projection; it follows the
+unwrapped target without overshoot at at most 0.5 turn/s. Vertical drag has no
+yaw effect.
 
-The CoreS3 Pet benchmark is a fixed 60-second device operation. It stops the
-application worker, schedules 1,200 Pet updates at 20 FPS, and publishes one
-bounded timing-and-counter summary after measurement. Simulator timing, image
-content, pixels, asset paths, raw device packets, and digest values are outside
-the benchmark diagnostic contract.
+The simulator owns one hosted Slint window. It synchronously switches the same
+owner into capture mode to make missing canonical textures, restores world mode
+before returning to the event loop, and uses the portable projector/rasterizer.
+Its deterministic scenario driver covers camera drag, lag, multi-turn motion,
+autonomous entity motion, view coexistence, and recording degradation.
 
-The simulator uses a hosted runtime and deterministic virtual-time scenario
-driver. The current CoreS3 product firmware uses one Rust/Embassy UI owner and
-one Rust service worker hosted by Zephyr threads. Embassy is a runtime adapter,
-not part of the portable core.
+The CoreS3 product is one MCUboot plus dual-Zephyr AMP sysbuild. PROCPU owns
+touch, Wi-Fi, Noise, NVS, the application service, virtual observed pose, USB
+control, power/reset, and status supervision. APPCPU exclusively owns Slint
+texture generation, the custom world renderer, SPI2, GDMA, and display transfer.
+PROCPU reserves the high 4 MiB Quad-PSRAM region, places both full-screen RGB565
+framebuffers at its beginning, and publishes the remaining caller-owned heap to
+APPCPU. Character QOI is decoded only for the active loop and converted once to
+RGB565+A8; canonical information textures and the fixed object texture stay in
+the same bounded PSRAM cache.
 
-The replacement CoreS3 runtime consists of two Zephyr AMP images. PROCPU owns
-USB control, boot/status supervision, LCD power/reset/backlight, and two static
-full-screen internal-SRAM RGB565 framebuffers. PROCPU initializes and maps a
-bounded Quad-PSRAM allocation region once before starting APPCPU, then enables
-the second core's cache bus and publishes that region. APPCPU owns the heap
-metadata and uses the dedicated high-end 4 MiB region only for Slint dynamic
-allocations; it is disjoint from PROCPU's registered external heap. APPCPU
-exclusively owns Slint software rendering, SPI2, GDMA, and LCD transfer. The
-kernels exchange bounded publication metadata through shared memory;
-pixel contents are never message payloads and SPI2 has one CPU owner.
-Heartbeat snapshots use an explicit unstable marker and matching generations
-so the supervisor never accepts a payload while APPCPU is rewriting it.
-
-The physical pipeline keeps compressed QOI bytes in flash and only the active
-decoded loop in PSRAM. A loop transition clears the Slint image owner, decodes
-the next QOI directly into its final RGBA buffer, installs it, and only then
-requests a draw. Idle and Attend advance every 100 ms; MoveRight and MoveLeft
-advance every 50 ms. Rendering uses two complete 320×240 internal-SRAM
-framebuffers. Slint `SwappedBuffers` reports the region
-changed across the two-buffer repaint history; the adapter transfers its
-bounding rectangle directly from the full-frame stride. The ESP32 MIPI-DBI
-driver gathers the selected row spans into GDMA descriptors without a bounce
-copy. A complete-frame dirty region uses the same path with bounded 30-line
-transactions. Completion ownership prevents either buffer from being reused
-early. LCD SPI runs at 40 MHz and QIO flash at 80 MHz. Separate same-priority
-APPCPU render and display threads overlap safely while the separate PROCPU
-remains responsive. The
-fixed 60-second benchmark derives throughput from device heartbeat times at its first
-and last valid observations. It treats frame rate and latency as measurements,
-while stale or incomplete observation, unresponsive PROCPU status, allocation
-failure, and transfer failure remain integrity errors. Simulator timing is not
-used.
+AMP exchanges generation-published bounded values: stable shell/SAS/view/pose
+snapshots, a touch ring with drop count, a UI command slot, and a latest target
+yaw mailbox. Zero publication marks a payload unstable; readers distinguish
+unstable generations, unknown schemas, and invalid semantics. Pixel content is
+never a message payload and SPI2 has one CPU owner. The fixed 60-second world
+benchmark starts the same paired path, requests one unwrapped camera turn, keeps
+Character/radial motion and both information views active, and observes 1,200
+20 Hz updates. FPS and timing are measurements only. Typed renderer faults,
+stale shared state, zero completed frames, allocation/transfer failure, or an
+incomplete record are integrity failures.
 
 Zephyr owns CoreS3 device discovery, hardware topology, drivers, networking,
 storage, scheduling, and system services. Unsafe Rust, C FFI, and raw Zephyr
@@ -256,8 +253,10 @@ behavior.
   migration policy.
 - Mutation capabilities, confirmation, authorization replay protection, UI
   navigation, and conversation semantics are not implemented.
-- Pet animation is presentation-only. Fixed-world projection, parallax,
-  information cues, pose observation, and physical motion are not implemented.
+- The continuous world uses virtual observed yaw only. Physical servo power,
+  neck actuation, and a neck pose sensor are not implemented.
+- The world is billboard-only and has no tangent-facing boards, mesh geometry,
+  z-buffer, lighting, semantic LOD, or size clamp.
 
 Resolve a limitation only when a concrete vertical slice needs it. Update this
 document to describe the resulting current architecture; use version-control
