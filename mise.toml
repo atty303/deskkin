@@ -155,7 +155,7 @@ description = "Measure the APPCPU full-screen rendering pipeline through the PRO
 run = "python scripts/phase3_device.py amp-benchmark"
 
 [tasks."core-s3:flash"]
-description = "Flash the approved CoreS3 firmware after a live checkpoint"
+description = "Flash the dedicated CoreS3 firmware after read-only device inspection"
 run = "python scripts/phase3_device.py flash"
 
 [tasks."core-s3:identity"]

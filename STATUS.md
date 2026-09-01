@@ -33,6 +33,15 @@ before decoding the next loop. No Slint draw occurs between release and
 installation, so the LCD retains its preceding completed frame during the
 transition. Idle and Attend run at 10 FPS; MoveRight and MoveLeft run at 20 FPS.
 
+The AMP flash wrote, hash-verified, and reset all three sysbuild domains. The
+physical QOI loop benchmark then completed 691 frames over 59.673 seconds at
+11.579 FPS. Last and maximum render times were 16 ms and 20 ms; last and
+maximum transfer times were 12 ms and 32 ms. Allocation and transfer failures
+were zero. PROCPU returned 231 bounded status responses with a 259 ms maximum,
+reported no boot error, and ended with the renderer presented and display ready.
+Human observation confirmed that the character renders normally on the physical
+display. The background remains static in this baseline.
+
 No external provider connector is implemented. The deterministic availability
 connector does not access an external service.
 
@@ -80,8 +89,9 @@ not claim tear-free presentation.
 
 ## Next work
 
-The restored QOI loop lifecycle is reproducibly build-tested but has not been
-flashed or observed on the physical CoreS3. The next product slice remains the
-approved fixed 2D world: implement the deterministic 320×240 viewport, three
-parallax layers, separated target and observed pose, and Notice cues in the
-simulator before enabling physical motion.
+The restored QOI loop lifecycle is reproducibly build-tested and has completed
+the physical 60-second AMP benchmark without a typed renderer fault, and its
+character rendering has been confirmed by human observation. The next product
+slice remains the approved fixed 2D world: implement the deterministic 320×240
+viewport, three parallax layers, separated target and observed pose, and Notice
+cues in the simulator before enabling physical motion.

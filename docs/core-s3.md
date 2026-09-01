@@ -42,13 +42,15 @@ CoreS3 tasks deliberately separate build, observation, and mutation.
 | `core-s3:benchmark` | Stop the application worker and run the fixed Pet rendering benchmark. |
 | `core-s3:recover` | Erase Deskkin storage and restore inert firmware. |
 
-No mutation task runs from `mise run test`. Flash, identity mutation,
+No mutation task runs from `mise run test`. The repository's dedicated CoreS3
+may be flashed without a per-run live approval after a read-only inspection of
+the exact serial device. For a product flash, read back `core-s3:status`; for an
+AMP flash, successful writes, hash verification, and reset of all three
+sysbuild domains are the flash completion evidence. Identity mutation,
 provisioning, application run, benchmark execution, recovery, USB reset, and
-power cycling require an immediate explicit live approval that names the target
-device and operation.
-Read back the resulting status after an approved mutation. Recovery requires
-the separate `--erase-storage` confirmation and must not be described as
-forensic erasure.
+power cycling still require an immediate explicit live approval that names the
+target device and operation. Recovery also requires the separate
+`--erase-storage` confirmation and must not be described as forensic erasure.
 
 Creating or replacing the encrypted profile is a separate repository-local
 state mutation. Its default paths are:
@@ -81,8 +83,9 @@ mise run core-s3:bootstrap
 mise run core-s3:build
 ```
 
-After separate live approval for each mutation, flash the product firmware,
-initialize the device identity, create the encrypted profile, and provision it:
+After a read-only inspection of the dedicated target, flash the product
+firmware. Obtain separate live approval before initializing the device
+identity, creating the encrypted profile, or provisioning it:
 
 ```sh
 mise run core-s3:flash -- --device /dev/ttyACM0
@@ -151,8 +154,8 @@ render-and-transfer time exceeds 250 ms, no allocation or display-transfer
 failure occurs, and the frame digest changes. Simulator timing is not an input
 to this result.
 
-Flashing the current product firmware and executing the benchmark are separate
-live approvals. After both are approved for the inspected target device, run:
+Flashing the read-only-inspected dedicated device is pre-authorized. Executing
+the benchmark remains a separate live approval. After that approval, run:
 
 ```sh
 mise run core-s3:benchmark -- --device /dev/ttyACM0
