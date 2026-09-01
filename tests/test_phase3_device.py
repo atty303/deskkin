@@ -84,7 +84,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertNotIn("--domain", command)
         self.assertIn(str(build), command)
 
-    def test_amp_pipeline_gate_observes_progress_and_bounded_timings(self):
+    def test_amp_pipeline_benchmark_observes_progress_and_bounded_timings(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
@@ -107,14 +107,15 @@ class Phase3DeviceTests(unittest.TestCase):
             response[56] = 1
             response[57:61] = (14_000).to_bytes(4, "big")
             response[61:65] = (44_000).to_bytes(4, "big")
+            response[74:78] = (3_000).to_bytes(4, "big")
             return bytes(response)
 
         with mock.patch.object(device, "time", clock), mock.patch.object(
             device, "run_control", side_effect=status
         ) as run_control:
-            summary = device.amp_render_pipeline_gate("/dev/fake")
+            summary = device.amp_render_pipeline_benchmark("/dev/fake")
 
-        self.assertEqual(summary["value"], "pass")
+        self.assertEqual(summary["value"], "observed")
         self.assertGreater(summary["completed_frames"], 0)
         self.assertGreaterEqual(summary["measured_fps_milli"], 20_000)
         self.assertLess(summary["observation_duration_ms"], summary["duration_ms"])
@@ -123,6 +124,8 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertEqual(summary["last_availability"], 1)
         self.assertEqual(summary["render_max_us"], 14_000)
         self.assertEqual(summary["transfer_max_us"], 44_000)
+        self.assertEqual(summary["copy_last_us"], 3_000)
+        self.assertEqual(summary["wire_last_us"], 39_000)
         self.assertTrue(run_control.call_args_list[0].kwargs["recover_status_transport"])
         self.assertFalse(run_control.call_args_list[1].kwargs["recover_status_transport"])
 
@@ -139,7 +142,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertEqual(decoded["allocation_failures"], 1)
         self.assertEqual(decoded["completed_frames"], 2)
 
-    def test_amp_pipeline_gate_rejects_less_than_twenty_fps(self):
+    def test_amp_pipeline_measurement_reports_less_than_twenty_fps(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
@@ -165,10 +168,13 @@ class Phase3DeviceTests(unittest.TestCase):
 
         with mock.patch.object(device, "time", clock), mock.patch.object(
             device, "run_control", side_effect=status
-        ), self.assertRaises(device.DeviceError):
-            device.amp_render_pipeline_gate("/dev/fake")
+        ):
+            summary = device.amp_render_pipeline_benchmark("/dev/fake")
 
-    def test_amp_pipeline_gate_rejects_renderer_that_stops_before_deadline(self):
+        self.assertEqual(summary["value"], "observed")
+        self.assertLess(summary["measured_fps_milli"], 20_000)
+
+    def test_amp_pipeline_benchmark_rejects_renderer_that_stops_before_deadline(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
@@ -179,7 +185,7 @@ class Phase3DeviceTests(unittest.TestCase):
             nonlocal generation
             response = bytearray(80)
             response[0] = 1
-            if clock.now < device.AMP_GATE_DURATION_SECONDS / 2:
+            if clock.now < device.AMP_BENCHMARK_DURATION_SECONDS / 2:
                 generation += 5
                 response[27] = 1
                 response[28:32] = generation.to_bytes(4, "big")
@@ -198,7 +204,60 @@ class Phase3DeviceTests(unittest.TestCase):
         with mock.patch.object(device, "time", clock), mock.patch.object(
             device, "run_control", side_effect=status
         ), self.assertRaises(device.DeviceError):
-            device.amp_render_pipeline_gate("/dev/fake")
+            device.amp_render_pipeline_benchmark("/dev/fake")
+
+    def test_amp_pipeline_benchmark_rejects_fresh_renderer_failure(self):
+        clock = mock.Mock()
+        clock.now = 0.0
+        clock.monotonic.side_effect = lambda: clock.now
+        clock.sleep.side_effect = lambda seconds: setattr(clock, "now", clock.now + seconds)
+        generation = 0
+
+        def status(*_args, **_kwargs):
+            nonlocal generation
+            generation += 1
+            response = bytearray(80)
+            response[0] = 1
+            response[27] = 1
+            response[28:32] = generation.to_bytes(4, "big")
+            response[32:40] = int(clock.now * 1000).to_bytes(8, "big")
+            response[40:44] = generation.to_bytes(4, "big")
+            response[44:48] = (10_000).to_bytes(4, "big")
+            response[48:52] = (40_000).to_bytes(4, "big")
+            response[52] = 5 if clock.now >= device.AMP_BENCHMARK_DURATION_SECONDS - 0.25 else 4
+            response[56] = 1
+            return bytes(response)
+
+        with mock.patch.object(device, "time", clock), mock.patch.object(
+            device, "run_control", side_effect=status
+        ), self.assertRaises(device.AmpBenchmarkError) as raised:
+            device.amp_render_pipeline_benchmark("/dev/fake")
+
+        self.assertEqual(raised.exception.error_type, "amp_pipeline_benchmark_failed")
+        self.assertEqual(raised.exception.summary["renderer_stage"], 5)
+        self.assertEqual(raised.exception.summary["status"], "error")
+
+    def test_amp_benchmark_cli_records_measurement_failure_summary(self):
+        summary = {
+            "operation": "amp_render_pipeline",
+            "status": "error",
+            "error_type": "amp_pipeline_benchmark_failed",
+            "duration_ms": 10_000,
+            "renderer_stage": 5,
+            "allocation_failures": 0,
+            "transfer_failures": 0,
+        }
+        failure = device.AmpBenchmarkError("amp_pipeline_benchmark_failed", summary)
+        with mock.patch.object(device.sys, "argv", ["phase3_device.py", "amp-benchmark"]), mock.patch.object(
+            device, "amp_render_pipeline_benchmark", side_effect=failure
+        ), mock.patch.object(device, "publish_diagnostic") as publish_diagnostic, mock.patch.object(
+            device, "publish_result", return_value=Path("/tmp/result.json")
+        ):
+            exit_code = device.main()
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(publish_diagnostic.call_args.args[2], "error")
+        self.assertEqual(publish_diagnostic.call_args.args[3], [summary])
 
     def test_amp_supervisor_dram_ends_at_renderer_origin(self):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")

@@ -150,9 +150,9 @@ run = "python scripts/phase3_device.py amp-build"
 description = "Flash the atlas-free CoreS3 AMP rendering pipeline firmware"
 run = "python scripts/phase3_device.py amp-flash"
 
-[tasks."core-s3:amp-gate"]
-description = "Observe the APPCPU rendering pipeline through the PROCPU status surface"
-run = "python scripts/phase3_device.py amp-gate"
+[tasks."core-s3:amp-benchmark"]
+description = "Measure the APPCPU full-screen rendering pipeline through the PROCPU status surface"
+run = "python scripts/phase3_device.py amp-benchmark"
 
 [tasks."core-s3:flash"]
 description = "Flash the approved CoreS3 firmware after a live checkpoint"

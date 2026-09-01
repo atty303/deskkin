@@ -29,6 +29,7 @@ static atomic_t heartbeat_received_ms;
 static atomic_t completed_frames;
 static atomic_t render_us;
 static atomic_t transfer_us;
+static atomic_t copy_us;
 static atomic_t render_max_us;
 static atomic_t transfer_max_us;
 static atomic_t renderer_stage;
@@ -40,8 +41,8 @@ static atomic_t boot_stage;
 static atomic_t boot_error;
 static volatile bool psram_ready;
 static uint16_t *framebuffers[2];
-static EXT_RAM_BSS_ATTR __aligned(32) uint16_t framebuffer_storage[2][320U * 240U];
-static __aligned(32) uint16_t scanout_storage[320U * 240U];
+static __aligned(32) uint16_t internal_framebuffer[320U * 240U];
+static EXT_RAM_BSS_ATTR __aligned(32) uint16_t external_framebuffer[320U * 240U];
 
 K_THREAD_STACK_DEFINE(supervisor_stack, 2048);
 static struct k_thread supervisor_thread;
@@ -93,6 +94,7 @@ static void receive_heartbeat(void)
 	atomic_set(&completed_frames, (atomic_val_t)heartbeat.completed_frames);
 	atomic_set(&render_us, (atomic_val_t)heartbeat.render_us);
 	atomic_set(&transfer_us, (atomic_val_t)heartbeat.transfer_us);
+	atomic_set(&copy_us, (atomic_val_t)heartbeat.copy_us);
 	atomic_set(&render_max_us, (atomic_val_t)heartbeat.render_max_us);
 	atomic_set(&transfer_max_us, (atomic_val_t)heartbeat.transfer_max_us);
 	atomic_set(&renderer_stage, heartbeat.stage);
@@ -136,7 +138,6 @@ static void supervisor_entry(void *first, void *second, void *third)
 					(uint32_t)(uintptr_t)framebuffers[0],
 					(uint32_t)(uintptr_t)framebuffers[1],
 				},
-				.scanout = (uint32_t)(uintptr_t)scanout_storage,
 			};
 			memcpy((void *)&AMP_SHARED->display, &message, sizeof(message));
 			__atomic_store_n(&AMP_SHARED->display_publication, 1U, __ATOMIC_RELEASE);
@@ -156,9 +157,8 @@ static void boot_entry(void *first, void *second, void *third)
 		return;
 	}
 	atomic_set(&boot_stage, 2);
-	for (size_t index = 0; index < ARRAY_SIZE(framebuffers); ++index) {
-		framebuffers[index] = framebuffer_storage[index];
-	}
+	framebuffers[0] = internal_framebuffer;
+	framebuffers[1] = external_framebuffer;
 	atomic_set(&boot_stage, 3);
 	if (esp_appcpu_init() != 0) {
 		atomic_set(&boot_error, 3);
@@ -246,6 +246,7 @@ static void write_status(const uint8_t *request)
 	response[68] = (uint8_t)atomic_get(&boot_stage);
 	response[69] = (uint8_t)atomic_get(&boot_error);
 	sys_put_be32(__atomic_load_n(&AMP_SHARED->display_spi_hz, __ATOMIC_ACQUIRE), &response[70]);
+	sys_put_be32((uint32_t)atomic_get(&copy_us), &response[74]);
 	const uint32_t now = k_uptime_get_32();
 	response[27] = generation != 0U && now - received_ms <= HEARTBEAT_STALE_MS ? 1U : 2U;
 	response[78] = 9;

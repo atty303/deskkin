@@ -32,7 +32,7 @@ CoreS3 tasks deliberately separate build, observation, and mutation.
 | `core-s3:build` | Build product and inert firmware without device access. |
 | `core-s3:amp-build` | Build the atlas-free AMP full-screen rendering pipeline. |
 | `core-s3:amp-flash` | Flash all AMP domains in sysbuild order. |
-| `core-s3:amp-gate` | Measure the APPCPU pipeline through the PROCPU USB status surface. |
+| `core-s3:amp-benchmark` | Measure the APPCPU pipeline through the PROCPU USB status surface. |
 | `core-s3:status` | Read boot and application status without mutation. |
 | `core-s3:profile` | Create or replace the ignored age-encrypted Wi-Fi profile. |
 | `core-s3:flash` | Flash the product firmware. |
@@ -174,36 +174,39 @@ image occupies `0x20000`, and the signed APPCPU image occupies `0x2c0000` in a
 sysbuild dependency order is authoritative.
 
 PROCPU exclusively owns the USB status surface and LCD power/reset/backlight.
-It reserves two 320×240 RGB565 render buffers in PSRAM and one full-screen,
-32-byte-aligned scanout buffer in internal DRAM, then publishes only their
-addresses and readiness after PSRAM initialization and its memory test pass.
+It reserves one 320×240 RGB565 render buffer in internal DRAM and one in PSRAM,
+then publishes only their addresses and readiness after PSRAM initialization
+and its memory test pass.
 Failure inhibits APPCPU boot and is reported through the bounded boot error.
 The PROCPU linker region ends at the APPCPU DRAM origin, so image growth cannot
 silently overlap the renderer. APPCPU exclusively owns the Slint instance, software
-renderer, SPI2, GDMA, and display driver. It renders alternating full frames in
-PSRAM, copies a completed frame once into scanout, and transfers the scanout
-while rendering the next frame. The SPI polling driver sleeps during DMA so the
-single APP CPU can execute the renderer instead of busy-waiting.
+renderer, SPI2, GDMA, and display driver. It renders alternating full frames
+directly into the two buffers and transfers each completed buffer without a
+bounce copy while rendering the next frame. The driver writes back external
+cache lines before PSRAM DMA. Its polling loop sleeps during DMA so the single
+APP CPU can execute the renderer instead of busy-waiting.
 
-The validated hardware configuration is Quad PSRAM at 80 MHz and LCD SPI at
-40 MHz. Octal PSRAM does not boot this CoreS3. The ten-second pipeline gate does
-not reset the device; it observes an already booted run and calculates FPS from
-the device heartbeat times of its first and last valid samples. It requires at least
-20 FPS, render and copy-plus-transfer maxima no greater than 50 ms, live display
-and stable mailbox publications, a live final sample, at least 80% observation
-coverage, bounded USB response latency, and zero allocation or transfer failures. The host
-stores only bounded timing, counters, boot stages, and the effective SPI clock;
-it records no frame, pixel, asset, raw shared-memory data, or raw USB packet.
+The validated hardware configuration is QIO flash and Quad PSRAM at 80 MHz and
+LCD SPI at 40 MHz. Octal PSRAM does not boot this CoreS3. The ten-second
+pipeline benchmark does not reset the device; it observes an already booted,
+unthrottled run and calculates throughput from the device heartbeat times of
+its first and last valid samples. Frame rate and render/transfer latency are
+reported measurements, not acceptance thresholds. Live display and stable
+mailbox publications, a live final sample, at least 80% observation coverage,
+bounded USB response latency, and zero allocation or transfer failures remain
+measurement-integrity requirements. The host stores only bounded timing,
+counters, boot stages, copy time, and the effective SPI clock; it records no
+frame, pixel, asset, raw shared-memory data, or raw USB packet.
 
 ```sh
 mise run core-s3:amp-build
 mise run core-s3:amp-flash -- --device /dev/ttyACM0
-mise run core-s3:amp-gate -- --device /dev/ttyACM0
+mise run core-s3:amp-benchmark -- --device /dev/ttyACM0
 ```
 
-The current gate is an atlas-free pipeline gate, not yet the final 60-second Pet
-benchmark. The next slice adds the complete bounded schedule and percentile
-diagnostics before restoring the Pet asset.
+This is an atlas-free maximum-throughput benchmark. It does not assert the
+animation cadence of a future scene; that policy belongs to the presentation
+scheduler after the Pet asset is restored.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

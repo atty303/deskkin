@@ -33,6 +33,7 @@ struct display_completion {
 	uint8_t buffer_index;
 	int8_t result;
 	uint32_t duration_us;
+	uint32_t copy_us;
 };
 
 K_MSGQ_DEFINE(display_requests, sizeof(struct display_request), 1, 4);
@@ -42,7 +43,6 @@ static struct k_thread display_thread;
 
 static const struct device *const display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 static uint16_t *framebuffers[2];
-static uint16_t *scanout;
 static atomic_t generation;
 static atomic_t completed_frames;
 static atomic_t allocation_failures;
@@ -51,6 +51,7 @@ static atomic_t render_max_us;
 static atomic_t transfer_max_us;
 static atomic_t render_last_us;
 static atomic_t transfer_last_us;
+static atomic_t copy_last_us;
 
 extern void rust_main(void);
 
@@ -92,6 +93,7 @@ void deskkin_renderer_observe(uint8_t stage, uint32_t render_us, uint32_t transf
 		.completed_frames = (uint32_t)atomic_get(&completed_frames),
 		.render_us = (uint32_t)atomic_get(&render_last_us),
 		.transfer_us = (uint32_t)atomic_get(&transfer_last_us),
+		.copy_us = (uint32_t)atomic_get(&copy_last_us),
 		.render_max_us = (uint32_t)atomic_get(&render_max_us),
 		.transfer_max_us = (uint32_t)atomic_get(&transfer_max_us),
 		.stage = stage,
@@ -130,12 +132,6 @@ uint16_t *deskkin_framebuffer_alloc(uint8_t index)
 			framebuffers[index] = (uint16_t *)(uintptr_t)address;
 		}
 	}
-	if (scanout == NULL) {
-		const uint32_t address = AMP_SHARED->display.scanout;
-		if (address != 0U && (address & 31U) == 0U) {
-			scanout = (uint16_t *)(uintptr_t)address;
-		}
-	}
 	return framebuffers[index];
 }
 
@@ -148,7 +144,8 @@ int deskkin_display_submit(uint8_t buffer_index)
 	return k_msgq_put(&display_requests, &request, K_NO_WAIT);
 }
 
-int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us)
+int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us,
+				    uint32_t *copy_us)
 {
 	struct display_completion completion;
 	if (k_msgq_get(&display_completions, &completion, K_NO_WAIT) != 0) {
@@ -156,6 +153,8 @@ int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us
 	}
 	*buffer_index = completion.buffer_index;
 	*duration_us = completion.duration_us;
+	*copy_us = completion.copy_us;
+	atomic_set(&copy_last_us, (atomic_val_t)completion.copy_us);
 	if (completion.result != 0) {
 		atomic_inc(&transfer_failures);
 		return -EIO;
@@ -199,23 +198,14 @@ static void display_entry(void *first, void *second, void *third)
 		struct display_request request;
 		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
 		const int64_t started = k_uptime_ticks();
-		if (scanout == NULL) {
-			const struct display_completion completion = {
-				.buffer_index = request.buffer_index,
-				.result = -1,
-				.duration_us = 0,
-			};
-			(void)k_msgq_put(&display_completions, &completion, K_FOREVER);
-			continue;
-		}
-		memcpy(scanout, framebuffers[request.buffer_index], FRAMEBUFFER_BYTES);
 		const int result = display_write(display, 0, 0, &descriptor,
-					   scanout);
+					   framebuffers[request.buffer_index]);
 		const uint64_t elapsed = k_ticks_to_us_floor64(k_uptime_ticks() - started);
 		const struct display_completion completion = {
 			.buffer_index = request.buffer_index,
 			.result = result == 0 ? 0 : -1,
 			.duration_us = (uint32_t)MIN(elapsed, UINT32_MAX),
+			.copy_us = 0,
 		};
 		(void)k_msgq_put(&display_completions, &completion, K_FOREVER);
 	}

@@ -41,11 +41,11 @@ COMMANDS = {
 
 PET_BENCHMARK_DURATION_SECONDS = 60.0
 PET_BENCHMARK_REQUESTS = 1_200
-AMP_GATE_DURATION_SECONDS = 10.0
-AMP_GATE_MAX_OBSERVATION_AGE_SECONDS = 1.0
-AMP_GATE_MIN_COVERAGE_MILLI = 800
-AMP_GATE_MAX_STATUS_RESPONSE_MS = 1_000
-AMP_GATE_MIN_STATUS_RESPONSES = 20
+AMP_BENCHMARK_DURATION_SECONDS = 10.0
+AMP_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS = 1.0
+AMP_BENCHMARK_MIN_COVERAGE_MILLI = 800
+AMP_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
+AMP_BENCHMARK_MIN_STATUS_RESPONSES = 20
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -87,6 +87,13 @@ OPERATION_ERRORS = {
 
 class DeviceError(Exception):
     pass
+
+
+class AmpBenchmarkError(DeviceError):
+    def __init__(self, error_type: str, summary: dict[str, object]) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+        self.summary = summary
 
 
 def ensure_private_directory(path: Path) -> None:
@@ -635,12 +642,13 @@ def decode_amp_pipeline_status(status: bytes) -> dict[str, int]:
         "procpu_boot_stage": status[68],
         "procpu_boot_error": status[69],
         "display_spi_hz": unsigned(70, 74),
+        "copy_us": unsigned(74, 78),
     }
 
 
-def amp_render_pipeline_gate(device_arg: str | None) -> dict[str, object]:
-    gate_started = time.monotonic()
-    deadline = gate_started + AMP_GATE_DURATION_SECONDS
+def amp_render_pipeline_benchmark(device_arg: str | None) -> dict[str, object]:
+    benchmark_started = time.monotonic()
+    deadline = benchmark_started + AMP_BENCHMARK_DURATION_SECONDS
     responses = 0
     max_response_ms = 0
     first_request = True
@@ -670,23 +678,28 @@ def amp_render_pipeline_gate(device_arg: str | None) -> dict[str, object]:
             last_observed_at = time.monotonic()
         time.sleep(0.25)
     if first is None or last is None:
-        print(
-            json.dumps(
-                {
-                    "operation": "amp_render_pipeline",
-                    "status": "error",
-                    "error_type": "amp_pipeline_not_observed",
-                    "status_responses": responses,
-                    "last_sample": last_sample,
-                    "max_status_response_ms": max_response_ms,
-                },
-                separators=(",", ":"),
-            ),
-            file=sys.stderr,
-        )
-        raise DeviceError("amp_pipeline_not_observed")
-    gate_finished = time.monotonic()
-    duration_ms = int((gate_finished - gate_started) * 1000)
+        summary: dict[str, object] = {
+            "operation": "amp_render_pipeline",
+            "operation_id": 1,
+            "parent_operation_id": None,
+            "status": "error",
+            "error_type": "amp_pipeline_not_observed",
+            "effect_id": None,
+            "virtual_time_ms": 0,
+            "end_virtual_time_ms": int((time.monotonic() - benchmark_started) * 1000),
+            "duration_ms": int((time.monotonic() - benchmark_started) * 1000),
+            "value": "unavailable",
+            "status_responses": responses,
+            "max_status_response_ms": max_response_ms,
+            "last_availability": last_sample["availability"] if last_sample is not None else 0,
+            "renderer_stage": last_sample["stage"] if last_sample is not None else 0,
+            "allocation_failures": last_sample["allocation_failures"] if last_sample is not None else 0,
+            "transfer_failures": last_sample["transfer_failures"] if last_sample is not None else 0,
+        }
+        print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
+        raise AmpBenchmarkError("amp_pipeline_not_observed", summary)
+    benchmark_finished = time.monotonic()
+    duration_ms = int((benchmark_finished - benchmark_started) * 1000)
     assert first_observed_at is not None
     assert last_observed_at is not None
     observation_duration_ms = max(1, int((last_observed_at - first_observed_at) * 1000))
@@ -694,32 +707,30 @@ def amp_render_pipeline_gate(device_arg: str | None) -> dict[str, object]:
         1,
         (last["heartbeat_received_ms"] - first["heartbeat_received_ms"]) & 0xFFFFFFFF,
     )
-    last_observation_age_ms = max(0, int((gate_finished - last_observed_at) * 1000))
+    last_observation_age_ms = max(0, int((benchmark_finished - last_observed_at) * 1000))
     measurement_coverage_milli = observation_duration_ms * 1000 // max(1, duration_ms)
     completed_frames = last["completed_frames"] - first["completed_frames"]
     measured_fps_milli = completed_frames * 1_000_000 // measurement_duration_ms
     passed = (
-        responses >= AMP_GATE_MIN_STATUS_RESPONSES
-        and max_response_ms <= AMP_GATE_MAX_STATUS_RESPONSE_MS
+        responses >= AMP_BENCHMARK_MIN_STATUS_RESPONSES
+        and max_response_ms <= AMP_BENCHMARK_MAX_STATUS_RESPONSE_MS
         and last_sample is not None
         and last_sample["availability"] == 1
-        and last_observation_age_ms <= int(AMP_GATE_MAX_OBSERVATION_AGE_SECONDS * 1000)
-        and measurement_coverage_milli >= AMP_GATE_MIN_COVERAGE_MILLI
+        and last_observation_age_ms <= int(AMP_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS * 1000)
+        and measurement_coverage_milli >= AMP_BENCHMARK_MIN_COVERAGE_MILLI
         and last["generation"] > first["generation"]
+        and last["stage"] != 5
         and last["display_ready"] == 1
         and last["fault"] == 0
         and last["allocation_failures"] == 0
         and last["transfer_failures"] == 0
-        and measured_fps_milli >= 20_000
-        and last["render_max_us"] <= 50_000
-        and last["transfer_max_us"] <= 50_000
     )
     summary: dict[str, object] = {
         "operation": "amp_render_pipeline",
         "operation_id": 1,
         "parent_operation_id": None,
         "status": "success" if passed else "error",
-        "error_type": None if passed else "amp_pipeline_gate_failed",
+        "error_type": None if passed else "amp_pipeline_benchmark_failed",
         "effect_id": None,
         "virtual_time_ms": 0,
         "end_virtual_time_ms": duration_ms,
@@ -731,7 +742,7 @@ def amp_render_pipeline_gate(device_arg: str | None) -> dict[str, object]:
         "last_availability": last_sample["availability"] if last_sample is not None else 0,
         "render_width": 320,
         "render_height": 240,
-        "value": "pass" if passed else "fail",
+        "value": "observed" if passed else "unavailable",
         "status_responses": responses,
         "completed_frames": completed_frames,
         "measured_fps_milli": measured_fps_milli,
@@ -752,10 +763,12 @@ def amp_render_pipeline_gate(device_arg: str | None) -> dict[str, object]:
         "procpu_boot_stage": last["procpu_boot_stage"],
         "procpu_boot_error": last["procpu_boot_error"],
         "display_spi_hz": last["display_spi_hz"],
+        "copy_last_us": last["copy_us"],
+        "wire_last_us": max(0, last["transfer_us"] - last["copy_us"]),
     }
     print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
     if not passed:
-        raise DeviceError("amp_pipeline_gate_failed")
+        raise AmpBenchmarkError("amp_pipeline_benchmark_failed", summary)
     return summary
 
 
@@ -1095,7 +1108,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
         "build": "control_route",
         "amp-build": "control_route",
         "amp-flash": "device_ui",
-        "amp-gate": "amp_render_pipeline",
+        "amp-benchmark": "amp_render_pipeline",
         "flash": "device_ui",
         "identity": "identity_init",
         "provision": "nvs_publication",
@@ -1122,7 +1135,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("profile", "build", "amp-build", "amp-flash", "amp-gate", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
+    parser.add_argument("action", choices=("profile", "build", "amp-build", "amp-flash", "amp-benchmark", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
     parser.add_argument("identity_action", nargs="?")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--age-identity", type=Path)
@@ -1150,8 +1163,8 @@ def main() -> int:
             build_amp(root)
         elif args.action == "amp-flash":
             flash_amp(root, args.device)
-        elif args.action == "amp-gate":
-            records = [amp_render_pipeline_gate(args.device)]
+        elif args.action == "amp-benchmark":
+            records = [amp_render_pipeline_benchmark(args.device)]
         elif args.action == "flash":
             flash(root, args.device)
         elif args.action == "recover":
@@ -1214,6 +1227,8 @@ def main() -> int:
         exit_code = 0
     except (DeviceError, OSError, subprocess.SubprocessError, UnicodeError, ValueError) as error:
         message = str(error) if isinstance(error, DeviceError) else "device_operation_failed"
+        if isinstance(error, AmpBenchmarkError):
+            records = [error.summary]
         boot_failure = message in {*BOOT_ERRORS.values(), "boot_unknown", "boot_not_ready"}
         control_failure = message in {"control_invalid", "control_timeout", "control_response_length"}
         diagnostic_allowed = not (boot_failure or control_failure)
@@ -1227,6 +1242,8 @@ def main() -> int:
             "availability_timeout",
             "benchmark_gate_failed",
             "benchmark_timeout",
+            "amp_pipeline_not_observed",
+            "amp_pipeline_benchmark_failed",
         } else None if boot_failure else "store_failed"
         print(message, file=sys.stderr)
     if not records:

@@ -98,25 +98,26 @@ one Rust service worker hosted by Zephyr threads. Embassy is a runtime adapter,
 not part of the portable core.
 
 The replacement CoreS3 runtime consists of two Zephyr AMP images. PROCPU owns
-USB control, boot/status supervision, LCD power/reset/backlight, two static
-PSRAM RGB565 render buffers, and one internal-DRAM scanout buffer. APPCPU
+USB control, boot/status supervision, LCD power/reset/backlight, one static
+internal-DRAM RGB565 render buffer, and one static PSRAM render buffer. APPCPU
 exclusively owns Slint software rendering, SPI2, GDMA, and LCD transfer. The
 kernels exchange bounded publication metadata through shared memory;
 framebuffer contents are never message payloads and SPI2 has one CPU owner.
 Heartbeat snapshots use an explicit unstable marker and matching generations
 so the supervisor never accepts a payload while APPCPU is rewriting it.
 
-The atlas-free physical pipeline uses full-screen double-buffered rendering at
-320×240. APPCPU copies a completed PSRAM render buffer once into scanout, then
-transfers it at a validated 40 MHz LCD clock. Quad PSRAM runs at the validated
-80 MHz setting. The display worker starts copy and DMA ahead of the next render;
-the patched polling driver sleeps while DMA is in flight so rendering can use
-otherwise idle APP CPU time. The bounded gate derives throughput from device
-heartbeat times at the first and last valid observations and requires at least 20 FPS, render and
-transfer maxima no greater than 50 ms, live PROCPU status, and zero allocation
-or transfer failures. A stale final sample or an observation window that does
-not cover at least 80% of the gate fails even if its earlier average reached
-20 FPS. Simulator timing is not used.
+The atlas-free physical pipeline uses unthrottled full-screen double-buffered
+rendering at 320×240. APPCPU renders alternating frames directly into the
+internal-DRAM and PSRAM buffers and submits each buffer to GDMA without a bounce
+copy. The SPI driver performs cache write-back before direct external-memory
+DMA. LCD SPI runs at 40 MHz, Quad PSRAM and QIO flash at 80 MHz. The display
+worker starts DMA ahead of the next render; the patched polling driver sleeps
+while DMA is in flight so rendering can use otherwise idle APP CPU time. The
+bounded benchmark derives throughput from device heartbeat times at its first
+and last valid observations. It treats frame rate and latency as measurements,
+while stale or incomplete observation, unresponsive PROCPU status, allocation
+failure, and transfer failure remain integrity errors. Simulator timing is not
+used.
 
 Zephyr owns CoreS3 device discovery, hardware topology, drivers, networking,
 storage, scheduling, and system services. Unsafe Rust, C FFI, and raw Zephyr

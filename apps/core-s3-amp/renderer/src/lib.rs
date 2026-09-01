@@ -17,12 +17,15 @@ slint::include_modules!();
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
-const FRAME_PERIOD_US: u64 = 50_000;
 
 unsafe extern "C" {
     fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
     fn deskkin_display_submit(buffer_index: u8) -> c_int;
-    fn deskkin_display_take_completion(buffer_index: *mut u8, duration_us: *mut u32) -> c_int;
+    fn deskkin_display_take_completion(
+        buffer_index: *mut u8,
+        duration_us: *mut u32,
+        copy_us: *mut u32,
+    ) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_renderer_boot_stage(stage: u8);
     fn deskkin_renderer_observe(stage: u8, render_us: u32, transfer_us: u32);
@@ -125,8 +128,10 @@ fn take_completion(expected_buffer: u8) -> Result<u32, ()> {
     loop {
         let mut buffer_index = 0_u8;
         let mut duration_us = 0_u32;
-        let completion =
-            unsafe { deskkin_display_take_completion(&mut buffer_index, &mut duration_us) };
+        let mut copy_us = 0_u32;
+        let completion = unsafe {
+            deskkin_display_take_completion(&mut buffer_index, &mut duration_us, &mut copy_us)
+        };
         if completion == 0 {
             unsafe { deskkin_sleep_ms(1) };
             continue;
@@ -172,7 +177,6 @@ extern "C" fn rust_main() {
     };
     unsafe { deskkin_renderer_boot_stage(14) };
     let mut frame = 0_i32;
-    let mut next_frame_at = unsafe { deskkin_uptime_us() };
 
     let Ok(mut in_flight_render_us) = render_frame(&component, &window, &mut framebuffer, frame)
     else {
@@ -187,14 +191,9 @@ extern "C" fn rust_main() {
     unsafe { deskkin_renderer_observe(3, in_flight_render_us, 0) };
     framebuffer.swap();
     frame = frame.wrapping_add(1);
-    next_frame_at = next_frame_at.saturating_add(FRAME_PERIOD_US);
 
     let mut first_frame = true;
     loop {
-        let now = unsafe { deskkin_uptime_us() };
-        if now < next_frame_at {
-            unsafe { deskkin_sleep_ms(((next_frame_at - now) / 1_000) as u32) };
-        }
         let Ok(ready_render_us) = render_frame(&component, &window, &mut framebuffer, frame) else {
             unsafe { deskkin_renderer_observe(5, 0, 0) };
             return;
@@ -221,6 +220,5 @@ extern "C" fn rust_main() {
         unsafe { deskkin_renderer_observe(3, in_flight_render_us, 0) };
         framebuffer.swap();
         frame = frame.wrapping_add(1);
-        next_frame_at = next_frame_at.saturating_add(FRAME_PERIOD_US);
     }
 }

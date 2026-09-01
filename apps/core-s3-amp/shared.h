@@ -14,6 +14,7 @@ struct deskkin_renderer_heartbeat {
 	uint32_t completed_frames;
 	uint32_t render_us;
 	uint32_t transfer_us;
+	uint32_t copy_us;
 	uint32_t render_max_us;
 	uint32_t transfer_max_us;
 	uint8_t stage;
@@ -27,7 +28,6 @@ struct deskkin_display_ready {
 	uint32_t generation;
 	uint32_t ready;
 	uint32_t framebuffer[2];
-	uint32_t scanout;
 };
 
 struct deskkin_amp_shared {
