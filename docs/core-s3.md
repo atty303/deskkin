@@ -189,8 +189,13 @@ descriptor-chained GDMA transfers the other, without a bounce copy. Completion
 ownership prevents either framebuffer from being rendered again while it
 remains in flight.
 
-The validated hardware configuration is QIO flash at 80 MHz and LCD SPI at
-40 MHz. Same-priority APPCPU render and display threads alternate two complete
+The validated hardware configuration is QIO flash at 80 MHz, LCD SPI at
+40 MHz, and an approximately 30.9 Hz ILI9342 normal-mode frame rate
+(`DIVA=fosc/2`, `RTNA=31`). The panel setting does not synchronize LCD scanout
+with transfer: the board has no wired TE signal or usable scan-line readback.
+On the physical display it left the tear geometry in paused video effectively
+unchanged while substantially reducing the multiple-edge persistence visible
+to the eye. Same-priority APPCPU render and display threads alternate two complete
 framebuffers. The SPI polling loop yields so Slint can fill the back buffer while
 GDMA transfers the front buffer. The continuously busy renderer uses a 1 kHz periodic kernel
 tick. The previous default tickless configuration stopped near a 32-bit 240 MHz

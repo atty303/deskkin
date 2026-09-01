@@ -54,10 +54,20 @@ ms and 33 ms. Copy time, allocation failures, and transfer failures were zero,
 and PROCPU answered 229 bounded status requests during the unthrottled run.
 The 30.72 ms RGB565 wire time at 40 MHz remains the principal limit.
 The benchmark scene uses a fixed background color so content-driven full-screen
-luminance changes do not obscure panel flicker and tearing observations.
+luminance changes do not obscure panel flicker and tearing observations. Its
+vertical bar moves 20 pixels per rendered frame as a deliberately visible
+diagnostic stimulus, not as a product animation cadence.
+
+The ILI9342 normal-mode frame rate is approximately 30.9 Hz
+(`DIVA=fosc/2`, `RTNA=31`). On the physical panel this left the tear geometry in
+a paused video frame effectively unchanged while substantially reducing the
+multiple-edge persistence seen by eye. There is no wired TE signal or scan-line
+readback, so the renderer and panel remain free-running and this setting does
+not claim tear-free presentation.
 
 ## Next work
 
-Resume the presentation pipeline on the validated full-frame double-buffer
-runtime. Panel scanout synchronization remains deferred. Fixed world,
-parallax, Notice, IMU, and servo work remain behind that foundation.
+Select the next implementation slice from the fixed-2D-world roadmap. No
+physical display diagnostic is currently active; use the validated 30.9 Hz
+panel setting, 40 MHz SPI pipeline, and SRAM swapped-buffer ownership as the
+CoreS3 rendering baseline.

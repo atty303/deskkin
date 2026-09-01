@@ -21,6 +21,7 @@
 			mipi-max-frequency = <40000000>;
 			reg = <0>;
 			pixel-format = <PANEL_PIXEL_FORMAT_RGB_565X>;
+			frmctr1 = [01 1f];
 			display-inversion;
 			width = <320>;
 			height = <240>;
