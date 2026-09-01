@@ -109,12 +109,20 @@ autonomous entity motion, view coexistence, and recording degradation.
 The CoreS3 product is one MCUboot plus dual-Zephyr AMP sysbuild. PROCPU owns
 touch, Wi-Fi, Noise, NVS, the application service, virtual observed pose, USB
 control, power/reset, and status supervision. APPCPU exclusively owns Slint
-texture generation, the custom world renderer, SPI2, GDMA, and display transfer.
+texture generation, the custom world renderer, SPI2, and display transfer.
+GDMA is not part of the verified product baseline: enabling the ESP32-S3 GDMA
+path currently blocks APPCPU display initialization, so the accepted live path
+uses synchronous SPI2 transfer until that driver bring-up is resolved.
 PROCPU reserves the high 4 MiB Quad-PSRAM region, places both full-screen RGB565
 framebuffers at its beginning, and publishes the remaining caller-owned heap to
 APPCPU. Character QOI is decoded only for the active loop and converted once to
 RGB565+A8; canonical information textures and the fixed object texture stay in
 the same bounded PSRAM cache.
+
+ESP32-S3 flash operations can temporarily disable the instruction cache shared
+by both CPUs. PROCPU therefore serializes APPCPU startup and every device NVS
+operation with one guard, stalling APPCPU only while flash may be cache-disabled
+and resuming it before releasing the guard. APPCPU never initiates flash work.
 
 AMP exchanges generation-published bounded values: stable shell/SAS/view/pose
 snapshots, a touch ring with drop count, a UI command slot, and a latest target

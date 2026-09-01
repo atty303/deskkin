@@ -288,7 +288,7 @@ class Phase3DeviceTests(unittest.TestCase):
         source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
         self.assertIn("CONFIG_ESP_SPIRAM=y", config)
         self.assertIn("CONFIG_ESP_SPIRAM_HEAP_SIZE=4194304", config)
-        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
+        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=8192", config)
         self.assertIn("CONFIG_SPIRAM_MODE_QUAD=y", config)
         self.assertIn("CONFIG_SPIRAM_SPEED_80M=y", config)
         self.assertIn("2U * 320U * 240U * sizeof(uint16_t)", source)
@@ -306,6 +306,46 @@ class Phase3DeviceTests(unittest.TestCase):
             'CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS="--slot-size 0x300000"',
             renderer_config,
         )
+
+    def test_amp_control_precedes_service_boot_and_publishes_complete_stage(self):
+        entry = (ROOT / "apps/core-s3-amp/src/lib.rs").read_text(encoding="utf-8")
+        supervisor = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
+        config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
+        self.assertLess(
+            entry.index("deskkin_start_control_worker()"),
+            entry.index("deskkin_core_s3_service::start()"),
+        )
+        self.assertIn("atomic_set(&boot_stage, 9);", supervisor)
+        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=8192", config)
+        self.assertIn("CONFIG_NET_CONFIG_AUTO_INIT=n", config)
+
+    def test_amp_stalls_appcpu_while_flash_cache_can_be_disabled(self):
+        supervisor = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
+        service = (ROOT / "apps/core-s3-service/src/adapter.c").read_text(encoding="utf-8")
+
+        guard_enter = supervisor.index("void deskkin_flash_guard_enter(void)")
+        stall = supervisor.index("esp_cpu_stall(1);", guard_enter)
+        guard_exit = supervisor.index("void deskkin_flash_guard_exit(void)", stall)
+        unstall = supervisor.index("esp_cpu_unstall(1);", guard_exit)
+        unlock = supervisor.index("k_mutex_unlock(&appcpu_flash_mutex);", unstall)
+        self.assertLess(guard_enter, stall)
+        self.assertLess(guard_exit, unstall)
+        self.assertLess(unstall, unlock)
+
+        boot = supervisor.index("static void boot_entry")
+        boot_lock = supervisor.index("k_mutex_lock(&appcpu_flash_mutex, K_FOREVER);", boot)
+        appcpu_init = supervisor.index("esp_appcpu_init()", boot_lock)
+        running = supervisor.index("appcpu_running = true;", appcpu_init)
+        boot_unlock = supervisor.index("k_mutex_unlock(&appcpu_flash_mutex);", running)
+        self.assertLess(boot_lock, appcpu_init)
+        self.assertLess(appcpu_init, running)
+        self.assertLess(running, boot_unlock)
+
+        self.assertIn("deskkin_flash_guard_enter();\n\tconst struct flash_area *area;", service)
+        self.assertIn("nvs_mount(&storage);", service)
+        self.assertIn("deskkin_flash_guard_enter();\n\tconst int length = nvs_read", service)
+        self.assertIn("deskkin_flash_guard_enter();\n\tresult = nvs_write", service)
+        self.assertIn("deskkin_flash_guard_enter();\n\tconst int delete_result = nvs_delete", service)
 
     def test_amp_renderer_swaps_full_frames_without_reuse_overlap(self):
         config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(encoding="utf-8")
@@ -335,10 +375,34 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
         self.assertIn("+\t\t\tk_yield();", spi_patch)
-        self.assertIn("2ea9ab40f9068f557e8337d0cef6e44e848eaccea478dfb4498f4f00c5b4a0dd", bootstrap)
+        self.assertIn("2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab", bootstrap)
         self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
         self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
-        self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=1024", config)
+        self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=0", config)
+        self.assertNotIn("CONFIG_HEAP_MEM_POOL_IGNORE_MIN=y", config)
+        overlay = (ROOT / "apps/core-s3-amp/renderer/app.overlay").read_text(encoding="utf-8")
+        self.assertIn('&dma {\n\tstatus = "disabled";', overlay)
+        self.assertNotIn("\tdma-enabled;", overlay)
+
+    def test_amp_entry_trampoline_is_a_pinned_zephyr_patch(self):
+        patch = (ROOT / "patches/zephyr-core-s3/0005-initialize-appcpu-window-state.patch").read_text(
+            encoding="utf-8"
+        )
+        build = (ROOT / "scripts/phase3_device.py").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
+        self.assertIn("call8 __appcpu_start_c", patch)
+        self.assertIn("wsr.windowbase", patch)
+        self.assertIn('" M soc/espressif/esp32s3/soc_appcpu.c"', bootstrap)
+        self.assertNotIn("patched_appcpu_source", build)
+        self.assertNotIn("appcpu_source.write_text", build)
+
+    def test_touch_overflow_counter_survives_followup_empty_reads(self):
+        adapter = (ROOT / "apps/core-s3-amp/renderer/src/adapter.c").read_text(encoding="utf-8")
+        read = adapter[adapter.index("int deskkin_touch_read("):adapter.index("void deskkin_publish_target_yaw", adapter.index("int deskkin_touch_read("))]
+        self.assertIn("cumulative_drops = deskkin_shared_load(&AMP_SHARED->touch.drop_count)", read)
+        self.assertIn("deskkin_shared_store(&AMP_SHARED->touch.drop_count, cumulative_drops)", read)
+        self.assertIn("? UINT32_MAX", read)
+        self.assertLess(read.index("*drop_count = cumulative_drops"), read.index("if (latest == 0U"))
 
     def test_koyori_qoi_loop_assets_have_closed_native_geometry(self):
         asset_root = ROOT / "assets/pets/koyori"

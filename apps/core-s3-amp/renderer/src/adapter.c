@@ -3,14 +3,19 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include <esp_attr.h>
 #include <esp_cpu.h>
 #include <esp_clk_tree.h>
+#include <hal/rtc_timer_ll.h>
 #include <soc/clk_tree_defs.h>
 #include <soc/spi_struct.h>
 #include <zephyr/device.h>
+#include <zephyr/arch/xtensa/arch_inlines.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/fatal.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/sys_heap.h>
+#include <xtensa_asm2_context.h>
 #include "../../shared.h"
 
 #define DISPLAY_WIDTH 320U
@@ -20,8 +25,46 @@
 #define FRAMEBUFFER_COUNT 2U
 #define MAX_DIRTY_RECTS 3U
 #define FULL_WIDTH_CHUNK_LINES 30U
-#define BOOT_MARKER ((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + 0x3f0U))
-#define AMP_SHARED ((volatile struct deskkin_amp_shared *)DT_REG_ADDR(DT_NODELABEL(shm0)))
+#ifndef CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM
+#define CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM FULL_WIDTH_CHUNK_LINES
+#endif
+#define BOOT_MARKER                                                                                \
+	((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + DESKKIN_BOOT_MARKER_OFFSET))
+#define AMP_SHARED                                                                                 \
+	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
+					       DESKKIN_CHANNEL_OFFSET))
+
+static inline atomic_val_t renderer_counter_get(const atomic_t *counter)
+{
+	return *(const volatile atomic_val_t *)counter;
+}
+
+static inline void renderer_counter_set(atomic_t *counter, atomic_val_t value)
+{
+	*(volatile atomic_val_t *)counter = value;
+}
+
+static inline atomic_val_t renderer_counter_inc(atomic_t *counter)
+{
+	const atomic_val_t previous = renderer_counter_get(counter);
+	renderer_counter_set(counter, previous + 1);
+	return previous;
+}
+
+static inline bool renderer_counter_cas(atomic_t *counter, atomic_val_t old_value,
+					atomic_val_t new_value)
+{
+	if (renderer_counter_get(counter) != old_value) {
+		return false;
+	}
+	renderer_counter_set(counter, new_value);
+	return true;
+}
+
+#define atomic_get renderer_counter_get
+#define atomic_set renderer_counter_set
+#define atomic_inc renderer_counter_inc
+#define atomic_cas renderer_counter_cas
 
 enum renderer_stage {
 	RENDERER_WAITING_FOR_DISPLAY = 1,
@@ -63,10 +106,19 @@ K_THREAD_STACK_DEFINE(display_stack, 4096);
 static struct k_thread display_thread;
 
 static const struct device *const display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+static const struct device *const mipi_dbi = DEVICE_DT_GET(DT_NODELABEL(mipi_dbi));
+static const struct device *const display_spi = DEVICE_DT_GET(DT_NODELABEL(spi2));
+static const struct device *const display_gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+static const struct device *const display_gpio = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 static uint16_t *framebuffer;
 static struct sys_heap renderer_heap;
 static bool renderer_heap_ready;
-static atomic_t generation;
+static volatile uint8_t current_boot_stage;
+static volatile uint32_t allocation_count;
+static volatile uint32_t last_allocation_size;
+static volatile uintptr_t last_stack_pointer;
+static volatile bool fatal_active;
+static uint32_t generation;
 static atomic_t completed_frames;
 static atomic_t allocation_failures;
 static atomic_t transfer_failures;
@@ -104,6 +156,7 @@ static atomic_t deadline_misses;
 extern void rust_main(void);
 void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 			      uint32_t transfer_us);
+uint64_t deskkin_uptime_us(void);
 
 static void observe_max(atomic_t *maximum, uint32_t value)
 {
@@ -143,10 +196,13 @@ void deskkin_world_observe(uint32_t generation, uint32_t input, uint32_t drops,
 
 void *malloc(size_t size)
 {
+	allocation_count += 1U;
+	last_allocation_size = (uint32_t)size;
 	if (!renderer_heap_ready) {
 		return NULL;
 	}
-	void *block = sys_heap_alloc(&renderer_heap, size);
+	const size_t allocation_size = MAX(size, 1U);
+	void *const block = sys_heap_alloc(&renderer_heap, allocation_size);
 	if (block == NULL) {
 		atomic_inc(&allocation_failures);
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_EXHAUSTED, 0, 0);
@@ -156,7 +212,7 @@ void *malloc(size_t size)
 
 void free(void *block)
 {
-	if (block != NULL) {
+	if (renderer_heap_ready && block != NULL) {
 		sys_heap_free(&renderer_heap, block);
 	}
 }
@@ -168,103 +224,185 @@ static int initialize_renderer_heap(void)
 	if (address == 0U || size == 0U || (address & 31U) != 0U) {
 		return -ENOMEM;
 	}
+	current_boot_stage = 40U;
+	for (uint32_t offset = 0U; offset < size; offset += 64U * 1024U) {
+		volatile uint32_t *const word = (volatile uint32_t *)(uintptr_t)(address + offset);
+		const uint32_t expected = 0x5a5a0000U ^ offset;
+		*word = expected;
+		__asm__ volatile("memw" ::: "memory");
+		if (*word != expected) {
+			BOOT_MARKER[1] = 40U;
+			BOOT_MARKER[2] = offset;
+			BOOT_MARKER[3] = *word;
+			return -EIO;
+		}
+	}
+	volatile uint32_t *const last_word =
+		(volatile uint32_t *)(uintptr_t)(address + size - sizeof(uint32_t));
+	*last_word = 0xa5a55a5aU;
+	__asm__ volatile("memw" ::: "memory");
+	if (*last_word != 0xa5a55a5aU) {
+		BOOT_MARKER[1] = 40U;
+		BOOT_MARKER[2] = size - sizeof(uint32_t);
+		BOOT_MARKER[3] = *last_word;
+		return -EIO;
+	}
 	sys_heap_init(&renderer_heap, (void *)(uintptr_t)address, size);
 	renderer_heap_ready = true;
 	return 0;
 }
 
+static void initialize_output_only_gpio(const struct device *gpio)
+{
+	/* PROCPU owns GPIO interrupts. The renderer only uses output operations for
+	 * display chip-select and data/command, so core1 must not allocate the SoC's
+	 * shared GPIO interrupt while bringing up its local device model. */
+	gpio->state->init_res = 0U;
+	gpio->state->initialized = true;
+}
+
 void deskkin_renderer_boot_stage(uint8_t stage)
 {
+	register uintptr_t stack_pointer __asm__("a1");
+	last_stack_pointer = stack_pointer;
+	current_boot_stage = stage;
 	*BOOT_MARKER = stage;
+}
+
+void IRAM_ATTR k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
+{
+	if (fatal_active) {
+		*BOOT_MARKER = 0xefU;
+		for (;;) {
+		}
+	}
+	fatal_active = true;
+	BOOT_MARKER[1] = (uint32_t)(uintptr_t)esf;
+	BOOT_MARKER[2] = last_stack_pointer;
+	BOOT_MARKER[3] = ((uint32_t)current_boot_stage << 24U) |
+			 (allocation_count & 0x00ffffffU);
+	if ((uintptr_t)esf >= 0x3fce2000U && (uintptr_t)esf <= 0x3fcedffcu &&
+	    (((uintptr_t)esf & 3U) == 0U)) {
+		const _xtensa_irq_bsa_t *const bsa =
+			*(const _xtensa_irq_bsa_t *const volatile *)esf;
+		const uintptr_t bsa_address = (uintptr_t)bsa;
+		BOOT_MARKER[2] = (uint32_t)bsa_address;
+		if (bsa_address >= 0x3fce2000U &&
+		    bsa_address <= 0x3fcee000U - sizeof(*bsa) &&
+		    (bsa_address & 3U) == 0U) {
+			BOOT_MARKER[1] = (uint32_t)bsa->pc;
+			BOOT_MARKER[2] = (uint32_t)bsa_address;
+			BOOT_MARKER[3] = (uint32_t)last_stack_pointer;
+		}
+	}
+	*BOOT_MARKER = 0xe0U | (reason & 0x0fU);
+	for (;;) {
+	}
 }
 
 static int renderer_early_marker(void)
 {
-	*BOOT_MARKER = 1U;
+	deskkin_renderer_boot_stage(1U);
 	return 0;
 }
 
 SYS_INIT(renderer_early_marker, EARLY, 0);
 
+#define DEFINE_BOOT_MARKER(name, value, level, priority) \
+	static int name(void)                             \
+	{                                                 \
+		deskkin_renderer_boot_stage(value);          \
+		return 0;                                    \
+	}                                                 \
+	SYS_INIT(name, level, priority)
+
+DEFINE_BOOT_MARKER(renderer_pre_kernel_1_start, 20U, PRE_KERNEL_1, 0);
+DEFINE_BOOT_MARKER(renderer_pre_kernel_1_after_clock, 30U, PRE_KERNEL_1, 30);
+DEFINE_BOOT_MARKER(renderer_pre_kernel_1_end, 21U, PRE_KERNEL_1, 99);
+DEFINE_BOOT_MARKER(renderer_pre_kernel_2_start, 22U, PRE_KERNEL_2, 0);
+DEFINE_BOOT_MARKER(renderer_pre_kernel_2_end, 23U, PRE_KERNEL_2, 99);
+DEFINE_BOOT_MARKER(renderer_post_kernel_start, 24U, POST_KERNEL, 0);
+DEFINE_BOOT_MARKER(renderer_post_kernel_end, 25U, POST_KERNEL, 99);
+DEFINE_BOOT_MARKER(renderer_application_start, 26U, APPLICATION, 0);
+DEFINE_BOOT_MARKER(renderer_application_end, 27U, APPLICATION, 99);
+
 void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 			      uint32_t transfer_us)
 {
-	*BOOT_MARKER = 5U;
-	if (render_us != 0U) {
-		atomic_set(&render_last_us, (atomic_val_t)render_us);
-	}
-	if (transfer_us != 0U) {
-		atomic_set(&transfer_last_us, (atomic_val_t)transfer_us);
-	}
-	atomic_val_t maximum = atomic_get(&render_max_us);
-	while (render_us > (uint32_t)maximum &&
-	       !atomic_cas(&render_max_us, maximum, (atomic_val_t)render_us)) {
-		maximum = atomic_get(&render_max_us);
-	}
-	maximum = atomic_get(&transfer_max_us);
-	while (transfer_us > (uint32_t)maximum &&
-	       !atomic_cas(&transfer_max_us, maximum, (atomic_val_t)transfer_us)) {
-		maximum = atomic_get(&transfer_max_us);
-	}
 	if (stage == RENDERER_PRESENTED) {
 		atomic_inc(&completed_frames);
 	}
-	const struct deskkin_renderer_heartbeat heartbeat = {
-		.magic = DESKKIN_HEARTBEAT_MAGIC,
-		.generation = (uint32_t)atomic_inc(&generation) + 1U,
-		.completed_frames = (uint32_t)atomic_get(&completed_frames),
-		.render_us = (uint32_t)atomic_get(&render_last_us),
-		.transfer_us = (uint32_t)atomic_get(&transfer_last_us),
-		.copy_us = (uint32_t)atomic_get(&copy_last_us),
-		.render_max_us = (uint32_t)atomic_get(&render_max_us),
-		.transfer_max_us = (uint32_t)atomic_get(&transfer_max_us),
-		.stage = stage,
-		.fault = fault,
-		.allocation_failures = (uint8_t)atomic_get(&allocation_failures),
-		.transfer_failures = (uint8_t)atomic_get(&transfer_failures),
-		.dirty_rect_count = (uint8_t)atomic_get(&dirty_rect_count),
-		.schema = DESKKIN_CHANNEL_SCHEMA,
-		.pixel_dma_batches = (uint16_t)atomic_get(&pixel_dma_batches),
-		.dirty_pixels = (uint32_t)atomic_get(&dirty_pixels),
-		.transferred_bytes = (uint32_t)atomic_get(&transferred_bytes),
-		.view_generation = (uint32_t)atomic_get(&view_generation),
-		.pose_generation = (uint32_t)atomic_get(&pose_generation),
-		.input_generation = (uint32_t)atomic_get(&input_generation),
-		.stale_snapshots = (uint32_t)atomic_get(&stale_snapshots),
-		.touch_drops = (uint32_t)atomic_get(&touch_drops),
-		.atlas_cache_hits = (uint16_t)atomic_get(&atlas_cache_hits),
-		.atlas_cache_misses = (uint16_t)atomic_get(&atlas_cache_misses),
-		.atlas_cache_failures = (uint16_t)atomic_get(&atlas_cache_failures),
-		.visible_billboards = (uint8_t)atomic_get(&visible_billboards),
-		.culled_billboards = (uint8_t)atomic_get(&culled_billboards),
-		.nearest_samples = (uint32_t)atomic_get(&nearest_samples),
-		.bilinear_samples = (uint32_t)atomic_get(&bilinear_samples),
-		.projection_us = (uint32_t)atomic_get(&projection_last_us),
-		.projection_max_us = (uint32_t)atomic_get(&projection_max_us),
-		.sort_us = (uint32_t)atomic_get(&sort_last_us),
-		.sort_max_us = (uint32_t)atomic_get(&sort_max_us),
-		.texture_us = (uint32_t)atomic_get(&texture_last_us),
-		.texture_max_us = (uint32_t)atomic_get(&texture_max_us),
-		.world_raster_us = (uint32_t)atomic_get(&world_raster_last_us),
-		.world_raster_max_us = (uint32_t)atomic_get(&world_raster_max_us),
-		.deadline_misses = (uint32_t)atomic_get(&deadline_misses),
-	};
-	/* Zero marks the payload unstable while the next snapshot is copied. */
-	__atomic_store_n(&AMP_SHARED->renderer_publication, 0U, __ATOMIC_SEQ_CST);
-	memcpy((void *)&AMP_SHARED->renderer, &heartbeat, sizeof(heartbeat));
-	__atomic_store_n(&AMP_SHARED->renderer_publication, heartbeat.generation,
-			 __ATOMIC_SEQ_CST);
+	atomic_set(&render_last_us, (atomic_val_t)render_us);
+	atomic_set(&transfer_last_us, (atomic_val_t)transfer_us);
+	observe_max(&render_max_us, render_us);
+	observe_max(&transfer_max_us, transfer_us);
+	generation += 1U;
+	if (generation == 0U) {
+		generation = 1U;
+	}
+	const uint64_t copy_started = deskkin_uptime_us();
+	deskkin_shared_store(&AMP_SHARED->renderer_publication, 0U);
+	volatile struct deskkin_renderer_heartbeat *const heartbeat = &AMP_SHARED->renderer;
+	heartbeat->magic = DESKKIN_HEARTBEAT_MAGIC;
+	heartbeat->generation = generation;
+	heartbeat->completed_frames = (uint32_t)atomic_get(&completed_frames);
+	heartbeat->render_us = (uint32_t)atomic_get(&render_last_us);
+	heartbeat->transfer_us = (uint32_t)atomic_get(&transfer_last_us);
+	heartbeat->copy_us = (uint32_t)atomic_get(&copy_last_us);
+	heartbeat->render_max_us = (uint32_t)atomic_get(&render_max_us);
+	heartbeat->transfer_max_us = (uint32_t)atomic_get(&transfer_max_us);
+	heartbeat->stage = stage;
+	heartbeat->fault = fault;
+	heartbeat->allocation_failures = (uint8_t)atomic_get(&allocation_failures);
+	heartbeat->transfer_failures = (uint8_t)atomic_get(&transfer_failures);
+	heartbeat->dirty_rect_count = (uint8_t)atomic_get(&dirty_rect_count);
+	heartbeat->schema = DESKKIN_CHANNEL_SCHEMA;
+	heartbeat->pixel_dma_batches = (uint16_t)atomic_get(&pixel_dma_batches);
+	heartbeat->dirty_pixels = (uint32_t)atomic_get(&dirty_pixels);
+	heartbeat->transferred_bytes = (uint32_t)atomic_get(&transferred_bytes);
+	heartbeat->view_generation = (uint32_t)atomic_get(&view_generation);
+	heartbeat->pose_generation = (uint32_t)atomic_get(&pose_generation);
+	heartbeat->input_generation = (uint32_t)atomic_get(&input_generation);
+	heartbeat->stale_snapshots = (uint32_t)atomic_get(&stale_snapshots);
+	heartbeat->touch_drops = (uint32_t)atomic_get(&touch_drops);
+	heartbeat->atlas_cache_hits = (uint16_t)atomic_get(&atlas_cache_hits);
+	heartbeat->atlas_cache_misses = (uint16_t)atomic_get(&atlas_cache_misses);
+	heartbeat->atlas_cache_failures = (uint16_t)atomic_get(&atlas_cache_failures);
+	heartbeat->visible_billboards = (uint8_t)atomic_get(&visible_billboards);
+	heartbeat->culled_billboards = (uint8_t)atomic_get(&culled_billboards);
+	heartbeat->nearest_samples = (uint32_t)atomic_get(&nearest_samples);
+	heartbeat->bilinear_samples = (uint32_t)atomic_get(&bilinear_samples);
+	heartbeat->projection_us = (uint32_t)atomic_get(&projection_last_us);
+	heartbeat->projection_max_us = (uint32_t)atomic_get(&projection_max_us);
+	heartbeat->sort_us = (uint32_t)atomic_get(&sort_last_us);
+	heartbeat->sort_max_us = (uint32_t)atomic_get(&sort_max_us);
+	heartbeat->texture_us = (uint32_t)atomic_get(&texture_last_us);
+	heartbeat->texture_max_us = (uint32_t)atomic_get(&texture_max_us);
+	heartbeat->world_raster_us = (uint32_t)atomic_get(&world_raster_last_us);
+	heartbeat->world_raster_max_us = (uint32_t)atomic_get(&world_raster_max_us);
+	heartbeat->deadline_misses = (uint32_t)atomic_get(&deadline_misses);
+	deskkin_shared_fence();
+	deskkin_shared_store(&AMP_SHARED->renderer_publication, generation);
+	atomic_set(&copy_last_us, (atomic_val_t)(deskkin_uptime_us() - copy_started));
+	BOOT_MARKER[1] = esp_cpu_get_core_id();
 	*BOOT_MARKER = 6U;
 }
 
 uint64_t deskkin_uptime_us(void)
 {
-	return k_ticks_to_us_floor64(k_uptime_ticks());
+	/* RC_SLOW is approximately 136 kHz. Keep this path entirely inline: the
+	 * independent APPCPU image cannot safely enter another call window before
+	 * Zephyr has normalized its initial register-window state. Seven us/tick is
+	 * a conservative monotonic approximation used only for renderer pacing and
+	 * diagnostics.
+	 */
+	const uint64_t ticks = rtc_timer_ll_get_cycle_count(0);
+	return (ticks << 3U) - ticks;
 }
 
 void deskkin_sleep_ms(uint32_t delay_ms)
 {
-	k_msleep(delay_ms);
+	k_busy_wait(delay_ms * 1000U);
 }
 
 uint16_t *deskkin_framebuffer_alloc(uint8_t index)
@@ -338,14 +476,12 @@ int deskkin_world_snapshot(struct deskkin_world_snapshot *output)
 		return -EINVAL;
 	}
 	for (size_t attempt = 0; attempt < 3U; ++attempt) {
-		const uint32_t publication =
-			__atomic_load_n(&AMP_SHARED->world_publication, __ATOMIC_ACQUIRE);
+		const uint32_t publication = deskkin_shared_load(&AMP_SHARED->world_publication);
 		if (publication == 0U) {
 			return -EAGAIN;
 		}
-		memcpy(output, (const void *)&AMP_SHARED->world, sizeof(*output));
-		const uint32_t after =
-			__atomic_load_n(&AMP_SHARED->world_publication, __ATOMIC_ACQUIRE);
+		deskkin_shared_copy_from(output, &AMP_SHARED->world, sizeof(*output));
+		const uint32_t after = deskkin_shared_load(&AMP_SHARED->world_publication);
 		if (publication == after && output->generation == publication) {
 			if (output->magic != DESKKIN_WORLD_MAGIC ||
 			    output->schema != DESKKIN_WORLD_SCHEMA ||
@@ -367,9 +503,9 @@ int deskkin_touch_read(uint32_t after_generation, struct deskkin_touch_sample *o
 	if (output == NULL || drop_count == NULL) {
 		return -EINVAL;
 	}
-	const uint32_t latest =
-		__atomic_load_n(&AMP_SHARED->touch.write_generation, __ATOMIC_ACQUIRE);
-	*drop_count = __atomic_load_n(&AMP_SHARED->touch.drop_count, __ATOMIC_ACQUIRE);
+	const uint32_t latest = deskkin_shared_load(&AMP_SHARED->touch.write_generation);
+	uint32_t cumulative_drops = deskkin_shared_load(&AMP_SHARED->touch.drop_count);
+	*drop_count = cumulative_drops;
 	if (latest == 0U || latest == after_generation) {
 		return 0;
 	}
@@ -382,12 +518,12 @@ int deskkin_touch_read(uint32_t after_generation, struct deskkin_touch_sample *o
 	}
 	const uint32_t index = (wanted - 1U) % DESKKIN_TOUCH_CAPACITY;
 	volatile struct deskkin_touch_sample *slot = &AMP_SHARED->touch.samples[index];
-	const uint32_t before = __atomic_load_n(&slot->publication, __ATOMIC_ACQUIRE);
+	const uint32_t before = deskkin_shared_load(&slot->publication);
 	if (before == 0U || before != wanted) {
 		return -EAGAIN;
 	}
-	memcpy(output, (const void *)slot, sizeof(*output));
-	const uint32_t after = __atomic_load_n(&slot->publication, __ATOMIC_ACQUIRE);
+	deskkin_shared_copy_from(output, slot, sizeof(*output));
+	const uint32_t after = deskkin_shared_load(&slot->publication);
 	if (before != after) {
 		return -EAGAIN;
 	}
@@ -397,8 +533,11 @@ int deskkin_touch_read(uint32_t after_generation, struct deskkin_touch_sample *o
 		return -EPROTO;
 	}
 	if (skipped != 0U) {
-		*drop_count = __atomic_add_fetch(&AMP_SHARED->touch.drop_count, skipped,
-						 __ATOMIC_ACQ_REL);
+		cumulative_drops = skipped > UINT32_MAX - cumulative_drops
+					   ? UINT32_MAX
+					   : cumulative_drops + skipped;
+		deskkin_shared_store(&AMP_SHARED->touch.drop_count, cumulative_drops);
+		*drop_count = cumulative_drops;
 	}
 	return 1;
 }
@@ -406,27 +545,27 @@ int deskkin_touch_read(uint32_t after_generation, struct deskkin_touch_sample *o
 void deskkin_publish_target_yaw(int64_t value)
 {
 	const uint32_t generation = AMP_SHARED->target_yaw.generation + 1U;
-	__atomic_store_n(&AMP_SHARED->target_yaw_publication, 0U, __ATOMIC_SEQ_CST);
+	deskkin_shared_store(&AMP_SHARED->target_yaw_publication, 0U);
 	const struct deskkin_target_yaw target = {
 		.generation = generation == 0U ? 1U : generation,
 		.schema = DESKKIN_CHANNEL_SCHEMA,
 		.value = value,
 	};
-	memcpy((void *)&AMP_SHARED->target_yaw, &target, sizeof(target));
-	__atomic_store_n(&AMP_SHARED->target_yaw_publication, target.generation, __ATOMIC_SEQ_CST);
+	deskkin_shared_copy_to(&AMP_SHARED->target_yaw, &target, sizeof(target));
+	deskkin_shared_store(&AMP_SHARED->target_yaw_publication, target.generation);
 }
 
 void deskkin_publish_ui_command(uint8_t command)
 {
 	const uint32_t generation = AMP_SHARED->command.generation + 1U;
-	__atomic_store_n(&AMP_SHARED->command_publication, 0U, __ATOMIC_SEQ_CST);
+	deskkin_shared_store(&AMP_SHARED->command_publication, 0U);
 	const struct deskkin_ui_command message = {
 		.generation = generation == 0U ? 1U : generation,
 		.command = command,
 		.schema = DESKKIN_CHANNEL_SCHEMA,
 	};
-	memcpy((void *)&AMP_SHARED->command, &message, sizeof(message));
-	__atomic_store_n(&AMP_SHARED->command_publication, message.generation, __ATOMIC_SEQ_CST);
+	deskkin_shared_copy_to(&AMP_SHARED->command, &message, sizeof(message));
+	deskkin_shared_store(&AMP_SHARED->command_publication, message.generation);
 }
 
 void deskkin_deadline_missed(void)
@@ -499,7 +638,7 @@ static void display_entry(void *first, void *second, void *third)
 	for (;;) {
 		struct display_request request;
 		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
-		const int64_t started = k_uptime_ticks();
+		const uint64_t started = deskkin_uptime_us();
 		const uint16_t *pixels =
 			framebuffer + (size_t)request.buffer_index * FRAME_PIXELS;
 		uint32_t request_pixels = 0U;
@@ -524,7 +663,7 @@ static void display_entry(void *first, void *second, void *third)
 				break;
 			}
 		}
-		const uint64_t elapsed = k_ticks_to_us_floor64(k_uptime_ticks() - started);
+		const uint64_t elapsed = deskkin_uptime_us() - started;
 		const struct display_completion completion = {
 			.buffer_index = request.buffer_index,
 			.result = result == 0 ? 0 : -1,
@@ -536,21 +675,47 @@ static void display_entry(void *first, void *second, void *third)
 
 int main(void)
 {
-	*BOOT_MARKER = 2U;
-	BOOT_MARKER[1] = esp_cpu_get_core_id();
-	*BOOT_MARKER = 4U;
-	while (__atomic_load_n(&AMP_SHARED->display_publication, __ATOMIC_ACQUIRE) == 0U ||
+	deskkin_renderer_boot_stage(2U);
+	BOOT_MARKER[1] = 0U;
+	BOOT_MARKER[2] = 0U;
+	BOOT_MARKER[3] = 0U;
+	deskkin_renderer_boot_stage(4U);
+	while (deskkin_shared_load(&AMP_SHARED->display_publication) == 0U ||
 	       AMP_SHARED->display.magic != DESKKIN_DISPLAY_MAGIC || AMP_SHARED->display.ready != 1U) {
-		deskkin_renderer_observe(RENDERER_WAITING_FOR_DISPLAY, RENDERER_FAULT_NONE, 0, 0);
-		k_msleep(100);
+		k_busy_wait(100000U);
 	}
-	*BOOT_MARKER = 7U;
+	deskkin_renderer_boot_stage(7U);
 	if (initialize_renderer_heap() != 0) {
 		atomic_inc(&allocation_failures);
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_INIT, 0, 0);
 		return 1;
 	}
+	deskkin_renderer_boot_stage(41U);
+	initialize_output_only_gpio(display_gpio0);
+	initialize_output_only_gpio(display_gpio);
+	deskkin_renderer_boot_stage(42U);
+	const struct device *const dependencies[] = {
+		display_spi,
+		mipi_dbi,
+	};
+	for (size_t index = 0; index < ARRAY_SIZE(dependencies); ++index) {
+		BOOT_MARKER[1] = (uint32_t)index + 1U;
+		deskkin_renderer_boot_stage((uint8_t)(43U + index * 2U));
+		const int result = device_init(dependencies[index]);
+		if ((result != 0 && result != -EALREADY) ||
+		    !device_is_ready(dependencies[index])) {
+			deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_DISPLAY_INIT,
+						 0, 0);
+			return 1;
+		}
+		deskkin_renderer_boot_stage((uint8_t)(44U + index * 2U));
+	}
+	deskkin_renderer_boot_stage(49U);
 	const int display_result = device_init(display);
+	deskkin_renderer_boot_stage(50U);
+	BOOT_MARKER[1] = (device_is_ready(mipi_dbi) ? 1U : 0U) |
+			 (device_is_ready(display_spi) ? 2U : 0U) |
+			 (device_is_ready(display_gpio) ? 4U : 0U);
 	if (display_result == -ENOMEM) {
 		atomic_inc(&allocation_failures);
 	}
@@ -558,8 +723,8 @@ int main(void)
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_DISPLAY_INIT, 0, 0);
 		return 1;
 	}
-	__atomic_store_n(&AMP_SHARED->display_spi_hz, display_spi_frequency_hz(), __ATOMIC_RELEASE);
-	*BOOT_MARKER = 8U;
+	deskkin_shared_store(&AMP_SHARED->display_spi_hz, display_spi_frequency_hz());
+	deskkin_renderer_boot_stage(8U);
 	k_thread_create(&display_thread, display_stack, K_THREAD_STACK_SIZEOF(display_stack),
 			display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
 	rust_main();

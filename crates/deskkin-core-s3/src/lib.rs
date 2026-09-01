@@ -102,7 +102,6 @@ pub struct AmpTouchSample {
 pub struct AmpTouchRing<const N: usize> {
     samples: [AmpTouchSample; N],
     generation: u32,
-    drops: u32,
 }
 
 impl<const N: usize> AmpTouchRing<N> {
@@ -116,7 +115,6 @@ impl<const N: usize> AmpTouchRing<N> {
                 pressed: false,
             }; N],
             generation: 0,
-            drops: 0,
         }
     }
 
@@ -124,11 +122,7 @@ impl<const N: usize> AmpTouchRing<N> {
         if N == 0 {
             return;
         }
-        let capacity = u32::try_from(N).unwrap_or(u32::MAX);
         self.generation = self.generation.wrapping_add(1).max(1);
-        if self.generation > capacity {
-            self.drops = self.drops.saturating_add(1);
-        }
         self.samples[(self.generation as usize - 1) % N] = AmpTouchSample {
             generation: self.generation,
             x,
@@ -150,8 +144,13 @@ impl<const N: usize> AmpTouchRing<N> {
     }
 
     #[must_use]
-    pub const fn drops(&self) -> u32 {
-        self.drops
+    pub fn read_after(&self, after: u32, cumulative_drops: u32) -> (Option<AmpTouchSample>, u32) {
+        let Some(sample) = self.next_after(after) else {
+            return (None, cumulative_drops);
+        };
+        let wanted = after.wrapping_add(1).max(1);
+        let skipped = sample.generation.wrapping_sub(wanted);
+        (Some(sample), cumulative_drops.saturating_add(skipped))
     }
 }
 
@@ -657,10 +656,15 @@ mod tests {
         ring.push(10, 20, true);
         ring.push(11, 20, true);
         ring.push(12, 20, false);
-        assert_eq!(ring.drops(), 1);
-        assert_eq!(ring.next_after(0).unwrap().generation, 2);
-        assert_eq!(ring.next_after(2).unwrap().generation, 3);
-        assert_eq!(ring.next_after(3), None);
+        let (sample, drops) = ring.read_after(0, 0);
+        assert_eq!(sample.unwrap().generation, 2);
+        assert_eq!(drops, 1);
+        let (sample, drops) = ring.read_after(2, drops);
+        assert_eq!(sample.unwrap().generation, 3);
+        assert_eq!(drops, 1);
+        let (sample, drops) = ring.read_after(3, drops);
+        assert_eq!(sample, None);
+        assert_eq!(drops, 1);
     }
 
     #[test]

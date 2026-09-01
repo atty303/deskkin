@@ -27,7 +27,8 @@ motion, culling, sorting, sampling, alpha, and RGB565 output.
 The sole CoreS3 product path is MCUboot plus AMP sysbuild. PROCPU owns touch,
 Wi-Fi, Noise, NVS, the migrated application service, USB control, power/reset,
 and virtual observed pose. APPCPU owns Slint shell/texture generation, world
-rendering, SPI2/GDMA, and display transfer. The old product task aliases are
+rendering, SPI2, and display transfer. GDMA remains an unresolved bring-up
+limitation. The old product task aliases are
 removed. APPCPU primary and secondary slots are 3 MiB. Two RGB565 framebuffers
 are carved from the high 4 MiB PSRAM renderer region rather than PROCPU static
 DRAM.
@@ -54,31 +55,56 @@ local record is persisted.
 
 ## Verification state
 
-The final `mise run test` passes through the application, protocol, host,
-simulator, presentation, scenario, and diagnostic suites and a pristine CoreS3
-build of MCUboot, PROCPU, APPCPU, and inert recovery. A fresh independent review
-and its follow-up review are clean after resolving publication ordering,
-semantic-result correlation, deadline/drop accounting, and schema-fault
-handling. The AMP product was flashed to `/dev/ttyACM2`; MCUboot, PROCPU, and
-APPCPU writes, readback hashes, and resets all completed successfully. The
-post-flash USB control status request times out because the application hangs
-before it serves control responses. ROM bootloader access remains available and
-was confirmed with an `esptool` probe, so the target remains reflashable. Live
-frame timings and the 60-second benchmark remain unmeasured.
+`mise run fix`, the complete host suite, the CoreS3 Python conformance suite,
+and the final aggregate `mise run test` pass, including a clean
+MCUboot/PROCPU/APPCPU/inert build. Repeated live AMP flashes to
+`/dev/ttyACM2` completed every domain write, readback hash, and reset. The clean
+image reaches PROCPU boot stage 9 and APPCPU renderer stage 4 on core 1, reports
+a fresh generation-stable heartbeat and ready display, and continuously renders
+the full-screen unpaired shell. One observed run advanced to 4,026 completed
+frames with zero renderer, allocation, transfer, atlas-cache, or stale-snapshot
+faults at a reported 40 MHz display SPI clock.
+
+The APPCPU IllegalInstruction was caused by PROCPU NVS/flash work disabling the
+shared instruction cache while APPCPU executed from IROM. The product now
+serializes APPCPU startup and all NVS flash operations with one mutex and stalls
+core 1 only for the cache-disabled interval. A regression test fixes the
+stall/unstall and NVS coverage contract. APPCPU allocations now use its
+caller-owned PSRAM `sys_heap`; the small Zephyr kernel heap remains available
+only for drivers that require `k_malloc`.
+
+The APPCPU entry trampoline is part of the repository's ordered, digest-checked
+Zephyr patch series. Product builds no longer rewrite the shared pinned Zephyr
+checkout around each invocation. Touch-ring loss is accumulated from the
+generations actually skipped by the APPCPU consumer and remains visible in
+later heartbeat publications.
+
+The target has no usable identity, so it correctly remains in the Setup shell.
+No identity, Wi-Fi profile, host profile, or pairing state was created. The
+paired world path and fixed 60-second physical benchmark therefore remain
+unmeasured. APPCPU display transfer is currently the stable synchronous SPI2
+path; GDMA is still disabled in the APPCPU devicetree overlay and the live
+`pixel_dma_batches` counter is zero. A bounded trial enabled the GDMA node and
+SPI2 `dma-enabled` property, but APPCPU then stopped inside display
+initialization at boot marker 49 before publishing any heartbeat or frame; the
+trial was reverted and the stable image was reflashed.
 
 The target CoreS3 is the Espressif USB JTAG/serial device at `/dev/ttyACM2`.
 
 ## Next work
 
-Determine the earliest boot stage reached by the flashed AMP product and repair
-the application hang before attempting identity/profile checks or a benchmark.
+Restore and verify SPI2 GDMA without regressing the stable APPCPU boot, shared
+flash-cache guard, framebuffer ownership, or full-screen pairing shell. Remove
+bring-up-only boot markers and replace the pinned APPCPU entry patch only when
+an equivalent upstream-compatible startup path is verified.
 
-After the boot hang is resolved, check the existing identity/profile and run the
-normal application and 60-second world benchmark. Physical acceptance requires
-the user's visual confirmation of no cylinder primitive, camera-facing boards,
-Availability plus Notice coexistence, Character/object parallax, continuous
-320 px turns without a seam jump, 180 degrees/s observed following, and intact
-pairing UI.
+Identity creation, Wi-Fi provisioning, host-profile selection, and pairing each
+remain separate live authority boundaries. Once those prerequisites exist, run
+the normal paired application and fixed 60-second world benchmark. Physical
+acceptance still requires the user's visual confirmation of no cylinder
+primitive, camera-facing boards, Availability plus Notice coexistence,
+Character/object parallax, continuous 320 px turns without a seam jump, 180
+degrees/s observed following, and intact pairing UI.
 
 Physical servo power, neck actuation, and a neck pose sensor remain intentionally
 out of scope; observed yaw is virtual.

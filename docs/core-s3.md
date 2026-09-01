@@ -11,7 +11,9 @@ material stay below ignored `.deskkin/` state.
 PROCPU owns USB control, touch, Wi-Fi, DHCP/TCP, Noise, NVS, application
 service, virtual pose, APPCPU boot, display power/reset, and status. APPCPU owns
 the Slint instances, canonical billboard textures, custom world renderer,
-SPI2/GDMA, and LCD transfer. There is no supported single-image firmware or
+SPI2, and LCD transfer. The verified product path currently uses synchronous
+SPI2; GDMA is disabled because enabling it blocks APPCPU display initialization
+and remains a bring-up limitation. There is no supported single-image firmware or
 `core-s3:amp-*` task alias.
 
 ## Task and authority boundaries
@@ -49,6 +51,10 @@ The APPCPU primary and secondary slots are 3 MiB. `core-s3:build` produces and
 validates MCUboot, PROCPU, APPCPU, and inert recovery artifacts. `core-s3:flash`
 uses one multi-domain west flash operation; successful completion requires all
 domain writes, readback hashes, and reset to succeed.
+
+The APPCPU entry trampoline is carried in the repository's ordered Zephyr patch
+series and is included in the bootstrap tree digest. Builds verify that pinned
+tree instead of rewriting a shared Zephyr source file temporarily.
 
 After separate live approval:
 
@@ -119,6 +125,12 @@ render resources. Two 320x240 RGB565 framebuffers occupy the beginning of that
 region; the remaining region is the APPCPU allocator. PROCPU and APPCPU static
 DRAM remain separated by the link-time boundary assertion. APPCPU exclusively
 owns the allocator metadata and display transfer.
+
+The ESP32-S3 instruction cache is shared across the CPUs and can be disabled by
+flash work. PROCPU serializes APPCPU startup and NVS access with one flash guard;
+after APPCPU starts, the guard stalls core 1 around the cache-disabled interval
+and always resumes it before unlocking. Device NVS access must not bypass this
+guard.
 
 The 1 KiB shared control area contains bounded generation-published records:
 

@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#include <esp_cpu.h>
 #include <esp_psram.h>
 #include <hal/cache_ll.h>
 #include <zephyr/device.h>
@@ -11,14 +12,18 @@
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
 #include <zephyr/sys/byteorder.h>
 #include "../shared.h"
 
 #define CONTROL_FRAME_MAX 188
 #define STATUS_RESPONSE_SIZE 160
 #define HEARTBEAT_STALE_MS 500
-#define APPCPU_BOOT_MARKER ((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + 0x3f0U))
-#define AMP_SHARED ((volatile struct deskkin_amp_shared *)DT_REG_ADDR(DT_NODELABEL(shm0)))
+#define APPCPU_BOOT_MARKER                                                                        \
+	((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + DESKKIN_BOOT_MARKER_OFFSET))
+#define AMP_SHARED                                                                                 \
+	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
+					       DESKKIN_CHANNEL_OFFSET))
 
 static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 static const struct device *const lcd_reset_gpio = DEVICE_DT_GET(DT_NODELABEL(aw9523b_gpio));
@@ -82,6 +87,8 @@ static uint32_t world_benchmark_started_generation;
 static atomic_t valid_view_generation;
 static bool valid_snapshot_published;
 static uint32_t valid_snapshot_attempt;
+K_MUTEX_DEFINE(appcpu_flash_mutex);
+static bool appcpu_running;
 
 extern void deskkin_service_ui_command(uint8_t command);
 extern uint8_t deskkin_service_shell(void);
@@ -91,17 +98,31 @@ extern uint8_t deskkin_service_notice(void);
 extern uint8_t deskkin_service_valid_result(void);
 extern uint32_t deskkin_service_result_attempt(void);
 
+void deskkin_flash_guard_enter(void)
+{
+	k_mutex_lock(&appcpu_flash_mutex, K_FOREVER);
+	if (appcpu_running) {
+		esp_cpu_stall(1);
+	}
+}
+
+void deskkin_flash_guard_exit(void)
+{
+	if (appcpu_running) {
+		esp_cpu_unstall(1);
+	}
+	k_mutex_unlock(&appcpu_flash_mutex);
+}
+
 static void receive_ui_command(void)
 {
 	struct deskkin_ui_command command;
-	const uint32_t before =
-		__atomic_load_n(&AMP_SHARED->command_publication, __ATOMIC_ACQUIRE);
+	const uint32_t before = deskkin_shared_load(&AMP_SHARED->command_publication);
 	if (before == 0U || before == command_generation) {
 		return;
 	}
-	memcpy(&command, (const void *)&AMP_SHARED->command, sizeof(command));
-	const uint32_t after =
-		__atomic_load_n(&AMP_SHARED->command_publication, __ATOMIC_ACQUIRE);
+	deskkin_shared_copy_from(&command, &AMP_SHARED->command, sizeof(command));
+	const uint32_t after = deskkin_shared_load(&AMP_SHARED->command_publication);
 	if (before != after) {
 		return;
 	}
@@ -127,10 +148,10 @@ static void publish_touch(void)
 		.schema = DESKKIN_CHANNEL_SCHEMA,
 	};
 	volatile struct deskkin_touch_sample *slot = &AMP_SHARED->touch.samples[index];
-	__atomic_store_n(&slot->publication, 0U, __ATOMIC_SEQ_CST);
-	memcpy((void *)slot, &sample, sizeof(sample));
-	__atomic_store_n(&slot->publication, touch_generation, __ATOMIC_SEQ_CST);
-	__atomic_store_n(&AMP_SHARED->touch.write_generation, touch_generation, __ATOMIC_RELEASE);
+	deskkin_shared_store(&slot->publication, 0U);
+	deskkin_shared_copy_to(slot, &sample, sizeof(sample));
+	deskkin_shared_store(&slot->publication, touch_generation);
+	deskkin_shared_store(&AMP_SHARED->touch.write_generation, touch_generation);
 }
 
 static void touch_callback(struct input_event *event, void *user_data)
@@ -157,7 +178,7 @@ static void publish_world_snapshot(void)
 	const bool benchmark_completes =
 		benchmark && world_generation + 1U - world_benchmark_started_generation >= 1200U;
 	world_generation++;
-	__atomic_store_n(&AMP_SHARED->world_publication, 0U, __ATOMIC_SEQ_CST);
+	deskkin_shared_store(&AMP_SHARED->world_publication, 0U);
 	const struct deskkin_world_snapshot snapshot = {
 		.magic = DESKKIN_WORLD_MAGIC,
 		.generation = world_generation,
@@ -168,8 +189,8 @@ static void publish_world_snapshot(void)
 		.availability = benchmark ? 2U : deskkin_service_availability(),
 		.notice = benchmark ? 1U : deskkin_service_notice(),
 	};
-	memcpy((void *)&AMP_SHARED->world, &snapshot, sizeof(snapshot));
-	__atomic_store_n(&AMP_SHARED->world_publication, world_generation, __ATOMIC_SEQ_CST);
+	deskkin_shared_copy_to(&AMP_SHARED->world, &snapshot, sizeof(snapshot));
+	deskkin_shared_store(&AMP_SHARED->world_publication, world_generation);
 	if (valid_result &&
 	    (!valid_snapshot_published || result_attempt != valid_snapshot_attempt)) {
 		atomic_set(&valid_view_generation, (atomic_val_t)world_generation);
@@ -201,12 +222,10 @@ int deskkin_amp_world_benchmark_start(void)
 static void update_observed_yaw(void)
 {
 	struct deskkin_target_yaw target;
-	const uint32_t before =
-		__atomic_load_n(&AMP_SHARED->target_yaw_publication, __ATOMIC_ACQUIRE);
+	const uint32_t before = deskkin_shared_load(&AMP_SHARED->target_yaw_publication);
 	if (before != 0U) {
-		memcpy(&target, (const void *)&AMP_SHARED->target_yaw, sizeof(target));
-		const uint32_t after = __atomic_load_n(&AMP_SHARED->target_yaw_publication,
-							   __ATOMIC_ACQUIRE);
+		deskkin_shared_copy_from(&target, &AMP_SHARED->target_yaw, sizeof(target));
+		const uint32_t after = deskkin_shared_load(&AMP_SHARED->target_yaw_publication);
 		if (before == after && target.generation == before &&
 		    target.schema == DESKKIN_CHANNEL_SCHEMA) {
 			target_yaw = target.value;
@@ -238,14 +257,12 @@ static void receive_heartbeat(void)
 	uint32_t publication = 0U;
 	bool stable = false;
 	for (size_t attempt = 0; attempt < 3U; ++attempt) {
-		publication =
-			__atomic_load_n(&AMP_SHARED->renderer_publication, __ATOMIC_ACQUIRE);
+		publication = deskkin_shared_load(&AMP_SHARED->renderer_publication);
 		if (publication == 0U || publication == received_publication) {
 			return;
 		}
-		memcpy(&heartbeat, (const void *)&AMP_SHARED->renderer, sizeof(heartbeat));
-		const uint32_t after =
-			__atomic_load_n(&AMP_SHARED->renderer_publication, __ATOMIC_ACQUIRE);
+		deskkin_shared_copy_from(&heartbeat, &AMP_SHARED->renderer, sizeof(heartbeat));
+		const uint32_t after = deskkin_shared_load(&AMP_SHARED->renderer_publication);
 		if (publication != after) {
 			continue;
 		}
@@ -338,7 +355,8 @@ static void supervisor_entry(void *first, void *second, void *third)
 				next_world_ms = now + 50U;
 			}
 		}
-		if (atomic_get(&display_ready) != 0 && AMP_SHARED->display_publication == 0U) {
+		if (atomic_get(&display_ready) != 0 &&
+		    deskkin_shared_load(&AMP_SHARED->display_publication) == 0U) {
 			const struct deskkin_display_ready message = {
 				.magic = DESKKIN_DISPLAY_MAGIC,
 				.generation = 1U,
@@ -347,11 +365,16 @@ static void supervisor_entry(void *first, void *second, void *third)
 				.renderer_heap = (uint32_t)renderer_heap,
 				.renderer_heap_size = (uint32_t)renderer_heap_size,
 			};
-			memcpy((void *)&AMP_SHARED->display, &message, sizeof(message));
-			__atomic_store_n(&AMP_SHARED->display_publication, 1U, __ATOMIC_RELEASE);
+			deskkin_shared_copy_to(&AMP_SHARED->display, &message, sizeof(message));
+			deskkin_shared_store(&AMP_SHARED->display_publication, 1U);
 		}
 		k_msleep(1);
 	}
+}
+
+void deskkin_amp_boot_trace(uint8_t stage)
+{
+	printk("deskkin_amp:%u\n", stage);
 }
 
 static void boot_entry(void *first, void *second, void *third)
@@ -362,10 +385,14 @@ static void boot_entry(void *first, void *second, void *third)
 	atomic_set(&boot_stage, 1);
 	atomic_set(&boot_stage, 2);
 	atomic_set(&boot_stage, 3);
+	k_mutex_lock(&appcpu_flash_mutex, K_FOREVER);
 	if (esp_appcpu_init() != 0) {
+		k_mutex_unlock(&appcpu_flash_mutex);
 		atomic_set(&boot_error, 3);
 		return;
 	}
+	appcpu_running = true;
+	k_mutex_unlock(&appcpu_flash_mutex);
 	atomic_set(&boot_stage, 4);
 	if (initialize_display_power() == 0) {
 		atomic_set(&display_ready, 1);
@@ -374,6 +401,7 @@ static void boot_entry(void *first, void *second, void *third)
 		return;
 	}
 	atomic_set(&boot_stage, 5);
+	atomic_set(&boot_stage, 9);
 }
 
 static int read_byte(uint8_t *byte, int64_t deadline)
@@ -446,11 +474,10 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 	sys_put_be32((uint32_t)atomic_get(&transfer_max_us), &response[61]);
 	response[65] = (uint8_t)*APPCPU_BOOT_MARKER;
 	response[66] = (uint8_t)APPCPU_BOOT_MARKER[1];
-	response[67] =
-		__atomic_load_n(&AMP_SHARED->renderer_publication, __ATOMIC_ACQUIRE) != 0U ? 1U : 0U;
+	response[67] = deskkin_shared_load(&AMP_SHARED->renderer_publication) != 0U ? 1U : 0U;
 	response[68] = (uint8_t)atomic_get(&boot_stage);
 	response[69] = (uint8_t)atomic_get(&boot_error);
-	sys_put_be32(__atomic_load_n(&AMP_SHARED->display_spi_hz, __ATOMIC_ACQUIRE), &response[70]);
+	sys_put_be32(deskkin_shared_load(&AMP_SHARED->display_spi_hz), &response[70]);
 	sys_put_be32((uint32_t)atomic_get(&copy_us), &response[74]);
 	const uint32_t now = k_uptime_get_32();
 	response[27] = generation != 0U && now - received_ms <= HEARTBEAT_STALE_MS ? 1U : 2U;

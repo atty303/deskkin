@@ -134,6 +134,7 @@ expected_zephyr_status = [
     " M drivers/mipi_dbi/mipi_dbi_esp32.c",
     " M drivers/spi/spi_esp32_spim.c",
     " M include/zephyr/drivers/mipi_dbi.h",
+    " M soc/espressif/esp32s3/soc_appcpu.c",
 ]
 for relative, expected in revisions.items():
     project = state / relative
@@ -173,7 +174,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "2ea9ab40f9068f557e8337d0cef6e44e848eaccea478dfb4498f4f00c5b4a0dd":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 toolchain = state / "rustup/toolchains/deskkin-esp"

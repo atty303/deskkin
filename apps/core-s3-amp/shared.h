@@ -4,6 +4,7 @@
 #define DESKKIN_CORE_S3_AMP_SHARED_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define DESKKIN_HEARTBEAT_MAGIC 0x44534b4eU
 #define DESKKIN_DISPLAY_MAGIC 0x4453504cU
@@ -11,6 +12,49 @@
 #define DESKKIN_WORLD_SCHEMA 1U
 #define DESKKIN_CHANNEL_SCHEMA 1U
 #define DESKKIN_TOUCH_CAPACITY 16U
+#define DESKKIN_CHANNEL_OFFSET 0x400U
+#define DESKKIN_BOOT_MARKER_OFFSET 0xbf0U
+
+static inline void deskkin_shared_fence(void)
+{
+	__asm__ volatile("" ::: "memory");
+}
+
+static inline uint32_t deskkin_shared_load(const volatile uint32_t *value)
+{
+	const uint32_t loaded = *value;
+	deskkin_shared_fence();
+	return loaded;
+}
+
+static inline void deskkin_shared_store(volatile uint32_t *target, uint32_t value)
+{
+	deskkin_shared_fence();
+	*target = value;
+	deskkin_shared_fence();
+}
+
+static inline __attribute__((always_inline)) void
+deskkin_shared_copy_to(volatile void *target, const void *source, size_t size)
+{
+	volatile uint8_t *output = target;
+	const uint8_t *input = source;
+	for (size_t index = 0; index < size; ++index) {
+		output[index] = input[index];
+	}
+	deskkin_shared_fence();
+}
+
+static inline __attribute__((always_inline)) void
+deskkin_shared_copy_from(void *target, const volatile void *source, size_t size)
+{
+	uint8_t *output = target;
+	const volatile uint8_t *input = source;
+	for (size_t index = 0; index < size; ++index) {
+		output[index] = input[index];
+	}
+	deskkin_shared_fence();
+}
 
 struct deskkin_renderer_heartbeat {
 	uint32_t magic;
@@ -126,7 +170,8 @@ struct deskkin_amp_shared {
 	uint32_t target_yaw_publication;
 };
 
-_Static_assert(sizeof(struct deskkin_amp_shared) <= 0x3f0U,
+_Static_assert(sizeof(struct deskkin_amp_shared) <=
+		       DESKKIN_BOOT_MARKER_OFFSET - DESKKIN_CHANNEL_OFFSET,
 	       "AMP channels overlap the APPCPU boot marker");
 
 #endif

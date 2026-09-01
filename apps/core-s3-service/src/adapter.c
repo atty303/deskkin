@@ -53,6 +53,8 @@ extern void deskkin_rust_service_worker(void);
 extern void deskkin_rust_set_boot_status(uint8_t stage, uint8_t error);
 extern size_t deskkin_rust_control_snapshot(const uint8_t *input, size_t input_length,
 						   uint8_t *output);
+extern void deskkin_flash_guard_enter(void);
+extern void deskkin_flash_guard_exit(void);
 
 void deskkin_boot_trace(uint8_t stage, uint8_t error)
 {
@@ -303,9 +305,11 @@ static int ensure_storage(void)
 	if (storage_ready) {
 		return 0;
 	}
+	deskkin_flash_guard_enter();
 	const struct flash_area *area;
 	int result = flash_area_open(PARTITION_ID(storage_partition), &area);
 	if (result != 0) {
+		deskkin_flash_guard_exit();
 		return result;
 	}
 	storage.flash_device = area->fa_dev;
@@ -319,6 +323,7 @@ static int ensure_storage(void)
 	}
 	flash_area_close(area);
 	storage_ready = result == 0;
+	deskkin_flash_guard_exit();
 	return result;
 }
 
@@ -328,7 +333,9 @@ int deskkin_nvs_read(uint16_t record_id, uint8_t *output, size_t capacity)
 	if (result != 0 || output == NULL || capacity > CONTROL_FRAME_MAX) {
 		return result != 0 ? result : -EINVAL;
 	}
+	deskkin_flash_guard_enter();
 	const int length = nvs_read(&storage, record_id, output, capacity);
+	deskkin_flash_guard_exit();
 	return length == -ENOENT ? 0 : length < 0 ? length : length + 1;
 }
 
@@ -340,17 +347,20 @@ int deskkin_nvs_write_readback(uint16_t record_id, const uint8_t *input, size_t 
 		result = result != 0 ? result : -EINVAL;
 		goto cleanup;
 	}
+	deskkin_flash_guard_enter();
 	result = nvs_write(&storage, record_id, input, length);
 	if (result < 0 || (size_t)result != length) {
 		result = result < 0 ? result : -EIO;
-		goto cleanup;
+		goto guarded_cleanup;
 	}
 	result = nvs_read(&storage, record_id, readback, sizeof(readback));
 	if (result < 0 || (size_t)result != length || memcmp(input, readback, length) != 0) {
 		result = -EIO;
-		goto cleanup;
+		goto guarded_cleanup;
 	}
 	result = 0;
+guarded_cleanup:
+	deskkin_flash_guard_exit();
 cleanup:
 	memset(readback, 0, sizeof(readback));
 	return result;
@@ -359,7 +369,13 @@ cleanup:
 int deskkin_nvs_delete(uint16_t record_id)
 {
 	const int result = ensure_storage();
-	return result == 0 ? nvs_delete(&storage, record_id) : result;
+	if (result != 0) {
+		return result;
+	}
+	deskkin_flash_guard_enter();
+	const int delete_result = nvs_delete(&storage, record_id);
+	deskkin_flash_guard_exit();
+	return delete_result;
 }
 
 static int wifi_connection_state(struct net_if *iface)

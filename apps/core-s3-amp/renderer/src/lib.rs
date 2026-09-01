@@ -460,20 +460,25 @@ struct BillboardTexture {
 }
 
 fn capture_billboard(
-    component: &BillboardWindow,
+    component: &RendererWindow,
     window: &MinimalSoftwareWindow,
     notice: bool,
     text: &str,
     color: slint::Color,
 ) -> Result<BillboardTexture, RendererFault> {
-    component.set_notice(notice);
-    component.set_status_text(text.into());
-    component.set_status_color(color);
+    component.set_capture_notice(notice);
+    component.set_capture_status_text(text.into());
+    component.set_capture_status_color(color);
+    component.set_capture_mode(true);
+    window.set_size(PhysicalSize::new(272, 124));
     window.request_redraw();
     let mut pixels = vec![Rgb565Pixel(0); 272 * 124];
     let rendered = window.draw_if_needed(|renderer| {
         let _ = renderer.render(&mut pixels, 272);
     });
+    component.set_capture_mode(false);
+    window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
+    window.request_redraw();
     if !rendered {
         return Err(RendererFault::RenderSkipped);
     }
@@ -508,7 +513,7 @@ fn new_world_textures() -> WorldTextures {
 
 fn ensure_world_textures(
     textures: &mut WorldTextures,
-    component: &BillboardWindow,
+    component: &RendererWindow,
     window: &MinimalSoftwareWindow,
     snapshot: WorldSnapshot,
     telemetry: &mut WorldTelemetry,
@@ -899,22 +904,8 @@ extern "C" fn rust_main() {
         };
         return;
     };
-    let Ok(billboard_component) = BillboardWindow::new() else {
-        unsafe {
-            deskkin_renderer_observe(
-                RendererStage::Failed as u8,
-                RendererFault::Component as u8,
-                0,
-                0,
-            )
-        };
-        return;
-    };
-    unsafe { deskkin_renderer_boot_stage(11) };
     let windows = state.borrow();
-    let (Some(window), Some(billboard_window)) =
-        (windows.first().cloned(), windows.get(1).cloned())
-    else {
+    let Some(window) = windows.first().cloned() else {
         unsafe {
             deskkin_renderer_observe(
                 RendererStage::Failed as u8,
@@ -927,9 +918,8 @@ extern "C" fn rust_main() {
     };
     drop(windows);
     window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
-    billboard_window.set_size(PhysicalSize::new(272, 124));
     unsafe { deskkin_renderer_boot_stage(12) };
-    if component.show().is_err() || billboard_component.show().is_err() {
+    if component.show().is_err() {
         unsafe {
             deskkin_renderer_observe(RendererStage::Failed as u8, RendererFault::Show as u8, 0, 0)
         };
@@ -1041,8 +1031,8 @@ extern "C" fn rust_main() {
         let render_result = if have_world_snapshot && world_snapshot.shell == 4 {
             if let Err(fault) = ensure_world_textures(
                 &mut world_textures,
-                &billboard_component,
-                &billboard_window,
+                &component,
+                &window,
                 world_snapshot,
                 &mut world_telemetry,
             ) {

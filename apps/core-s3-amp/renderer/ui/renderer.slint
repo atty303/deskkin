@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { Button } from "std-widgets.slint";
-import { AvailabilityBillboard, NoticeBillboard } from "../../../../ui/application-surface.slint";
+import { ApplicationSurface } from "../../../../ui/application-surface.slint";
 import { StatusSurface } from "../../../../ui/status-surface.slint";
 
 export component RendererWindow inherits Window {
-    width: 320px;
-    height: 240px;
+    in property <bool> capture-mode: false;
+    in property <bool> capture-notice: false;
+    in property <string> capture-status-text: "Unknown";
+    in property <color> capture-status-color: #f3b33d;
+    width: capture-mode ? 272px : 320px;
+    height: capture-mode ? 124px : 240px;
     in-out property <image> pet-atlas;
     in-out property <int> pet-frame-index: 0;
     in property <string> shell-state: "SetupRequired";
@@ -18,6 +22,7 @@ export component RendererWindow inherits Window {
     background: #16191d;
 
     VerticalLayout {
+        visible: !root.capture-mode;
         padding: 18px;
         spacing: 12px;
         Text { text: root.shell-state; color: #d7e3f4; font-size: 20px; }
@@ -33,21 +38,15 @@ export component RendererWindow inherits Window {
             Button { text: "Cancel"; visible: root.authentication-string != ""; clicked => { root.cancel(); } }
         }
     }
-}
 
-export component BillboardWindow inherits Window {
-    width: 272px;
-    height: 124px;
-    in property <bool> notice: false;
-    in property <string> status-text: "Unknown";
-    in property <color> status-color: #f3b33d;
-
-    AvailabilityBillboard {
-        width: 100%; height: 100%; visible: !root.notice;
-        status-text: root.status-text; status-color: root.status-color;
-    }
-    NoticeBillboard {
-        width: 100%; height: 100%; visible: root.notice;
+    ApplicationSurface {
+        width: 100%;
+        height: 100%;
+        visible: root.capture-mode;
+        status-text: root.capture-status-text;
+        status-color: root.capture-status-color;
+        notice-visible: root.capture-notice;
         notice-text: "Deskkin notice";
+        capture-only-notice: root.capture-notice;
     }
 }

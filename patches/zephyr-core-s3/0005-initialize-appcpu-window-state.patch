@@ -1,0 +1,63 @@
+From: Deskkin contributors
+Subject: [PATCH] soc: esp32s3: initialize APPCPU window state at entry
+
+Enter the independently loaded APPCPU image with a known Xtensa windowed ABI
+state before calling the C startup path.
+
+---
+ soc/espressif/esp32s3/soc_appcpu.c | 34 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/soc/espressif/esp32s3/soc_appcpu.c b/soc/espressif/esp32s3/soc_appcpu.c
+index b45a928..34d8781 100644
+--- a/soc/espressif/esp32s3/soc_appcpu.c
++++ b/soc/espressif/esp32s3/soc_appcpu.c
+@@ -38,6 +38,7 @@
+ #define HDR_ATTR __attribute__((section(".entry_addr"))) __attribute__((used))
+ 
+ void __appcpu_start(void);
++void __appcpu_start_c(void);
+ static HDR_ATTR void (*_entry_point)(void) = &__appcpu_start;
+ 
+ extern FUNC_NORETURN void z_prep_c(void);
+@@ -51,6 +52,37 @@ static void core_intr_matrix_clear(void)
+ 	}
+ }
+ 
+-void IRAM_ATTR __appcpu_start(void)
++__asm__(".section .iram1,\"ax\"\n"
++        ".global __appcpu_start\n"
++        "__appcpu_start:\n\t"
++        "addi a2, a1, -48\n\t"
++        "addi a3, a2, -12\n\t"
++        "s32i a1, a3, 0\n\t"
++        "mov a1, a2\n\t"
++        "rsr.ps a2\n\t"
++        "movi a3, 0x70f\n\t"
++        "slli a3, a3, 8\n\t"
++        "movi a4, -1\n\t"
++        "xor a3, a3, a4\n\t"
++        "and a2, a2, a3\n\t"
++        "wsr.ps a2\n\t"
++        "rsync\n\t"
++        "movi a2, 0\n\t"
++        "wsr.windowbase a2\n\t"
++        "movi a2, 1\n\t"
++        "wsr.windowstart a2\n\t"
++        "rsync\n\t"
++        "movi a0, 0\n\t"
++        "rsr.ps a2\n\t"
++        "movi a3, 4\n\t"
++        "slli a3, a3, 16\n\t"
++        "or a2, a2, a3\n\t"
++        "wsr.ps a2\n\t"
++        "rsync\n\t"
++        "call8 __appcpu_start_c\n\t"
++        "j .\n\t"
++        ".previous\n");
++
++void IRAM_ATTR __appcpu_start_c(void)
+ {
+ 	extern uint32_t _init_start;
+-- 
+2.51.0
