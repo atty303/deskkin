@@ -174,20 +174,20 @@ image occupies `0x20000`, and the signed APPCPU image occupies `0x2c0000` in a
 sysbuild dependency order is authoritative.
 
 PROCPU exclusively owns the USB status surface and LCD power/reset/backlight.
-It reserves one 320×240 RGB565 render buffer in internal DRAM, then publishes
-only its address and readiness.
+It reserves two 320×30 RGB565 line bands in internal DRAM, then publishes only
+its address and readiness.
 The PROCPU linker region ends at the APPCPU DRAM origin, so image growth cannot
 silently overlap the renderer. APPCPU exclusively owns the Slint instance, software
-renderer, SPI2, GDMA, and display driver. It renders directly into the internal
-buffer without a bounce copy. After each transfer starts, Slint immediately
-writes the next logical frame into the same buffer. The resulting LCD write is
-not a coherent-frame boundary and can contain pixels from adjacent frames.
+renderer, SPI2, GDMA, and display driver. Slint renders directly into ping-pong
+bands without a bounce copy. A frame is divided into eight equal 30-line transfers;
+each 19,200-byte band remains below the 32,736-byte GDMA transaction limit.
+Slint fills one band while GDMA reads the other, and completion ownership
+prevents either band from being reused while it remains in flight.
 
 The validated hardware configuration is QIO flash at 80 MHz and LCD SPI at
-40 MHz. The display and render threads use the same priority. Submission yields
-once so the display thread starts GDMA, then the synchronous SPI polling loop
-yields while Slint renders. This overlaps SRAM writes and GDMA reads without a
-second framebuffer; USB supervision remains isolated on PROCPU. The ten-second
+40 MHz. Same-priority APPCPU render and display threads alternate two band
+buffers. The SPI polling loop yields so Slint can fill the other band while
+GDMA transfers. USB supervision remains isolated on PROCPU. The ten-second
 pipeline benchmark does not reset the device; it observes an already booted,
 unthrottled run and calculates throughput from the device heartbeat times of
 its first and last valid samples. Frame rate and render/transfer latency are
@@ -206,13 +206,16 @@ mise run core-s3:amp-benchmark -- --device /dev/ttyACM0
 
 This is an atlas-free maximum-throughput benchmark. It does not assert the
 animation cadence of a future scene; that policy belongs to the presentation
-scheduler after the Pet asset is restored. The retained physical baseline
-completes 298 frames in a 9.637-second measurement window (30.92 FPS), with
-31.0 ms last full-screen transfer and 4.3 ms last render. The cumulative maxima
-since boot were 32.2 ms transfer and 7.6 ms render; the maximum fields are not
-reset at the start of the ten-second observation window. The 153,600-byte
-RGB565 payload has a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS
-wire-only ceiling; the measured pipeline reaches 95.0% of it.
+scheduler after the Pet asset is restored. The 153,600-byte RGB565 payload has
+a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS wire-only ceiling.
+The retained safe ping-pong run completed 285 frames in a 9.625-second
+measurement window (29.61 FPS), with 31.8 ms last transfer and 8.0 ms observed
+render work. The cumulative maxima since boot were 31.9 ms transfer and 8.6 ms
+render; maximum fields are not reset by the ten-second observation command.
+Allocation, transfer, and copy failures were zero. The two band buffers reserve
+38,400 bytes, one quarter of a full-screen RGB565 buffer. This is 15.8% faster
+than the sequential eight-band run and reaches 95.8% of the unsafe single-buffer
+overlap experiment without concurrent access to one pixel buffer.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

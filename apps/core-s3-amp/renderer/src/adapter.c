@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <errno.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <esp_cpu.h>
@@ -13,7 +12,13 @@
 #include <zephyr/kernel.h>
 #include "../../shared.h"
 
-#define FRAMEBUFFER_BYTES (320U * 240U * sizeof(uint16_t))
+#define DISPLAY_WIDTH 320U
+#define DISPLAY_HEIGHT 240U
+#define DMA_MAX_BYTES (4092U * 8U)
+#define BYTES_PER_LINE (DISPLAY_WIDTH * sizeof(uint16_t))
+#define BAND_COUNT 8U
+#define BAND_LINES (DISPLAY_HEIGHT / BAND_COUNT)
+#define BAND_BUFFER_BYTES (BAND_LINES * BYTES_PER_LINE)
 #define BOOT_MARKER ((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + 0x3f0U))
 #define AMP_SHARED ((volatile struct deskkin_amp_shared *)DT_REG_ADDR(DT_NODELABEL(shm0)))
 
@@ -25,19 +30,24 @@ enum renderer_stage {
 	RENDERER_FAILED = 5,
 };
 
+BUILD_ASSERT(DISPLAY_HEIGHT % BAND_COUNT == 0U);
+BUILD_ASSERT(BAND_LINES == 30U);
+BUILD_ASSERT(BAND_BUFFER_BYTES <= DMA_MAX_BYTES);
+
 struct display_request {
 	uint8_t buffer_index;
+	uint16_t y;
+	uint16_t line_count;
 };
 
 struct display_completion {
 	uint8_t buffer_index;
 	int8_t result;
 	uint32_t duration_us;
-	uint32_t copy_us;
 };
 
-K_MSGQ_DEFINE(display_requests, sizeof(struct display_request), 1, 4);
-K_MSGQ_DEFINE(display_completions, sizeof(struct display_completion), 1, 4);
+K_MSGQ_DEFINE(display_requests, sizeof(struct display_request), 2, 4);
+K_MSGQ_DEFINE(display_completions, sizeof(struct display_completion), 2, 4);
 K_THREAD_STACK_DEFINE(display_stack, 4096);
 static struct k_thread display_thread;
 
@@ -87,6 +97,9 @@ void deskkin_renderer_observe(uint8_t stage, uint32_t render_us, uint32_t transf
 	       !atomic_cas(&transfer_max_us, maximum, (atomic_val_t)transfer_us)) {
 		maximum = atomic_get(&transfer_max_us);
 	}
+	if (stage == RENDERER_PRESENTED) {
+		atomic_inc(&completed_frames);
+	}
 	const struct deskkin_renderer_heartbeat heartbeat = {
 		.magic = DESKKIN_HEARTBEAT_MAGIC,
 		.generation = (uint32_t)atomic_inc(&generation) + 1U,
@@ -135,12 +148,18 @@ uint16_t *deskkin_framebuffer_alloc(uint8_t index)
 	return framebuffer;
 }
 
-int deskkin_display_submit(uint8_t buffer_index)
+int deskkin_display_submit(uint8_t buffer_index, uint16_t y, uint16_t line_count)
 {
-	if (buffer_index != 0U || framebuffer == NULL) {
+	if (framebuffer == NULL || buffer_index >= 2U || line_count == 0U ||
+	    line_count > BAND_LINES ||
+	    y >= DISPLAY_HEIGHT || (uint32_t)y + line_count > DISPLAY_HEIGHT) {
 		return -EINVAL;
 	}
-	const struct display_request request = {.buffer_index = buffer_index};
+	const struct display_request request = {
+		.buffer_index = buffer_index,
+		.y = y,
+		.line_count = line_count,
+	};
 	const int result = k_msgq_put(&display_requests, &request, K_NO_WAIT);
 	if (result == 0) {
 		k_yield();
@@ -148,8 +167,7 @@ int deskkin_display_submit(uint8_t buffer_index)
 	return result;
 }
 
-int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us,
-				    uint32_t *copy_us)
+int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us)
 {
 	struct display_completion completion;
 	if (k_msgq_get(&display_completions, &completion, K_NO_WAIT) != 0) {
@@ -157,14 +175,16 @@ int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us
 	}
 	*buffer_index = completion.buffer_index;
 	*duration_us = completion.duration_us;
-	*copy_us = completion.copy_us;
-	atomic_set(&copy_last_us, (atomic_val_t)completion.copy_us);
 	if (completion.result != 0) {
 		atomic_inc(&transfer_failures);
 		return -EIO;
 	}
-	atomic_inc(&completed_frames);
 	return 1;
+}
+
+void deskkin_yield(void)
+{
+	k_yield();
 }
 
 int deskkin_display_enable(void)
@@ -192,23 +212,24 @@ static void display_entry(void *first, void *second, void *third)
 	ARG_UNUSED(first);
 	ARG_UNUSED(second);
 	ARG_UNUSED(third);
-	const struct display_buffer_descriptor descriptor = {
-		.buf_size = FRAMEBUFFER_BYTES,
-		.pitch = 320,
-		.width = 320,
-		.height = 240,
-	};
 	for (;;) {
 		struct display_request request;
 		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
+		const struct display_buffer_descriptor descriptor = {
+			.buf_size = (uint32_t)request.line_count * BYTES_PER_LINE,
+			.pitch = DISPLAY_WIDTH,
+			.width = DISPLAY_WIDTH,
+			.height = request.line_count,
+		};
 		const int64_t started = k_uptime_ticks();
-		const int result = display_write(display, 0, 0, &descriptor, framebuffer);
+		const uint16_t *pixels =
+			framebuffer + (size_t)request.buffer_index * BAND_LINES * DISPLAY_WIDTH;
+		const int result = display_write(display, 0, request.y, &descriptor, pixels);
 		const uint64_t elapsed = k_ticks_to_us_floor64(k_uptime_ticks() - started);
 		const struct display_completion completion = {
 			.buffer_index = request.buffer_index,
 			.result = result == 0 ? 0 : -1,
 			.duration_us = (uint32_t)MIN(elapsed, UINT32_MAX),
-			.copy_us = 0,
 		};
 		(void)k_msgq_put(&display_completions, &completion, K_FOREVER);
 	}

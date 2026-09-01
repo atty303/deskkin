@@ -1,10 +1,8 @@
 From: Deskkin contributors
 Subject: [PATCH] spi: esp32: yield while polling a transfer
 
-Let other ready threads run while a synchronous SPI transfer is progressing.
-This is particularly important for DMA-backed full-screen display writes,
-where busy polling otherwise serializes rendering and wire transfer on the
-same CPU.
+Let the renderer fill the other SRAM band while a DMA-backed display write is
+in progress on the same CPU.
 
 ---
  drivers/spi/spi_esp32_spim.c | 4 +++-

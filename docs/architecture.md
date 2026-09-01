@@ -98,22 +98,22 @@ one Rust service worker hosted by Zephyr threads. Embassy is a runtime adapter,
 not part of the portable core.
 
 The replacement CoreS3 runtime consists of two Zephyr AMP images. PROCPU owns
-USB control, boot/status supervision, LCD power/reset/backlight, and one static
-internal-DRAM RGB565 render buffer. APPCPU
+USB control, boot/status supervision, LCD power/reset/backlight, and two static
+internal-DRAM RGB565 30-line bands. APPCPU
 exclusively owns Slint software rendering, SPI2, GDMA, and LCD transfer. The
 kernels exchange bounded publication metadata through shared memory;
-framebuffer contents are never message payloads and SPI2 has one CPU owner.
+pixel contents are never message payloads and SPI2 has one CPU owner.
 Heartbeat snapshots use an explicit unstable marker and matching generations
 so the supervisor never accepts a payload while APPCPU is rewriting it.
 
 The atlas-free physical pipeline uses unthrottled full-screen rendering at
-320×240. APPCPU renders directly into one internal-DRAM buffer and submits it
-to GDMA without a bounce copy. Once GDMA starts, Slint writes the next frame
-into the same buffer while transfer continues. This deliberately trades frame
-coherence for throughput: one LCD write may contain pixels from adjacent
-logical frames. LCD SPI runs at 40 MHz and QIO flash at 80 MHz. The display and
-render threads share priority, and the synchronous SPI polling loop yields so
-both progress on APPCPU while the separate PROCPU remains responsive. The
+320×240. APPCPU renders directly into two ping-pong internal-DRAM bands without
+a bounce copy. Eight equal 30-line bands keep every 19,200-byte transfer below
+the 32,736-byte GDMA transaction limit. Slint fills one band while GDMA reads
+the other, and completion ownership prevents either band from being reused
+early. LCD SPI runs at 40 MHz and QIO flash at 80 MHz. Separate same-priority
+APPCPU render and display threads overlap safely while the separate PROCPU
+remains responsive. The
 bounded benchmark derives throughput from device heartbeat times at its first
 and last valid observations. It treats frame rate and latency as measurements,
 while stale or incomplete observation, unresponsive PROCPU status, allocation

@@ -263,31 +263,51 @@ class Phase3DeviceTests(unittest.TestCase):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
         self.assertIn("ASSERT(_end <= 0x3fcc5000", linker)
 
-    def test_amp_supervisor_uses_one_internal_framebuffer_without_psram(self):
+    def test_amp_supervisor_uses_two_equal_bands_without_psram(self):
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
         source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
         self.assertNotIn("CONFIG_ESP_SPIRAM", config)
-        self.assertIn("internal_framebuffer[320U * 240U]", source)
+        self.assertIn("internal_framebuffer[2U][320U * 30U]", source)
         self.assertNotIn("external_framebuffer", source)
         self.assertNotIn("psram_ready", source)
 
-    def test_amp_renderer_overlaps_next_render_with_single_buffer_transfer(self):
+    def test_amp_renderer_ping_pongs_eight_equal_bands_without_reuse_overlap(self):
         renderer = (ROOT / "apps/core-s3-amp/renderer/src/lib.rs").read_text(encoding="utf-8")
         adapter = (ROOT / "apps/core-s3-amp/renderer/src/adapter.c").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
+        self.assertIn("const BAND_COUNT: usize = 8;", renderer)
+        self.assertIn("assert!(BAND_LINES == 30);", renderer)
+        self.assertIn("renderer.render_by_line", renderer)
+        self.assertIn("const BUFFER_COUNT: usize = 2;", renderer)
+        self.assertIn("deskkin_display_submit", renderer)
+        self.assertIn("deskkin_display_take_completion", renderer)
+        self.assertIn("self.wait_for_buffer(self.current_buffer);", renderer)
+        self.assertIn("self.ownership.begin_render(self.current_buffer)", renderer)
+        self.assertIn("self.ownership.submit(self.current_buffer)", renderer)
+        self.assertNotIn("fn pixels_mut", renderer)
+        self.assertIn("self.current_buffer ^= 1;", renderer)
+        self.assertIn("#define BAND_COUNT 8U", adapter)
+        self.assertIn("BUILD_ASSERT(BAND_LINES == 30U);", adapter)
+        self.assertIn("BUILD_ASSERT(BAND_BUFFER_BYTES <= DMA_MAX_BYTES);", adapter)
+        self.assertIn("K_MSGQ_DEFINE(display_requests", adapter)
+        self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
+        self.assertIn("k_yield();", adapter)
         spi_patch = (ROOT / "patches/zephyr-core-s3/0003-yield-while-polling-esp32-spi.patch").read_text(
             encoding="utf-8"
         )
-        bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
-        submit = renderer.index("deskkin_display_submit(buffer)")
-        next_render = renderer.index("let Ok(next_render_us)")
-        completion = renderer.index("let Ok(transfer_us)")
-        self.assertLess(submit, next_render)
-        self.assertLess(next_render, completion)
-        self.assertIn("k_yield();", adapter)
-        self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
         self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
         self.assertIn("+\t\t\tk_yield();", spi_patch)
         self.assertIn("543fd300e1237cb09a41e4e7f443f9392370dc470e9eb89de7e8706a2bbe8abb", bootstrap)
+
+    def test_amp_band_ownership_requires_completion_before_reuse(self):
+        source = ROOT / "apps/core-s3-amp/renderer/src/band_ownership.rs"
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "band_ownership_test"
+            subprocess.run(
+                ["rustc", "--edition=2021", "--test", str(source), "-o", str(executable)],
+                check=True,
+            )
+            subprocess.run([str(executable)], check=True)
 
     def test_profile_schema_is_exact_and_rfc1918(self):
         self.assertEqual(device.validate_profile(self.profile()), self.profile())

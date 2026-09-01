@@ -35,7 +35,9 @@ static atomic_t transfer_failures;
 static atomic_t display_ready;
 static atomic_t boot_stage;
 static atomic_t boot_error;
-static __aligned(32) uint16_t internal_framebuffer[320U * 240U];
+/* Eight equal 30-line RGB565 bands keep every transfer below the 32,736-byte
+ * SPI DMA transaction limit without a special final-band size. */
+static __aligned(32) uint16_t internal_framebuffer[2U][320U * 30U];
 
 K_THREAD_STACK_DEFINE(supervisor_stack, 2048);
 static struct k_thread supervisor_thread;
