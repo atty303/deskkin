@@ -53,6 +53,8 @@ FPS. The last render and transfer took 7 ms and 32 ms; observed maxima were 8
 ms and 33 ms. Copy time, allocation failures, and transfer failures were zero,
 and PROCPU answered 229 bounded status requests during the unthrottled run.
 The 30.72 ms RGB565 wire time at 40 MHz remains the principal limit.
+The benchmark scene uses a fixed background color so content-driven full-screen
+luminance changes do not obscure panel flicker and tearing observations.
 
 ## Next work
 
