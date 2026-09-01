@@ -272,6 +272,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertNotIn("psram_ready", source)
 
     def test_amp_renderer_ping_pongs_eight_equal_bands_without_reuse_overlap(self):
+        config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(encoding="utf-8")
         renderer = (ROOT / "apps/core-s3-amp/renderer/src/lib.rs").read_text(encoding="utf-8")
         adapter = (ROOT / "apps/core-s3-amp/renderer/src/adapter.c").read_text(encoding="utf-8")
         bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
@@ -298,6 +299,8 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
         self.assertIn("+\t\t\tk_yield();", spi_patch)
         self.assertIn("543fd300e1237cb09a41e4e7f443f9392370dc470e9eb89de7e8706a2bbe8abb", bootstrap)
+        self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
+        self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
 
     def test_amp_band_ownership_requires_completion_before_reuse(self):
         source = ROOT / "apps/core-s3-amp/renderer/src/band_ownership.rs"

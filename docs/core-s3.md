@@ -187,8 +187,13 @@ prevents either band from being reused while it remains in flight.
 The validated hardware configuration is QIO flash at 80 MHz and LCD SPI at
 40 MHz. Same-priority APPCPU render and display threads alternate two band
 buffers. The SPI polling loop yields so Slint can fill the other band while
-GDMA transfers. USB supervision remains isolated on PROCPU. The ten-second
-pipeline benchmark does not reset the device; it observes an already booted,
+GDMA transfers. The continuously busy renderer uses a 1 kHz periodic kernel
+tick. The previous default tickless configuration stopped near a 32-bit 240 MHz
+CCOUNT wrap boundary while PROCPU remained responsive; the periodic 1 kHz
+configuration did not reproduce the stop across multiple wraps. Those two
+configuration changes have not been isolated from each other. USB supervision
+remains isolated on PROCPU. The ten-second pipeline benchmark does not reset
+the device; it observes an already booted,
 unthrottled run and calculates throughput from the device heartbeat times of
 its first and last valid samples. Frame rate and render/transfer latency are
 reported measurements, not acceptance thresholds. Live display and stable
@@ -208,14 +213,14 @@ This is an atlas-free maximum-throughput benchmark. It does not assert the
 animation cadence of a future scene; that policy belongs to the presentation
 scheduler after the Pet asset is restored. The 153,600-byte RGB565 payload has
 a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS wire-only ceiling.
-The retained safe ping-pong run completed 285 frames in a 9.625-second
-measurement window (29.61 FPS), with 31.8 ms last transfer and 8.0 ms observed
-render work. The cumulative maxima since boot were 31.9 ms transfer and 8.6 ms
-render; maximum fields are not reset by the ten-second observation command.
-Allocation, transfer, and copy failures were zero. The two band buffers reserve
-38,400 bytes, one quarter of a full-screen RGB565 buffer. This is 15.8% faster
-than the sequential eight-band run and reaches 95.8% of the unsafe single-buffer
-overlap experiment without concurrent access to one pixel buffer.
+The retained safe ping-pong run with the periodic 1 kHz configuration sustained
+six consecutive ten-second observations after crossing the former stop point.
+Each window measured 29.57--29.58 FPS; the final window completed 285 frames in
+9.635 seconds. Last transfer time was 32 ms, cumulative transfer maximum was
+32 ms, cumulative render maximum was 13 ms, and allocation, transfer, and copy
+failures were zero. Maximum fields are not reset by the observation command.
+The two band buffers reserve 38,400 bytes, one quarter of a full-screen RGB565
+buffer.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

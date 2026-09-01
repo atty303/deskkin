@@ -43,8 +43,21 @@ user-observed zero-clear line from concurrent reuse is structurally excluded
 because Slint and GDMA never own the same band; visual confirmation remains
 external to automated diagnostics.
 
+A subsequent physical run exposed an APPCPU freeze after approximately two
+32-bit 240 MHz CCOUNT wrap periods. The last heartbeat remained presented with
+no allocation or transfer failure, while its transfer duration saturated and
+PROCPU USB control stayed responsive. Changing the renderer from the default
+tickless configuration to a 1 kHz periodic kernel tick did not reproduce the
+freeze across multiple wraps and did not change the eight-band render/transfer
+overlap. Tick mode and tick frequency changed together and have not been
+isolated from each other. Six consecutive ten-second observations after the
+former stop point each measured 29.57--29.58 FPS. The final window completed
+285 frames in 9.635 seconds; last
+and maximum transfer time were 32 ms, maximum render time was 13 ms, failures
+remained zero, and heartbeat generation advanced through 7999.
+
 ## Next work
 
-Resume the presentation pipeline on the measured ping-pong band baseline. Panel
-scanout synchronization remains deferred. Fixed world, parallax, Notice, IMU,
-and servo work remain behind that foundation.
+Resume the presentation pipeline on the observed-stable ping-pong band baseline.
+Panel scanout synchronization remains deferred. Fixed world, parallax, Notice,
+IMU, and servo work remain behind that foundation.
