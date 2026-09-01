@@ -107,12 +107,13 @@ Heartbeat snapshots use an explicit unstable marker and matching generations
 so the supervisor never accepts a payload while APPCPU is rewriting it.
 
 The atlas-free physical pipeline uses unthrottled full-screen rendering at
-320×240. APPCPU renders a complete frame directly into the internal-DRAM
-buffer and submits it to GDMA without a bounce copy. LCD SPI runs at 40 MHz and
-QIO flash at 80 MHz. Rendering and transfer are sequential in this speed-limit
-baseline so their independently reported durations have one stable memory path.
-The APPCPU busy-polls each synchronous SPI transaction; it has no concurrent
-work in this baseline, while the separate PROCPU remains responsive. The
+320×240. APPCPU renders directly into one internal-DRAM buffer and submits it
+to GDMA without a bounce copy. Once GDMA starts, Slint writes the next frame
+into the same buffer while transfer continues. This deliberately trades frame
+coherence for throughput: one LCD write may contain pixels from adjacent
+logical frames. LCD SPI runs at 40 MHz and QIO flash at 80 MHz. The display and
+render threads share priority, and the synchronous SPI polling loop yields so
+both progress on APPCPU while the separate PROCPU remains responsive. The
 bounded benchmark derives throughput from device heartbeat times at its first
 and last valid observations. It treats frame rate and latency as measurements,
 while stale or incomplete observation, unresponsive PROCPU status, allocation

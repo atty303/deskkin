@@ -170,29 +170,35 @@ extern "C" fn rust_main() {
     let mut frame = 0_i32;
 
     let mut first_frame = true;
+    let Ok(mut submitted_render_us) = render_frame(&component, &window, &mut framebuffer, frame)
+    else {
+        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        return;
+    };
     loop {
-        let Ok(render_us) = render_frame(&component, &window, &mut framebuffer, frame) else {
-            unsafe { deskkin_renderer_observe(5, 0, 0) };
-            return;
-        };
         let buffer = framebuffer.back_index();
         if unsafe { deskkin_display_submit(buffer) } != 0 {
-            unsafe { deskkin_renderer_observe(5, render_us, 0) };
+            unsafe { deskkin_renderer_observe(5, submitted_render_us, 0) };
             return;
         }
-        unsafe { deskkin_renderer_observe(3, render_us, 0) };
+        unsafe { deskkin_renderer_observe(3, submitted_render_us, 0) };
+        frame = frame.wrapping_add(1);
+        let Ok(next_render_us) = render_frame(&component, &window, &mut framebuffer, frame) else {
+            unsafe { deskkin_renderer_observe(5, submitted_render_us, 0) };
+            return;
+        };
         let Ok(transfer_us) = take_completion(buffer) else {
-            unsafe { deskkin_renderer_observe(5, render_us, 0) };
+            unsafe { deskkin_renderer_observe(5, submitted_render_us, 0) };
             return;
         };
         if first_frame {
             if unsafe { deskkin_display_enable() } != 0 {
-                unsafe { deskkin_renderer_observe(5, render_us, transfer_us) };
+                unsafe { deskkin_renderer_observe(5, submitted_render_us, transfer_us) };
                 return;
             }
             first_frame = false;
         }
-        unsafe { deskkin_renderer_observe(4, render_us, transfer_us) };
-        frame = frame.wrapping_add(1);
+        unsafe { deskkin_renderer_observe(4, submitted_render_us, transfer_us) };
+        submitted_render_us = next_render_us;
     }
 }

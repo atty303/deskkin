@@ -168,7 +168,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "a9f806eff659b4a13c43273191362282f0bf5547a6190b66cef1ae067957b955":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "543fd300e1237cb09a41e4e7f443f9392370dc470e9eb89de7e8706a2bbe8abb":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 toolchain = state / "rustup/toolchains/deskkin-esp"

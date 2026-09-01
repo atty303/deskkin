@@ -141,7 +141,11 @@ int deskkin_display_submit(uint8_t buffer_index)
 		return -EINVAL;
 	}
 	const struct display_request request = {.buffer_index = buffer_index};
-	return k_msgq_put(&display_requests, &request, K_NO_WAIT);
+	const int result = k_msgq_put(&display_requests, &request, K_NO_WAIT);
+	if (result == 0) {
+		k_yield();
+	}
+	return result;
 }
 
 int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us,
@@ -228,7 +232,7 @@ int main(void)
 	__atomic_store_n(&AMP_SHARED->display_spi_hz, display_spi_frequency_hz(), __ATOMIC_RELEASE);
 	*BOOT_MARKER = 8U;
 	k_thread_create(&display_thread, display_stack, K_THREAD_STACK_SIZEOF(display_stack),
-			display_entry, NULL, NULL, NULL, -1, 0, K_NO_WAIT);
+			display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
 	rust_main();
 	return 0;
 }

@@ -271,6 +271,24 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertNotIn("external_framebuffer", source)
         self.assertNotIn("psram_ready", source)
 
+    def test_amp_renderer_overlaps_next_render_with_single_buffer_transfer(self):
+        renderer = (ROOT / "apps/core-s3-amp/renderer/src/lib.rs").read_text(encoding="utf-8")
+        adapter = (ROOT / "apps/core-s3-amp/renderer/src/adapter.c").read_text(encoding="utf-8")
+        spi_patch = (ROOT / "patches/zephyr-core-s3/0003-yield-while-polling-esp32-spi.patch").read_text(
+            encoding="utf-8"
+        )
+        bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
+        submit = renderer.index("deskkin_display_submit(buffer)")
+        next_render = renderer.index("let Ok(next_render_us)")
+        completion = renderer.index("let Ok(transfer_us)")
+        self.assertLess(submit, next_render)
+        self.assertLess(next_render, completion)
+        self.assertIn("k_yield();", adapter)
+        self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
+        self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
+        self.assertIn("+\t\t\tk_yield();", spi_patch)
+        self.assertIn("543fd300e1237cb09a41e4e7f443f9392370dc470e9eb89de7e8706a2bbe8abb", bootstrap)
+
     def test_profile_schema_is_exact_and_rfc1918(self):
         self.assertEqual(device.validate_profile(self.profile()), self.profile())
         for change in ({"extra": 1}, {"host_ipv4": "8.8.8.8"}, {"password": "short"}, {"schema_version": 2}):

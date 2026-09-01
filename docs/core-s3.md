@@ -178,15 +178,17 @@ It reserves one 320×240 RGB565 render buffer in internal DRAM, then publishes
 only its address and readiness.
 The PROCPU linker region ends at the APPCPU DRAM origin, so image growth cannot
 silently overlap the renderer. APPCPU exclusively owns the Slint instance, software
-renderer, SPI2, GDMA, and display driver. It renders each full frame directly
-into the internal buffer and transfers the completed frame without a bounce
-copy. Rendering and transfer are sequential in this baseline.
+renderer, SPI2, GDMA, and display driver. It renders directly into the internal
+buffer without a bounce copy. After each transfer starts, Slint immediately
+writes the next logical frame into the same buffer. The resulting LCD write is
+not a coherent-frame boundary and can contain pixels from adjacent frames.
 
 The validated hardware configuration is QIO flash at 80 MHz and LCD SPI at
-40 MHz. The APPCPU busy-polls the synchronous SPI transactions because render
-and transfer do not overlap in this baseline; sleeping at transaction
-boundaries only adds scheduler latency, while USB supervision remains isolated
-on PROCPU. The ten-second pipeline benchmark does not reset the device; it observes an already booted,
+40 MHz. The display and render threads use the same priority. Submission yields
+once so the display thread starts GDMA, then the synchronous SPI polling loop
+yields while Slint renders. This overlaps SRAM writes and GDMA reads without a
+second framebuffer; USB supervision remains isolated on PROCPU. The ten-second
+pipeline benchmark does not reset the device; it observes an already booted,
 unthrottled run and calculates throughput from the device heartbeat times of
 its first and last valid samples. Frame rate and render/transfer latency are
 reported measurements, not acceptance thresholds. Live display and stable
@@ -205,10 +207,12 @@ mise run core-s3:amp-benchmark -- --device /dev/ttyACM0
 This is an atlas-free maximum-throughput benchmark. It does not assert the
 animation cadence of a future scene; that policy belongs to the presentation
 scheduler after the Pet asset is restored. The retained physical baseline
-completes 255 frames in a 9.619-second measurement window (26.50 FPS), with
-31.1 ms maximum full-screen transfer and observed 4.2--7.6 ms render samples.
-The 153,600-byte RGB565 payload has a 30.72 ms wire-only time at 40 MHz, placing
-the measured transfer within 1.2% of that limit.
+completes 298 frames in a 9.637-second measurement window (30.92 FPS), with
+31.0 ms last full-screen transfer and 4.3 ms last render. The cumulative maxima
+since boot were 32.2 ms transfer and 7.6 ms render; the maximum fields are not
+reset at the start of the ten-second observation window. The 153,600-byte
+RGB565 payload has a 30.72 ms wire-only time at 40 MHz, giving a 32.55 FPS
+wire-only ceiling; the measured pipeline reaches 95.0% of it.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

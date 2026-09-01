@@ -30,15 +30,16 @@ connector does not access an external service.
 ## Active work
 
 The physical 40 MHz full-screen speed baseline is complete. One internal-DRAM
-framebuffer removes PSRAM and bounce-copy traffic, and rendering and GDMA
-transfer remain sequential so their costs stay independently observable. A
-ten-second physical run completed 255 frames at 26.50 FPS with 31.1 ms maximum
-full-screen transfer, zero copy time, and no allocation or transfer failure.
-The 153,600-byte pixel payload alone requires 30.72 ms at 40 MHz, so the
-retained path reaches 98.8% of the wire-only limit. Busy polling is retained on
-the isolated APPCPU because a one-millisecond sleep in each SPI transaction
-raised transfer time to 33.2 ms. The Rust release profile now favors execution
-speed with optimization level 3; observed render samples were 4.2--7.6 ms.
+framebuffer removes PSRAM and bounce-copy traffic. After GDMA starts reading a
+frame, Slint immediately renders the next frame into that same buffer; frame
+coherence is intentionally not guaranteed. The display and render threads
+share priority and yield at the SPI polling boundary. A ten-second physical
+run completed 298 frames at 30.92 FPS with 31.0 ms last full-screen transfer
+and 4.3 ms last render. Since boot, the observed maxima were 32.2 ms transfer
+and 7.6 ms render. Copy time, allocation failures, and transfer failures were
+zero. The 40 MHz wire-only ceiling is 32.55 FPS, so the retained path reaches
+95.0% of that ceiling. The separate PROCPU remained responsive throughout the
+run.
 
 ## Next work
 
