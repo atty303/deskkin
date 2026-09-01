@@ -10,18 +10,45 @@ export component StatusWindow inherits Window {
     in property <color> status-color: #f3b33d;
     in property <bool> notice-visible: false;
     in property <string> notice-text: "";
+    in property <image> world-frame;
+    in property <bool> world-mode: false;
+    in property <bool> capture-mode: false;
+    in property <bool> capture-notice: false;
+    callback yaw-sample(int, bool);
 
     background: #16191d;
 
     ApplicationSurface {
-        x: 24px;
-        y: 58px;
+        x: root.capture-mode ? 0px : 24px;
+        y: root.capture-mode ? 0px : 58px;
         width: 272px;
         height: 124px;
+        visible: !root.world-mode || root.capture-mode;
         status-text: root.status-text;
         status-color: root.status-color;
-        notice-visible: root.notice-visible;
+        notice-visible: root.capture-mode ? root.capture-notice : root.notice-visible;
         notice-text: root.notice-text;
+        capture-only-notice: root.capture-mode && root.capture-notice;
+    }
+
+    Image {
+        width: 100%;
+        height: 100%;
+        visible: root.world-mode && !root.capture-mode;
+        source: root.world-frame;
+        image-fit: fill;
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        visible: root.world-mode && !root.capture-mode;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left) {
+                root.yaw-sample(self.mouse-x / 1px, event.kind != PointerEventKind.up && event.kind != PointerEventKind.cancel);
+            }
+        }
+        moved => { root.yaw-sample(self.mouse-x / 1px, true); }
     }
 }
 

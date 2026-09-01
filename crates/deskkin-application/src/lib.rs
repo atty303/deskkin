@@ -1,7 +1,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-pub use application_core::{Lifecycle, LocalEffectId, SurfaceClass};
+pub use application_core::{Lifecycle, LocalEffectId};
 pub use application_features::{availability, synthetic_notice};
 
 pub const FEATURE_COUNT: usize = 2;
@@ -77,23 +77,19 @@ impl Default for EffectBatch {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FeatureSurface {
-    Availability(availability::Surface),
-    SyntheticNotice(synthetic_notice::Surface),
+pub struct ApplicationViews {
+    pub availability: Option<availability::Surface>,
+    pub synthetic_notice: Option<synthetic_notice::NoticeKind>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SurfaceRequest {
-    pub owner: FeatureId,
-    pub class: SurfaceClass,
-    pub surface: FeatureSurface,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ApplicationView {
-    Empty,
-    Availability(availability::Surface),
-    SyntheticNotice(synthetic_notice::NoticeKind),
+impl ApplicationViews {
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            availability: None,
+            synthetic_notice: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,7 +146,7 @@ pub enum TransitionError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Transition {
-    pub view: ApplicationView,
+    pub view: ApplicationViews,
     pub effects: EffectBatch,
 }
 
@@ -165,7 +161,7 @@ pub struct Application {
     state: ApplicationState,
     availability: availability::AvailabilityFeature,
     synthetic_notice: synthetic_notice::SyntheticNoticeFeature,
-    view: ApplicationView,
+    view: ApplicationViews,
 }
 
 impl Default for Application {
@@ -181,12 +177,12 @@ impl Application {
             state: ApplicationState::Stopped,
             availability: availability::AvailabilityFeature::new(),
             synthetic_notice: synthetic_notice::SyntheticNoticeFeature::new(),
-            view: ApplicationView::Empty,
+            view: ApplicationViews::empty(),
         }
     }
 
     #[must_use]
-    pub const fn view(&self) -> ApplicationView {
+    pub const fn view(&self) -> ApplicationViews {
         self.view
     }
 
@@ -199,7 +195,7 @@ impl Application {
     pub fn transition(&mut self, input: ApplicationInput) -> Result<Transition, TransitionError> {
         let mut candidate = *self;
         let effects = candidate.apply(input)?;
-        candidate.view = candidate.selected_view();
+        candidate.view = candidate.current_views();
         *self = candidate;
         Ok(Transition {
             view: self.view,
@@ -283,22 +279,11 @@ impl Application {
         Ok(effects)
     }
 
-    fn selected_view(&self) -> ApplicationView {
-        let requests = [
-            self.availability.surface().map(|surface| SurfaceRequest {
-                owner: FeatureId::Availability,
-                class: surface.class(),
-                surface: FeatureSurface::Availability(surface),
-            }),
-            self.synthetic_notice
-                .surface()
-                .map(|surface| SurfaceRequest {
-                    owner: FeatureId::SyntheticNotice,
-                    class: surface.class(),
-                    surface: FeatureSurface::SyntheticNotice(surface),
-                }),
-        ];
-        select_surface(requests).map_or(ApplicationView::Empty, request_view)
+    fn current_views(&self) -> ApplicationViews {
+        ApplicationViews {
+            availability: self.availability.surface(),
+            synthetic_notice: self.synthetic_notice.surface().map(|surface| surface.kind),
+        }
     }
 }
 
@@ -380,34 +365,6 @@ const fn wrap_notice(effect: synthetic_notice::Effect) -> Effect {
     }
 }
 
-fn select_surface(requests: [Option<SurfaceRequest>; FEATURE_COUNT]) -> Option<SurfaceRequest> {
-    let mut selected = None;
-    for request in requests.into_iter().flatten() {
-        if selected.is_none_or(|current: SurfaceRequest| {
-            request.class.precedence() > current.class.precedence()
-                || (request.class == current.class
-                    && registry_rank(request.owner) < registry_rank(current.owner))
-        }) {
-            selected = Some(request);
-        }
-    }
-    selected
-}
-
-const fn registry_rank(feature: FeatureId) -> u8 {
-    match feature {
-        FeatureId::Availability => 0,
-        FeatureId::SyntheticNotice => 1,
-    }
-}
-
-const fn request_view(request: SurfaceRequest) -> ApplicationView {
-    match request.surface {
-        FeatureSurface::Availability(surface) => ApplicationView::Availability(surface),
-        FeatureSurface::SyntheticNotice(surface) => ApplicationView::SyntheticNotice(surface.kind),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,7 +385,10 @@ mod tests {
         assert_eq!(read.id.feature, FeatureId::Availability);
         assert_eq!(
             application.view(),
-            ApplicationView::Availability(availability::Surface::Unknown)
+            ApplicationViews {
+                availability: Some(availability::Surface::Unknown),
+                synthetic_notice: None,
+            }
         );
         application
             .transition(ApplicationInput::Lifecycle(Lifecycle::Stop))
@@ -448,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn namespaced_effects_do_not_collide_and_notice_preempts() {
+    fn namespaced_effects_do_not_collide_and_views_coexist() {
         let mut application = Application::new();
         let read = start(&mut application);
         let notice = application
@@ -463,7 +423,10 @@ mod tests {
         assert_ne!(read.id.feature, notice.id.feature);
         assert_eq!(
             application.view(),
-            ApplicationView::SyntheticNotice(synthetic_notice::NoticeKind::CompositionCheck)
+            ApplicationViews {
+                availability: Some(availability::Surface::Unknown),
+                synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
+            }
         );
 
         let before = application;
@@ -547,10 +510,13 @@ mod tests {
                 }),
             ))
             .unwrap();
-        assert!(matches!(
+        assert_eq!(
             application.view(),
-            ApplicationView::SyntheticNotice(_)
-        ));
+            ApplicationViews {
+                availability: Some(availability::Surface::Unavailable),
+                synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
+            }
+        );
         application
             .transition(ApplicationInput::synthetic_notice_command(
                 synthetic_notice::Command::Clear,
@@ -558,7 +524,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             application.view(),
-            ApplicationView::Availability(availability::Surface::Unavailable)
+            ApplicationViews {
+                availability: Some(availability::Surface::Unavailable),
+                synthetic_notice: None,
+            }
         );
     }
 
@@ -597,7 +566,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             application.view(),
-            ApplicationView::Availability(availability::Surface::Unknown)
+            ApplicationViews {
+                availability: Some(availability::Surface::Unknown),
+                synthetic_notice: None,
+            }
         );
         let retry = application
             .transition(ApplicationInput::availability(
@@ -611,25 +583,6 @@ mod tests {
             .get(0)
             .unwrap();
         assert_eq!(retry.id.feature, FeatureId::Availability);
-    }
-
-    #[test]
-    fn arbiter_is_stable_for_equal_classes_and_empty() {
-        assert_eq!(select_surface([None, None]), None);
-        let first = SurfaceRequest {
-            owner: FeatureId::Availability,
-            class: SurfaceClass::Information,
-            surface: FeatureSurface::Availability(availability::Surface::Available),
-        };
-        let second = SurfaceRequest {
-            owner: FeatureId::SyntheticNotice,
-            class: SurfaceClass::Information,
-            surface: FeatureSurface::SyntheticNotice(synthetic_notice::Surface {
-                kind: synthetic_notice::NoticeKind::CompositionCheck,
-            }),
-        };
-        assert_eq!(select_surface([Some(first), Some(second)]), Some(first));
-        assert_eq!(select_surface([Some(second), Some(first)]), Some(first));
     }
 
     #[test]

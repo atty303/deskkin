@@ -23,22 +23,6 @@ impl LocalEffectId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SurfaceClass {
-    Ambient,
-    Information,
-}
-
-impl SurfaceClass {
-    #[must_use]
-    pub const fn precedence(self) -> u8 {
-        match self {
-            Self::Ambient => 0,
-            Self::Information => 1,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,10 +31,5 @@ mod tests {
     fn local_effect_identity_is_nonzero() {
         assert_eq!(LocalEffectId::new(0), None);
         assert_eq!(LocalEffectId::new(1).unwrap().get(), 1);
-    }
-
-    #[test]
-    fn information_precedes_ambient() {
-        assert!(SurfaceClass::Information.precedence() > SurfaceClass::Ambient.precedence());
     }
 }

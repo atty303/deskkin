@@ -2,6 +2,7 @@ mod diagnostics;
 mod presenter;
 mod runtime;
 mod scenario_driver;
+mod world;
 
 slint::include_modules!();
 

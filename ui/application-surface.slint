@@ -1,25 +1,23 @@
 import { StatusSurface } from "status-surface.slint";
 
-export component ApplicationSurface inherits Rectangle {
+export component AvailabilityBillboard inherits Rectangle {
     in property <string> status-text: "Unknown";
     in property <color> status-color: #f3b33d;
-    in property <bool> notice-visible: false;
-    in property <string> notice-text: "";
-
-    background: transparent;
 
     StatusSurface {
         width: 100%;
         height: 100%;
-        visible: !root.notice-visible;
         status-text: root.status-text;
         status-color: root.status-color;
     }
+}
+
+export component NoticeBillboard inherits Rectangle {
+    in property <string> notice-text: "Deskkin notice";
 
     Rectangle {
         width: 100%;
         height: 100%;
-        visible: root.notice-visible;
         border-radius: 18px;
         background: #25334a;
         border-width: 4px;
@@ -33,5 +31,32 @@ export component ApplicationSurface inherits Rectangle {
             horizontal-alignment: center;
             vertical-alignment: center;
         }
+    }
+}
+
+export component ApplicationSurface inherits Rectangle {
+    in property <string> status-text: "Unknown";
+    in property <color> status-color: #f3b33d;
+    in property <bool> notice-visible: false;
+    in property <string> notice-text: "";
+    in property <bool> capture-only-notice: false;
+
+    background: transparent;
+
+    AvailabilityBillboard {
+        width: 100%;
+        height: 100%;
+        status-text: root.status-text;
+        status-color: root.status-color;
+        visible: !root.capture-only-notice;
+    }
+
+    NoticeBillboard {
+        x: root.capture-only-notice ? 0px : root.width * 0.12;
+        y: root.capture-only-notice ? 0px : root.height * 0.54;
+        width: root.capture-only-notice ? 100% : 76%;
+        height: root.capture-only-notice ? 100% : 42%;
+        visible: root.notice-visible;
+        notice-text: root.notice-text;
     }
 }

@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use deskkin_application::{
-    Application, ApplicationEffectId, ApplicationInput, ApplicationView, Effect, EffectRequest,
+    Application, ApplicationEffectId, ApplicationInput, ApplicationViews, Effect, EffectRequest,
     FeatureId, Lifecycle,
     availability::{
         self, Availability, Input as AvailabilityInput, ReadCompleted, ReadError, RefreshDue,
@@ -32,6 +32,7 @@ use crate::diagnostics::{
     resource_identity_for,
 };
 use crate::presenter::apply_view;
+use crate::world::WorldScene;
 use deskkin_protocol_client::{AvailabilityValue, ProtocolAdapter, ProtocolEvent};
 
 struct NativeRuntime {
@@ -45,6 +46,8 @@ struct NativeRuntime {
     session_run_id: String,
     recorder: Recorder,
     active_read: Option<ActiveRead>,
+    world: WorldScene,
+    world_timer: Timer,
 }
 
 struct ActiveRead {
@@ -62,7 +65,7 @@ struct ActiveRead {
 /// native event loop cannot start.
 pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
     let ui = StatusWindow::new().map_err(|error| error.to_string())?;
-    apply_view(&ui, ApplicationView::Empty);
+    apply_view(&ui, ApplicationViews::empty());
     let runtime = Rc::new(RefCell::new(NativeRuntime {
         core: Application::new(),
         ui: ui.clone_strong(),
@@ -74,6 +77,8 @@ pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
         session_run_id: new_run_id("native"),
         recorder: Recorder::from_environment(recording),
         active_read: None,
+        world: WorldScene::new(),
+        world_timer: Timer::default(),
     }));
     let transition = runtime
         .borrow_mut()
@@ -88,11 +93,28 @@ pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
             .get(0)
             .ok_or("start did not request read")?,
     )?;
+    let weak = Rc::downgrade(&runtime);
+    ui.on_yaw_sample(move |x, pressed| {
+        if let Some(runtime) = weak.upgrade() {
+            runtime
+                .borrow_mut()
+                .world
+                .touch_sample(i16::try_from(x).unwrap_or(i16::MAX), pressed);
+        }
+    });
+    let weak = Rc::downgrade(&runtime);
+    runtime
+        .borrow()
+        .world_timer
+        .start(TimerMode::Repeated, Duration::from_millis(50), move || {
+            update_native_world(&weak);
+        });
     let result = ui.run().map_err(|error| error.to_string());
     let mut state = runtime.borrow_mut();
     state.read_timer.stop();
     state.read_timeout_timer.stop();
     state.refresh_timer.stop();
+    state.world_timer.stop();
     if let Some(active) = state.active_read.take() {
         let elapsed_ms = u64::try_from(active.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         state.logical_time_ms = active.started_ms.saturating_add(elapsed_ms);
@@ -105,6 +127,18 @@ pub fn run_desktop(recording: RecordingMode) -> Result<(), String> {
         );
     }
     result
+}
+
+fn update_native_world(weak: &Weak<RefCell<NativeRuntime>>) {
+    let Some(runtime) = weak.upgrade() else {
+        return;
+    };
+    let mut state = runtime.borrow_mut();
+    let views = state.core.view();
+    let ui = state.ui.clone_strong();
+    if state.world.tick(&ui, views, 50).is_err() {
+        ui.set_world_mode(false);
+    }
 }
 
 struct ProtocolRuntime {
@@ -132,6 +166,8 @@ struct ProtocolRuntime {
     diagnostic_spans: std::sync::Mutex<std::collections::HashMap<String, ProtocolDiagnosticSpan>>,
     owner_events: std::sync::mpsc::Receiver<OwnerEvent>,
     identity: IdentityStore,
+    world: WorldScene,
+    world_timer: Timer,
 }
 
 struct ProtocolDiagnosticSpan {
@@ -141,6 +177,22 @@ struct ProtocolDiagnosticSpan {
     operation_kind: Operation,
     session_context: Option<[u8; 16]>,
     operation_context: Option<[u8; 16]>,
+}
+
+fn update_protocol_world(weak: &Weak<RefCell<ProtocolRuntime>>) {
+    let Some(runtime) = weak.upgrade() else {
+        return;
+    };
+    let mut state = runtime.borrow_mut();
+    if !state.connected {
+        state.ui.set_world_mode(false);
+        return;
+    }
+    let views = state.core.view();
+    let ui = state.ui.clone_strong();
+    if state.world.tick(&ui, views, 50).is_err() {
+        ui.set_world_mode(false);
+    }
 }
 
 enum NetworkCommand {
@@ -440,7 +492,7 @@ pub fn run_protocol_desktop_with_recording(
             Err(_) => Err("simulator owner control startup panicked".into()),
         };
     }
-    apply_view(&ui, ApplicationView::Empty);
+    apply_view(&ui, ApplicationViews::empty());
     let (network_commands, network_command_receiver) = std::sync::mpsc::sync_channel(8);
     let (network_control, network_control_receiver) = std::sync::mpsc::channel();
     let (network_event_sender, network_events) = std::sync::mpsc::channel();
@@ -509,6 +561,8 @@ pub fn run_protocol_desktop_with_recording(
         diagnostic_spans: std::sync::Mutex::new(std::collections::HashMap::new()),
         owner_events,
         identity,
+        world: WorldScene::new(),
+        world_timer: Timer::default(),
     }));
     let weak = Rc::downgrade(&runtime);
     runtime.borrow().owner_event_timer.start(
@@ -522,6 +576,22 @@ pub fn run_protocol_desktop_with_recording(
         Duration::from_millis(10),
         move || handle_network_events(&weak),
     );
+    let weak = Rc::downgrade(&runtime);
+    ui.on_yaw_sample(move |x, pressed| {
+        if let Some(runtime) = weak.upgrade() {
+            runtime
+                .borrow_mut()
+                .world
+                .touch_sample(i16::try_from(x).unwrap_or(i16::MAX), pressed);
+        }
+    });
+    let weak = Rc::downgrade(&runtime);
+    runtime
+        .borrow()
+        .world_timer
+        .start(TimerMode::Repeated, Duration::from_millis(50), move || {
+            update_protocol_world(&weak);
+        });
     attempt_protocol_connect(&runtime)?;
     let effect = runtime
         .borrow_mut()
@@ -539,6 +609,7 @@ pub fn run_protocol_desktop_with_recording(
     state.reconnect_timer.stop();
     state.owner_event_timer.stop();
     state.network_event_timer.stop();
+    state.world_timer.stop();
     let _ = state.network_control.send(NetworkControl::Shutdown);
     if let Some(network) = state.network.take() {
         network

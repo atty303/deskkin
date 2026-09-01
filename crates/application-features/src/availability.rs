@@ -1,4 +1,4 @@
-use application_core::{Lifecycle, LocalEffectId, SurfaceClass};
+use application_core::{Lifecycle, LocalEffectId};
 
 pub const REFRESH_DELAY_MS: u32 = 5_000;
 
@@ -13,13 +13,6 @@ pub enum Surface {
     Unknown,
     Available,
     Unavailable,
-}
-
-impl Surface {
-    #[must_use]
-    pub const fn class(self) -> SurfaceClass {
-        SurfaceClass::Ambient
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

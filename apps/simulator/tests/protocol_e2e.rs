@@ -2,7 +2,7 @@ use std::fs;
 use std::thread;
 
 use deskkin_application::{
-    Application, ApplicationEffectId, ApplicationInput, ApplicationView, FeatureId, Lifecycle,
+    Application, ApplicationEffectId, ApplicationInput, ApplicationViews, FeatureId, Lifecycle,
     LocalEffectId,
     availability::{
         self, Availability, Input as AvailabilityInput, ReadCompleted, ReadError, RefreshDue,
@@ -63,7 +63,10 @@ fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     .unwrap();
     assert_eq!(
         application.view(),
-        ApplicationView::Availability(availability::Surface::Available)
+        ApplicationViews {
+            availability: Some(availability::Surface::Available),
+            synthetic_notice: None,
+        }
     );
     application
         .transition(ApplicationInput::availability(
@@ -77,7 +80,10 @@ fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     apply_protocol_event(&mut application, adapter.disconnected().unwrap());
     assert_eq!(
         application.view(),
-        ApplicationView::Availability(availability::Surface::Unknown)
+        ApplicationViews {
+            availability: Some(availability::Surface::Unknown),
+            synthetic_notice: None,
+        }
     );
 
     let read = application
@@ -105,7 +111,10 @@ fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     );
     assert_eq!(
         application.view(),
-        ApplicationView::Availability(availability::Surface::Available)
+        ApplicationViews {
+            availability: Some(availability::Surface::Available),
+            synthetic_notice: None,
+        }
     );
 }
 

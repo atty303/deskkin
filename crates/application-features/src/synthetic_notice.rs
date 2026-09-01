@@ -1,4 +1,4 @@
-use application_core::{Lifecycle, LocalEffectId, SurfaceClass};
+use application_core::{Lifecycle, LocalEffectId};
 
 pub const NOTICE_LIFETIME_MS: u32 = 2_000;
 
@@ -10,13 +10,6 @@ pub enum NoticeKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Surface {
     pub kind: NoticeKind,
-}
-
-impl Surface {
-    #[must_use]
-    pub const fn class(self) -> SurfaceClass {
-        SurfaceClass::Information
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

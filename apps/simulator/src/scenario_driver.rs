@@ -2,7 +2,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use deskkin_application::{
-    Application, ApplicationInput, ApplicationView, Effect, EffectRequest, Lifecycle,
+    Application, ApplicationInput, ApplicationViews, Effect, EffectRequest, Lifecycle,
     availability::{
         self, Availability, Input as AvailabilityInput, ReadCompleted, ReadError, RefreshDue,
         TimerArmCompleted,
@@ -113,7 +113,7 @@ struct TraceRecord {
     virtual_time_ms: u64,
     kind: TraceKind,
     effect_id: Option<u64>,
-    view: Option<ViewName>,
+    view: Option<ViewSetName>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -141,13 +141,6 @@ enum EffectName {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum SurfaceClassName {
-    Ambient,
-    Information,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 enum TransitionOutcome {
     Success,
     Rejected,
@@ -159,29 +152,68 @@ struct CompositionRecord {
     routed_feature: Option<FeatureName>,
     lifecycle: Option<LifecycleName>,
     effect: Option<EffectName>,
-    surface_owner: Option<FeatureName>,
-    surface_class: Option<SurfaceClassName>,
+    views: ViewSetName,
     outcome: TransitionOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum ViewName {
-    Empty,
+enum AvailabilityViewName {
     Unknown,
     Available,
     Unavailable,
-    Notice,
 }
 
-impl From<ApplicationView> for ViewName {
-    fn from(value: ApplicationView) -> Self {
-        match value {
-            ApplicationView::Empty => Self::Empty,
-            ApplicationView::Availability(availability::Surface::Unknown) => Self::Unknown,
-            ApplicationView::Availability(availability::Surface::Available) => Self::Available,
-            ApplicationView::Availability(availability::Surface::Unavailable) => Self::Unavailable,
-            ApplicationView::SyntheticNotice(_) => Self::Notice,
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NoticeViewName {
+    CompositionCheck,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ViewSetName {
+    availability: Option<AvailabilityViewName>,
+    synthetic_notice: Option<NoticeViewName>,
+}
+
+impl ViewSetName {
+    const UNKNOWN: Self = Self {
+        availability: Some(AvailabilityViewName::Unknown),
+        synthetic_notice: None,
+    };
+    #[cfg(test)]
+    const AVAILABLE: Self = Self {
+        availability: Some(AvailabilityViewName::Available),
+        synthetic_notice: None,
+    };
+    #[cfg(test)]
+    const UNAVAILABLE: Self = Self {
+        availability: Some(AvailabilityViewName::Unavailable),
+        synthetic_notice: None,
+    };
+    #[cfg(test)]
+    const AVAILABLE_WITH_NOTICE: Self = Self {
+        availability: Some(AvailabilityViewName::Available),
+        synthetic_notice: Some(NoticeViewName::CompositionCheck),
+    };
+    #[cfg(test)]
+    const UNAVAILABLE_WITH_NOTICE: Self = Self {
+        availability: Some(AvailabilityViewName::Unavailable),
+        synthetic_notice: Some(NoticeViewName::CompositionCheck),
+    };
+}
+
+impl From<ApplicationViews> for ViewSetName {
+    fn from(value: ApplicationViews) -> Self {
+        Self {
+            availability: value.availability.map(|availability| match availability {
+                availability::Surface::Unknown => AvailabilityViewName::Unknown,
+                availability::Surface::Available => AvailabilityViewName::Available,
+                availability::Surface::Unavailable => AvailabilityViewName::Unavailable,
+            }),
+            synthetic_notice: value.synthetic_notice.map(|notice| match notice {
+                synthetic_notice::NoticeKind::CompositionCheck => NoticeViewName::CompositionCheck,
+            }),
         }
     }
 }
@@ -190,7 +222,7 @@ impl From<ApplicationView> for ViewName {
 struct Replay {
     semantic_records: Vec<TraceRecord>,
     composition_records: Vec<CompositionRecord>,
-    views: Vec<ViewName>,
+    views: Vec<ViewSetName>,
     virtual_timestamps_ms: Vec<u64>,
     rgb565_frames: Vec<Vec<u8>>,
 }
@@ -210,7 +242,7 @@ struct ReplayExecution {
     application: Application,
     trace: Vec<TraceRecord>,
     composition_records: Vec<CompositionRecord>,
-    views: Vec<ViewName>,
+    views: Vec<ViewSetName>,
     times: Vec<u64>,
     frames: Vec<Vec<u8>>,
     refreshes: Vec<RefreshEvidence>,
@@ -411,7 +443,7 @@ fn initialize_replay(
         virtual_time_ms: 0,
         kind: TraceKind::CommandStart,
         effect_id: None,
-        view: Some(ViewName::Unknown),
+        view: Some(ViewSetName::UNKNOWN),
     }];
     let start = application
         .transition(ApplicationInput::Lifecycle(Lifecycle::Start))
@@ -426,8 +458,7 @@ fn initialize_replay(
         routed_feature: None,
         lifecycle: Some(LifecycleName::Start),
         effect: Some(EffectName::ReadAvailability),
-        surface_owner: Some(FeatureName::Availability),
-        surface_class: Some(SurfaceClassName::Ambient),
+        views: start.view.into(),
         outcome: TransitionOutcome::Success,
     }];
 
@@ -536,12 +567,7 @@ fn execute_replay(
         routed_feature: Some(FeatureName::Availability),
         lifecycle: None,
         effect: Some(EffectName::ArmRefreshTimer),
-        surface_owner: notice_timer
-            .map(|_| FeatureName::SyntheticNotice)
-            .or(Some(FeatureName::Availability)),
-        surface_class: notice_timer
-            .map(|_| SurfaceClassName::Information)
-            .or(Some(SurfaceClassName::Ambient)),
+        views: application.view().into(),
         outcome: TransitionOutcome::Success,
     });
 
@@ -581,7 +607,7 @@ fn show_notice_and_arm(
     ui: &StatusWindow,
     trace: &mut Vec<TraceRecord>,
     composition_records: &mut Vec<CompositionRecord>,
-    views: &mut Vec<ViewName>,
+    views: &mut Vec<ViewSetName>,
     times: &mut Vec<u64>,
     frames: &mut Vec<Vec<u8>>,
     window: &Rc<MinimalSoftwareWindow>,
@@ -618,8 +644,7 @@ fn show_notice_and_arm(
         routed_feature: Some(FeatureName::SyntheticNotice),
         lifecycle: None,
         effect: Some(EffectName::ArmNoticeExpiry),
-        surface_owner: Some(FeatureName::SyntheticNotice),
-        surface_class: Some(SurfaceClassName::Information),
+        views: transition.view.into(),
         outcome: TransitionOutcome::Success,
     });
     application
@@ -645,7 +670,7 @@ fn complete_refresh_cycle(
     application: &mut Application,
     ui: &StatusWindow,
     trace: &mut Vec<TraceRecord>,
-    views: &mut Vec<ViewName>,
+    views: &mut Vec<ViewSetName>,
     times: &mut Vec<u64>,
     frames: &mut Vec<Vec<u8>>,
     window: &Rc<MinimalSoftwareWindow>,
@@ -703,7 +728,7 @@ fn complete_multi_feature_tail(
     ui: &StatusWindow,
     trace: &mut Vec<TraceRecord>,
     composition_records: &mut Vec<CompositionRecord>,
-    views: &mut Vec<ViewName>,
+    views: &mut Vec<ViewSetName>,
     times: &mut Vec<u64>,
     frames: &mut Vec<Vec<u8>>,
     refreshes: &mut Vec<RefreshEvidence>,
@@ -735,8 +760,7 @@ fn complete_multi_feature_tail(
         routed_feature: Some(FeatureName::SyntheticNotice),
         lifecycle: None,
         effect: Some(EffectName::NoticeExpiryDue),
-        surface_owner: Some(FeatureName::Availability),
-        surface_class: Some(SurfaceClassName::Ambient),
+        views: expired.view.into(),
         outcome: TransitionOutcome::Success,
     });
 
@@ -773,8 +797,7 @@ fn complete_multi_feature_tail(
         routed_feature: None,
         lifecycle: Some(LifecycleName::SessionInvalidated),
         effect: None,
-        surface_owner: Some(FeatureName::Availability),
-        surface_class: Some(SurfaceClassName::Ambient),
+        views: invalidated.view.into(),
         outcome: TransitionOutcome::Success,
     });
 
@@ -800,8 +823,7 @@ fn complete_multi_feature_tail(
         routed_feature: Some(FeatureName::Availability),
         lifecycle: None,
         effect: Some(EffectName::ReadAvailability),
-        surface_owner: Some(FeatureName::Availability),
-        surface_class: Some(SurfaceClassName::Ambient),
+        views: application.view().into(),
         outcome: TransitionOutcome::Success,
     });
     Ok(())
@@ -830,8 +852,7 @@ fn reject_stale_notice(
         routed_feature: Some(FeatureName::SyntheticNotice),
         lifecycle: None,
         effect: Some(EffectName::NoticeExpiryDue),
-        surface_owner: Some(FeatureName::Availability),
-        surface_class: Some(SurfaceClassName::Ambient),
+        views: before.into(),
         outcome: TransitionOutcome::Rejected,
     });
     Ok(())
@@ -861,7 +882,7 @@ fn apply_source_disconnect(
     application: &mut Application,
     ui: &StatusWindow,
     trace: &mut Vec<TraceRecord>,
-    views: &mut Vec<ViewName>,
+    views: &mut Vec<ViewSetName>,
     times: &mut Vec<u64>,
     frames: &mut Vec<Vec<u8>>,
     window: &Rc<MinimalSoftwareWindow>,
@@ -896,7 +917,7 @@ fn complete_read(
     application: &mut Application,
     ui: &StatusWindow,
     trace: &mut Vec<TraceRecord>,
-    views: &mut Vec<ViewName>,
+    views: &mut Vec<ViewSetName>,
     times: &mut Vec<u64>,
     frames: &mut Vec<Vec<u8>>,
     window: &Rc<MinimalSoftwareWindow>,
@@ -1176,10 +1197,10 @@ mod tests {
                 assert_eq!(
                     first.replay.views,
                     [
-                        ViewName::Unknown,
-                        ViewName::Available,
-                        ViewName::Unknown,
-                        ViewName::Available
+                        ViewSetName::UNKNOWN,
+                        ViewSetName::AVAILABLE,
+                        ViewSetName::UNKNOWN,
+                        ViewSetName::AVAILABLE
                     ]
                 );
             } else {
@@ -1209,7 +1230,11 @@ mod tests {
             execute_replay(ScenarioName::PeriodicReadFailure, &window, &mut |_, _| {}).unwrap();
         assert_eq!(
             result.replay.views,
-            [ViewName::Unknown, ViewName::Unknown, ViewName::Available]
+            [
+                ViewSetName::UNKNOWN,
+                ViewSetName::UNKNOWN,
+                ViewSetName::AVAILABLE
+            ]
         );
         let failed_refresh = &result.refreshes[0].records;
         assert!(failed_refresh.iter().any(|record| {
@@ -1234,20 +1259,20 @@ mod tests {
         assert_eq!(
             result.replay.views,
             [
-                ViewName::Unknown,
-                ViewName::Available,
-                ViewName::Notice,
-                ViewName::Notice,
-                ViewName::Unavailable,
-                ViewName::Notice,
-                ViewName::Unknown,
-                ViewName::Available,
+                ViewSetName::UNKNOWN,
+                ViewSetName::AVAILABLE,
+                ViewSetName::AVAILABLE_WITH_NOTICE,
+                ViewSetName::UNAVAILABLE_WITH_NOTICE,
+                ViewSetName::UNAVAILABLE,
+                ViewSetName::UNAVAILABLE_WITH_NOTICE,
+                ViewSetName::UNKNOWN,
+                ViewSetName::AVAILABLE,
             ]
         );
         assert_eq!(result.refreshes.len(), 3);
         assert!(result.replay.composition_records.iter().any(|record| {
-            record.surface_owner == Some(FeatureName::SyntheticNotice)
-                && record.surface_class == Some(SurfaceClassName::Information)
+            record.views.synthetic_notice == Some(NoticeViewName::CompositionCheck)
+                && record.views.availability.is_some()
         }));
         assert!(result.replay.composition_records.iter().any(|record| {
             record.lifecycle == Some(LifecycleName::SessionInvalidated)
