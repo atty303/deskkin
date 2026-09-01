@@ -97,14 +97,26 @@ driver. The current CoreS3 product firmware uses one Rust/Embassy UI owner and
 one Rust service worker hosted by Zephyr threads. Embassy is a runtime adapter,
 not part of the portable core.
 
-The replacement CoreS3 runtime is being established as two Zephyr AMP images.
-PROCPU owns USB control, boot/status supervision, and eventually persistent
-state. APPCPU will exclusively own Slint, software rendering, framebuffers,
-SPI2, and LCD transfer. The kernels exchange bounded control metadata through
-IPM and shared memory; framebuffers are not message payloads. A checked-in
-atlas-free harness already proves the first invariant: an intentional APPCPU
-infinite loop does not prevent PROCPU USB status responses. It does not yet
-claim display ownership or rendering performance.
+The replacement CoreS3 runtime consists of two Zephyr AMP images. PROCPU owns
+USB control, boot/status supervision, LCD power/reset/backlight, two static
+PSRAM RGB565 render buffers, and one internal-DRAM scanout buffer. APPCPU
+exclusively owns Slint software rendering, SPI2, GDMA, and LCD transfer. The
+kernels exchange bounded publication metadata through shared memory;
+framebuffer contents are never message payloads and SPI2 has one CPU owner.
+Heartbeat snapshots use an explicit unstable marker and matching generations
+so the supervisor never accepts a payload while APPCPU is rewriting it.
+
+The atlas-free physical pipeline uses full-screen double-buffered rendering at
+320×240. APPCPU copies a completed PSRAM render buffer once into scanout, then
+transfers it at a validated 40 MHz LCD clock. Quad PSRAM runs at the validated
+80 MHz setting. The display worker starts copy and DMA ahead of the next render;
+the patched polling driver sleeps while DMA is in flight so rendering can use
+otherwise idle APP CPU time. The bounded gate derives throughput from device
+heartbeat times at the first and last valid observations and requires at least 20 FPS, render and
+transfer maxima no greater than 50 ms, live PROCPU status, and zero allocation
+or transfer failures. A stale final sample or an observation window that does
+not cover at least 80% of the gate fails even if its earlier average reached
+20 FPS. Simulator timing is not used.
 
 Zephyr owns CoreS3 device discovery, hardware topology, drivers, networking,
 storage, scheduling, and system services. Unsafe Rust, C FFI, and raw Zephyr

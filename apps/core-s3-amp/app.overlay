@@ -1,3 +1,18 @@
+/* Keep the flash map identical in the supervisor, renderer, and MCUboot. */
+#include "amp-partitions.overlay"
+
 &ipm0 {
 	status = "okay";
+};
+
+&mipi_dbi {
+	status = "disabled";
+};
+
+&spi2 {
+	status = "disabled";
+};
+
+&sd0 {
+	status = "disabled";
 };

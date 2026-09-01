@@ -5,7 +5,6 @@ string(CONFIGURE "${BOARD}/${REMOTE_CPU}" DESKKIN_REMOTE_BOARD)
 list(APPEND mcuboot_DTC_OVERLAY_FILE "${APP_DIR}/mcuboot.overlay")
 list(REMOVE_DUPLICATES mcuboot_DTC_OVERLAY_FILE)
 set(mcuboot_DTC_OVERLAY_FILE "${mcuboot_DTC_OVERLAY_FILE}" CACHE INTERNAL "")
-
 if(${REMOTE_CPU} STREQUAL ${BOARD_QUALIFIERS})
   message(FATAL_ERROR "Deskkin AMP requires the PROCPU board target")
 endif()

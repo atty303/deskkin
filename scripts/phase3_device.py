@@ -41,7 +41,11 @@ COMMANDS = {
 
 PET_BENCHMARK_DURATION_SECONDS = 60.0
 PET_BENCHMARK_REQUESTS = 1_200
-AMP_GATE_TIMEOUT_SECONDS = 15.0
+AMP_GATE_DURATION_SECONDS = 10.0
+AMP_GATE_MAX_OBSERVATION_AGE_SECONDS = 1.0
+AMP_GATE_MIN_COVERAGE_MILLI = 800
+AMP_GATE_MAX_STATUS_RESPONSE_MS = 1_000
+AMP_GATE_MIN_STATUS_RESPONSES = 20
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -480,6 +484,7 @@ def device_environment(root: Path) -> tuple[Path, dict[str, str]]:
     environment["ZEPHYR_SDK_INSTALL_DIR"] = str(state / "sdk")
     environment["ZEPHYR_BASE"] = str(state / "west/zephyr")
     environment["LIBCLANG_PATH"] = str(clang / "lib")
+    environment["CARGO_NET_OFFLINE"] = "true"
     environment["SOURCE_DATE_EPOCH"] = "0"
     environment["PATH"] = os.pathsep.join(
         (
@@ -603,70 +608,155 @@ def flash_amp(root: Path, device_arg: str | None) -> None:
     )
 
 
-def reset_amp(root: Path, device_arg: str | None) -> None:
-    device = discover_device(device_arg)
-    state, environment = device_environment(root)
-    subprocess.run(
-        [str(state / "venv/bin/esptool"), "--port", str(device), "run"],
-        check=True,
-        env=environment,
-        stdout=sys.stderr,
-    )
+def decode_amp_pipeline_status(status: bytes) -> dict[str, int]:
+    if len(status) != 80 or status[0] != SCHEMA or status[1] != 0:
+        raise DeviceError("control_invalid")
+
+    def unsigned(start: int, end: int) -> int:
+        return int.from_bytes(status[start:end], "big")
+
+    return {
+        "availability": status[27],
+        "generation": unsigned(28, 32),
+        "heartbeat_received_ms": unsigned(32, 40),
+        "completed_frames": unsigned(40, 44),
+        "render_us": unsigned(44, 48),
+        "transfer_us": unsigned(48, 52),
+        "stage": status[52],
+        "fault": status[53],
+        "allocation_failures": status[54],
+        "transfer_failures": status[55],
+        "display_ready": status[56],
+        "render_max_us": unsigned(57, 61),
+        "transfer_max_us": unsigned(61, 65),
+        "appcpu_boot_stage": status[65],
+        "appcpu_core_id": status[66],
+        "heartbeat_memory_side": status[67],
+        "procpu_boot_stage": status[68],
+        "procpu_boot_error": status[69],
+        "display_spi_hz": unsigned(70, 74),
+    }
 
 
-def amp_fault_isolation_gate(device_arg: str | None) -> dict[str, object]:
+def amp_render_pipeline_gate(device_arg: str | None) -> dict[str, object]:
     gate_started = time.monotonic()
-    deadline = gate_started + AMP_GATE_TIMEOUT_SECONDS
+    deadline = gate_started + AMP_GATE_DURATION_SECONDS
     responses = 0
-    live_generation: int | None = None
-    last_generation = 0
     max_response_ms = 0
     first_request = True
+    first: dict[str, int] | None = None
+    last: dict[str, int] | None = None
+    first_observed_at: float | None = None
+    last_observed_at: float | None = None
+    last_sample: dict[str, int] | None = None
     while time.monotonic() < deadline:
         started = time.monotonic()
         try:
-            status = run_control("status", device_arg, recover_status_transport=first_request)
+            raw_status = run_control("status", device_arg, recover_status_transport=first_request)
         except DeviceError:
-            if live_generation is not None:
-                raise DeviceError("amp_supervisor_unresponsive")
             first_request = False
             continue
         first_request = False
         response_ms = int((time.monotonic() - started) * 1000)
         max_response_ms = max(max_response_ms, response_ms)
         responses += 1
-        generation = int.from_bytes(status[28:32], "big")
-        availability = status[27]
-        if availability == 1 and generation > 0:
-            live_generation = generation
-            last_generation = generation
-        elif live_generation is not None and availability == 2:
-            if generation != last_generation:
-                raise DeviceError("amp_generation_changed_after_fault")
-            summary: dict[str, object] = {
-                "operation": "amp_fault_isolation",
-                "operation_id": 1,
-                "parent_operation_id": None,
-                "status": "success",
-                "error_type": None,
-                "effect_id": None,
-                "virtual_time_ms": 0,
-                "end_virtual_time_ms": int(AMP_GATE_TIMEOUT_SECONDS * 1000),
-                "duration_ms": int((time.monotonic() - gate_started) * 1000),
-                "render_width": None,
-                "render_height": None,
-                "value": "pass",
-                "status_responses": responses,
-                "live_generation": live_generation,
-                "stalled_generation": generation,
-                "max_status_response_ms": max_response_ms,
-            }
-            print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
-            return summary
+        sample = decode_amp_pipeline_status(raw_status)
+        last_sample = sample
+        if sample["availability"] == 1 and sample["generation"] > 0:
+            if first is None:
+                first = sample
+                first_observed_at = time.monotonic()
+            last = sample
+            last_observed_at = time.monotonic()
         time.sleep(0.25)
-    if live_generation is None:
-        raise DeviceError("amp_heartbeat_not_observed")
-    raise DeviceError("amp_fault_not_observed")
+    if first is None or last is None:
+        print(
+            json.dumps(
+                {
+                    "operation": "amp_render_pipeline",
+                    "status": "error",
+                    "error_type": "amp_pipeline_not_observed",
+                    "status_responses": responses,
+                    "last_sample": last_sample,
+                    "max_status_response_ms": max_response_ms,
+                },
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
+        raise DeviceError("amp_pipeline_not_observed")
+    gate_finished = time.monotonic()
+    duration_ms = int((gate_finished - gate_started) * 1000)
+    assert first_observed_at is not None
+    assert last_observed_at is not None
+    observation_duration_ms = max(1, int((last_observed_at - first_observed_at) * 1000))
+    measurement_duration_ms = max(
+        1,
+        (last["heartbeat_received_ms"] - first["heartbeat_received_ms"]) & 0xFFFFFFFF,
+    )
+    last_observation_age_ms = max(0, int((gate_finished - last_observed_at) * 1000))
+    measurement_coverage_milli = observation_duration_ms * 1000 // max(1, duration_ms)
+    completed_frames = last["completed_frames"] - first["completed_frames"]
+    measured_fps_milli = completed_frames * 1_000_000 // measurement_duration_ms
+    passed = (
+        responses >= AMP_GATE_MIN_STATUS_RESPONSES
+        and max_response_ms <= AMP_GATE_MAX_STATUS_RESPONSE_MS
+        and last_sample is not None
+        and last_sample["availability"] == 1
+        and last_observation_age_ms <= int(AMP_GATE_MAX_OBSERVATION_AGE_SECONDS * 1000)
+        and measurement_coverage_milli >= AMP_GATE_MIN_COVERAGE_MILLI
+        and last["generation"] > first["generation"]
+        and last["display_ready"] == 1
+        and last["fault"] == 0
+        and last["allocation_failures"] == 0
+        and last["transfer_failures"] == 0
+        and measured_fps_milli >= 20_000
+        and last["render_max_us"] <= 50_000
+        and last["transfer_max_us"] <= 50_000
+    )
+    summary: dict[str, object] = {
+        "operation": "amp_render_pipeline",
+        "operation_id": 1,
+        "parent_operation_id": None,
+        "status": "success" if passed else "error",
+        "error_type": None if passed else "amp_pipeline_gate_failed",
+        "effect_id": None,
+        "virtual_time_ms": 0,
+        "end_virtual_time_ms": duration_ms,
+        "duration_ms": duration_ms,
+        "measurement_duration_ms": measurement_duration_ms,
+        "observation_duration_ms": observation_duration_ms,
+        "measurement_coverage_milli": measurement_coverage_milli,
+        "last_observation_age_ms": last_observation_age_ms,
+        "last_availability": last_sample["availability"] if last_sample is not None else 0,
+        "render_width": 320,
+        "render_height": 240,
+        "value": "pass" if passed else "fail",
+        "status_responses": responses,
+        "completed_frames": completed_frames,
+        "measured_fps_milli": measured_fps_milli,
+        "first_generation": first["generation"],
+        "last_generation": last["generation"],
+        "render_last_us": last["render_us"],
+        "transfer_last_us": last["transfer_us"],
+        "render_max_us": last["render_max_us"],
+        "transfer_max_us": last["transfer_max_us"],
+        "renderer_stage": last["stage"],
+        "display_ready": last["display_ready"],
+        "max_status_response_ms": max_response_ms,
+        "allocation_failures": last["allocation_failures"],
+        "transfer_failures": last["transfer_failures"],
+        "appcpu_boot_stage": last["appcpu_boot_stage"],
+        "appcpu_core_id": last["appcpu_core_id"],
+        "mailbox_published": last["heartbeat_memory_side"],
+        "procpu_boot_stage": last["procpu_boot_stage"],
+        "procpu_boot_error": last["procpu_boot_error"],
+        "display_spi_hz": last["display_spi_hz"],
+    }
+    print(json.dumps(summary, separators=(",", ":")), file=sys.stderr)
+    if not passed:
+        raise DeviceError("amp_pipeline_gate_failed")
+    return summary
 
 
 def flash(root: Path, device_arg: str | None) -> None:
@@ -1005,7 +1095,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
         "build": "control_route",
         "amp-build": "control_route",
         "amp-flash": "device_ui",
-        "amp-gate": "amp_fault_isolation",
+        "amp-gate": "amp_render_pipeline",
         "flash": "device_ui",
         "identity": "identity_init",
         "provision": "nvs_publication",
@@ -1061,8 +1151,7 @@ def main() -> int:
         elif args.action == "amp-flash":
             flash_amp(root, args.device)
         elif args.action == "amp-gate":
-            reset_amp(root, args.device)
-            records = [amp_fault_isolation_gate(args.device)]
+            records = [amp_render_pipeline_gate(args.device)]
         elif args.action == "flash":
             flash(root, args.device)
         elif args.action == "recover":

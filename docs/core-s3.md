@@ -30,9 +30,9 @@ CoreS3 tasks deliberately separate build, observation, and mutation.
 | --- | --- |
 | `core-s3:bootstrap` | Prepare and verify repository-local toolchains. |
 | `core-s3:build` | Build product and inert firmware without device access. |
-| `core-s3:amp-build` | Build the atlas-free AMP fault-isolation harness. |
+| `core-s3:amp-build` | Build the atlas-free AMP full-screen rendering pipeline. |
 | `core-s3:amp-flash` | Flash all AMP domains in sysbuild order. |
-| `core-s3:amp-gate` | Verify USB supervision survives the injected APPCPU stall. |
+| `core-s3:amp-gate` | Measure the APPCPU pipeline through the PROCPU USB status surface. |
 | `core-s3:status` | Read boot and application status without mutation. |
 | `core-s3:profile` | Create or replace the ignored age-encrypted Wi-Fi profile. |
 | `core-s3:flash` | Flash the product firmware. |
@@ -165,21 +165,35 @@ explicit application run:
 mise run core-s3:run -- --device /dev/ttyACM0
 ```
 
-## AMP fault-isolation harness
+## AMP rendering pipeline
 
-The separate AMP harness contains no Pet atlas, Slint renderer, display
-transfer, network worker, NVS mutation, or servo path. MCUboot occupies flash
-offset `0x0`, the signed PROCPU supervisor image occupies `0x20000`, and the
-signed APPCPU image occupies `0x2c0000`. Flashing is one multi-domain west
-operation so the sysbuild dependency order is authoritative.
+The separate AMP runtime contains no Pet atlas, network worker, NVS mutation,
+or servo path. MCUboot occupies flash offset `0x0`, the signed PROCPU supervisor
+image occupies `0x20000`, and the signed APPCPU image occupies `0x2c0000` in a
+2 MiB renderer slot. Flashing is one multi-domain west operation so the
+sysbuild dependency order is authoritative.
 
-PROCPU exclusively owns the USB status surface. APPCPU sends only a bounded
-heartbeat containing magic, generation, and uptime through IPM. After ten
-seconds APPCPU deliberately enters a non-yielding loop. PROCPU marks the last
-generation stale after 500 ms and must still answer status. The gate resets the
-device first so live and stale observations belong to one bounded boot. The host stores
-only timing, response count, and heartbeat generations; it records no frame,
-pixel, asset, raw IPM data, or raw USB packet.
+PROCPU exclusively owns the USB status surface and LCD power/reset/backlight.
+It reserves two 320×240 RGB565 render buffers in PSRAM and one full-screen,
+32-byte-aligned scanout buffer in internal DRAM, then publishes only their
+addresses and readiness after PSRAM initialization and its memory test pass.
+Failure inhibits APPCPU boot and is reported through the bounded boot error.
+The PROCPU linker region ends at the APPCPU DRAM origin, so image growth cannot
+silently overlap the renderer. APPCPU exclusively owns the Slint instance, software
+renderer, SPI2, GDMA, and display driver. It renders alternating full frames in
+PSRAM, copies a completed frame once into scanout, and transfers the scanout
+while rendering the next frame. The SPI polling driver sleeps during DMA so the
+single APP CPU can execute the renderer instead of busy-waiting.
+
+The validated hardware configuration is Quad PSRAM at 80 MHz and LCD SPI at
+40 MHz. Octal PSRAM does not boot this CoreS3. The ten-second pipeline gate does
+not reset the device; it observes an already booted run and calculates FPS from
+the device heartbeat times of its first and last valid samples. It requires at least
+20 FPS, render and copy-plus-transfer maxima no greater than 50 ms, live display
+and stable mailbox publications, a live final sample, at least 80% observation
+coverage, bounded USB response latency, and zero allocation or transfer failures. The host
+stores only bounded timing, counters, boot stages, and the effective SPI clock;
+it records no frame, pixel, asset, raw shared-memory data, or raw USB packet.
 
 ```sh
 mise run core-s3:amp-build
@@ -187,10 +201,9 @@ mise run core-s3:amp-flash -- --device /dev/ttyACM0
 mise run core-s3:amp-gate -- --device /dev/ttyACM0
 ```
 
-This harness proves control-plane isolation, not rendering throughput. Its
-APPCPU partition is intentionally too small for the current raw atlas. LCD
-ownership, double buffering, full-screen transfer, and the renderer are later
-slices and must retain the same supervisor-survival gate.
+The current gate is an atlas-free pipeline gate, not yet the final 60-second Pet
+benchmark. The next slice adds the complete bounded schedule and percentile
+diagnostics before restoring the Pet asset.
 
 Identity inspection and exact unpair are distinct commands. `list` reports the
 64-character peer ID required by `unpair`; unpair is a device mutation and

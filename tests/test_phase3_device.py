@@ -84,52 +84,133 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertNotIn("--domain", command)
         self.assertIn(str(build), command)
 
-    def test_amp_reset_uses_the_pinned_esptool_before_the_gate(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / ".deskkin"
-            with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
-                device, "device_environment", return_value=(state, {})
-            ), mock.patch.object(device.subprocess, "run") as run:
-                device.reset_amp(root, "/dev/fake")
-
-        run.assert_called_once()
-        self.assertEqual(
-            run.call_args.args[0],
-            [str(state / "venv/bin/esptool"), "--port", "/dev/fake", "run"],
-        )
-
-    def test_amp_fault_gate_observes_live_then_stale_heartbeat(self):
-        live = bytearray(80)
-        live[27] = 1
-        live[28:32] = (17).to_bytes(4, "big")
-        stale = bytearray(live)
-        stale[27] = 2
+    def test_amp_pipeline_gate_observes_progress_and_bounded_timings(self):
         clock = mock.Mock()
         clock.now = 0.0
         clock.monotonic.side_effect = lambda: clock.now
         clock.sleep.side_effect = lambda seconds: setattr(clock, "now", clock.now + seconds)
+
+        generation = 10
+
+        def status(*_args, **_kwargs):
+            nonlocal generation
+            generation += 3
+            response = bytearray(80)
+            response[0] = 1
+            response[27] = 1
+            response[28:32] = generation.to_bytes(4, "big")
+            response[32:40] = int(clock.now * 1000).to_bytes(8, "big")
+            response[40:44] = (generation * 2).to_bytes(4, "big")
+            response[44:48] = (12_000).to_bytes(4, "big")
+            response[48:52] = (42_000).to_bytes(4, "big")
+            response[52] = 4
+            response[56] = 1
+            response[57:61] = (14_000).to_bytes(4, "big")
+            response[61:65] = (44_000).to_bytes(4, "big")
+            return bytes(response)
+
         with mock.patch.object(device, "time", clock), mock.patch.object(
-            device, "run_control", side_effect=[bytes(live), bytes(stale)]
+            device, "run_control", side_effect=status
         ) as run_control:
-            summary = device.amp_fault_isolation_gate("/dev/fake")
+            summary = device.amp_render_pipeline_gate("/dev/fake")
 
         self.assertEqual(summary["value"], "pass")
-        self.assertEqual(summary["live_generation"], 17)
-        self.assertEqual(summary["stalled_generation"], 17)
-        self.assertEqual(summary["status_responses"], 2)
+        self.assertGreater(summary["completed_frames"], 0)
+        self.assertGreaterEqual(summary["measured_fps_milli"], 20_000)
+        self.assertLess(summary["observation_duration_ms"], summary["duration_ms"])
+        self.assertGreaterEqual(summary["measurement_coverage_milli"], 800)
+        self.assertLessEqual(summary["last_observation_age_ms"], 1_000)
+        self.assertEqual(summary["last_availability"], 1)
+        self.assertEqual(summary["render_max_us"], 14_000)
+        self.assertEqual(summary["transfer_max_us"], 44_000)
         self.assertTrue(run_control.call_args_list[0].kwargs["recover_status_transport"])
         self.assertFalse(run_control.call_args_list[1].kwargs["recover_status_transport"])
 
-    def test_amp_fault_gate_rejects_supervisor_loss_after_live_heartbeat(self):
-        live = bytearray(80)
-        live[27] = 1
-        live[28:32] = (3).to_bytes(4, "big")
-        with mock.patch.object(
-            device, "run_control", side_effect=[bytes(live), device.DeviceError("control_timeout")]
-        ), mock.patch.object(device.time, "sleep"):
-            with self.assertRaisesRegex(device.DeviceError, "amp_supervisor_unresponsive"):
-                device.amp_fault_isolation_gate("/dev/fake")
+    def test_amp_pipeline_status_rejects_allocation_failure(self):
+        status = bytearray(80)
+        status[0] = 1
+        status[27] = 1
+        status[28:32] = (3).to_bytes(4, "big")
+        status[40:44] = (2).to_bytes(4, "big")
+        status[54] = 1
+        status[56] = 1
+        decoded = device.decode_amp_pipeline_status(bytes(status))
+
+        self.assertEqual(decoded["allocation_failures"], 1)
+        self.assertEqual(decoded["completed_frames"], 2)
+
+    def test_amp_pipeline_gate_rejects_less_than_twenty_fps(self):
+        clock = mock.Mock()
+        clock.now = 0.0
+        clock.monotonic.side_effect = lambda: clock.now
+        clock.sleep.side_effect = lambda seconds: setattr(clock, "now", clock.now + seconds)
+        generation = 0
+
+        def status(*_args, **_kwargs):
+            nonlocal generation
+            generation += 1
+            response = bytearray(80)
+            response[0] = 1
+            response[27] = 1
+            response[28:32] = generation.to_bytes(4, "big")
+            response[32:40] = int(clock.now * 1000).to_bytes(8, "big")
+            response[40:44] = generation.to_bytes(4, "big")
+            response[44:48] = (10_000).to_bytes(4, "big")
+            response[48:52] = (40_000).to_bytes(4, "big")
+            response[52] = 4
+            response[56] = 1
+            response[57:61] = (10_000).to_bytes(4, "big")
+            response[61:65] = (40_000).to_bytes(4, "big")
+            return bytes(response)
+
+        with mock.patch.object(device, "time", clock), mock.patch.object(
+            device, "run_control", side_effect=status
+        ), self.assertRaises(device.DeviceError):
+            device.amp_render_pipeline_gate("/dev/fake")
+
+    def test_amp_pipeline_gate_rejects_renderer_that_stops_before_deadline(self):
+        clock = mock.Mock()
+        clock.now = 0.0
+        clock.monotonic.side_effect = lambda: clock.now
+        clock.sleep.side_effect = lambda seconds: setattr(clock, "now", clock.now + seconds)
+        generation = 0
+
+        def status(*_args, **_kwargs):
+            nonlocal generation
+            response = bytearray(80)
+            response[0] = 1
+            if clock.now < device.AMP_GATE_DURATION_SECONDS / 2:
+                generation += 5
+                response[27] = 1
+                response[28:32] = generation.to_bytes(4, "big")
+                response[32:40] = int(clock.now * 1000).to_bytes(8, "big")
+                response[40:44] = generation.to_bytes(4, "big")
+                response[44:48] = (10_000).to_bytes(4, "big")
+                response[48:52] = (40_000).to_bytes(4, "big")
+                response[52] = 4
+                response[56] = 1
+                response[57:61] = (10_000).to_bytes(4, "big")
+                response[61:65] = (40_000).to_bytes(4, "big")
+            else:
+                response[27] = 2
+            return bytes(response)
+
+        with mock.patch.object(device, "time", clock), mock.patch.object(
+            device, "run_control", side_effect=status
+        ), self.assertRaises(device.DeviceError):
+            device.amp_render_pipeline_gate("/dev/fake")
+
+    def test_amp_supervisor_dram_ends_at_renderer_origin(self):
+        linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
+        self.assertIn("ASSERT(_end <= 0x3fcc5000", linker)
+
+    def test_amp_supervisor_owns_the_single_psram_test_and_inhibits_boot_on_failure(self):
+        config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
+        source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
+        self.assertIn("CONFIG_ESP_SPIRAM_MEMTEST=n", config)
+        self.assertIn("esp_psram_is_initialized() && esp_psram_extram_test()", source)
+        self.assertIn("if (!psram_ready)", source)
+        self.assertIn("atomic_set(&boot_error, 2)", source)
 
     def test_profile_schema_is_exact_and_rfc1918(self):
         self.assertEqual(device.validate_profile(self.profile()), self.profile())

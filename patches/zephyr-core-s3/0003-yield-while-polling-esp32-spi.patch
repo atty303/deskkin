@@ -1,0 +1,29 @@
+From: Deskkin contributors
+Subject: [PATCH] spi: esp32: sleep while polling a transfer
+
+Let other ready threads run while a synchronous SPI transfer is progressing.
+This is particularly important for DMA-backed full-screen display writes,
+where busy polling otherwise serializes rendering and wire transfer on the
+same CPU.
+
+---
+ drivers/spi/spi_esp32_spim.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/spi/spi_esp32_spim.c b/drivers/spi/spi_esp32_spim.c
+index 17de8aa..0ca6612 100644
+--- a/drivers/spi/spi_esp32_spim.c
++++ b/drivers/spi/spi_esp32_spim.c
+@@ -365,7 +365,9 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	spi_context_update_tx(&data->ctx, data->dfs, transfer_len_frames);
+ 
+ 	while (!spi_hal_usr_is_done(hal)) {
+-		/* nop */
++		if (!k_is_pre_kernel()) {
++			k_sleep(K_MSEC(1));
++		}
+ 	}
+ 
+ #if defined(SOC_GDMA_SUPPORTED)
+-- 
+2.51.0

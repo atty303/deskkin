@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-only
+
+[workspace]
+resolver = "2"
+
+[package]
+name = "deskkin-core-s3-renderer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+name = "rustapp"
+crate-type = ["staticlib"]
+
+[dependencies]
+slint = { version = "=1.17.1", default-features = false, features = ["compat-1-2", "renderer-software", "unsafe-single-threaded", "libm"] }
+zephyr = "=0.1.0"
+
+[build-dependencies]
+slint-build = "=1.17.1"
+
+[profile.dev]
+codegen-units = 1
+debug = true
+lto = "fat"
+opt-level = 2
+panic = "abort"

@@ -1,0 +1,52 @@
+/* SPDX-License-Identifier: MIT */
+
+/*
+ * The CoreS3 carries 16 MiB of flash, while Zephyr's generic ESP32-S3 AMP
+ * layout only assigns 448 KiB to each APPCPU image. Keep the existing PROCPU
+ * slots and give the renderer two 2 MiB slots. All AMP domains include this
+ * file so MCUboot and both CPUs agree on every offset.
+ */
+&slot0_appcpu_partition {
+	reg = <0x2c0000 0x200000>;
+};
+
+&flash0 {
+	partitions {
+		/delete-node/ partition@330000;
+		/delete-node/ partition@3a0000;
+		/delete-node/ partition@3a8000;
+		/delete-node/ partition@3b0000;
+		/delete-node/ partition@3e0000;
+		/delete-node/ partition@3ff000;
+
+		slot1_appcpu_partition: partition@4c0000 {
+			label = "image-1-appcpu";
+			reg = <0x4c0000 0x200000>;
+		};
+
+		slot0_lpcore_partition: partition@6c0000 {
+			label = "image-0-lpcore";
+			reg = <0x6c0000 0x8000>;
+		};
+
+		slot1_lpcore_partition: partition@6c8000 {
+			label = "image-1-lpcore";
+			reg = <0x6c8000 0x8000>;
+		};
+
+		storage_partition: partition@6d0000 {
+			label = "storage";
+			reg = <0x6d0000 0x30000>;
+		};
+
+		scratch_partition: partition@700000 {
+			label = "image-scratch";
+			reg = <0x700000 0x1f000>;
+		};
+
+		coredump_partition: partition@71f000 {
+			label = "coredump";
+			reg = <0x71f000 0x1000>;
+		};
+	};
+};

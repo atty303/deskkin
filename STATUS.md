@@ -16,11 +16,14 @@ The shared Pet-presentation baseline includes a normalized embedded Koyori
 atlas, a pure `no_std` animation model for `Idle`, `MoveLeft`, `MoveRight`, and
 `Attend`, and one Slint Pet surface used by the simulator and CoreS3 firmware.
 The CoreS3 product firmware and host runner include a fixed 60-second, 20 FPS
-Pet-only rendering benchmark with bounded timing and counter diagnostics. A
-separate atlas-free AMP harness now boots MCUboot, a PROCPU USB supervisor, and
-an APPCPU renderer stub from non-overlapping flash partitions. Its physical
-fault-injection gate confirms that PROCPU status remains responsive after the
-APPCPU enters an infinite loop.
+Pet-only rendering benchmark with bounded timing and counter diagnostics.
+
+The atlas-free replacement runtime is a dual-Zephyr AMP build. PROCPU owns USB
+control, boot supervision, LCD power/reset/backlight, two PSRAM RGB565 render
+buffers, and one internal-DRAM scanout buffer. APPCPU owns Slint software
+rendering, SPI2, GDMA, and full-screen LCD transfer. The physical 10-second
+pipeline gate sustains 20 FPS with Quad PSRAM at 80 MHz and LCD SPI at 40 MHz
+while retaining responsive PROCPU status.
 
 No external provider connector is implemented. The deterministic availability
 connector does not access an external service.
@@ -28,17 +31,19 @@ connector does not access an external service.
 ## Active work
 
 The first physical CoreS3 Pet benchmark completed only 487 of 1,200 requested
-frames in 60.138 seconds. Rather than optimize that single-core dirty-transfer
-baseline, current work is establishing the AMP ownership boundary first. The
-physical device currently runs the bounded fault harness: APPCPU emits a 100 ms
-heartbeat for 10 seconds and then stalls permanently; PROCPU reports the same
-generation as stale while continuing to answer USB status requests.
+frames in 60.138 seconds. Its single-core dirty-transfer path is superseded by
+the AMP full-screen pipeline. The current physical gate completes 193 frames
+over a 9.626-second device-heartbeat window (20.049 FPS); observed maxima are
+20.8 ms for render and 40.3 ms for scanout copy plus transfer, with no
+allocation or transfer failure. Octal PSRAM was rejected on the physical device
+because it prevented the PROCPU USB surface from booting; Quad 80 MHz is the
+validated mode.
 
 ## Next work
 
-Move LCD power/reset/backlight initialization to the PROCPU supervisor and
-move exclusive SPI2/display ownership to APPCPU. Then add double framebuffers
-and full-screen RGB565 transfer without restoring the atlas yet. The next
-physical gate must inject render, display-transfer, and infinite-loop faults
-independently while PROCPU USB status remains responsive. Fixed-world,
-parallax, Notice, IMU, servo, and atlas work remain behind that foundation.
+Turn the atlas-free 10-second pipeline gate into the planned bounded 60-second
+benchmark, including schedule requests, frame completions, deadline misses,
+maximum consecutive misses, stalls, and a bounded percentile representation.
+Then restore the normalized Pet asset through the same double-buffered
+full-screen path and repeat the physical 20 FPS gate. Fixed-world, parallax,
+Notice, IMU, and servo work remain behind that foundation.

@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+#![no_std]
+
+extern crate alloc;
+extern crate zephyr;
+
+use alloc::{boxed::Box, rc::Rc};
+use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
+use slint::platform::software_renderer::{
+    MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, Rgb565Pixel, TargetPixel,
+};
+use slint::platform::{Platform, WindowAdapter};
+use slint::{ComponentHandle, PhysicalSize};
+
+slint::include_modules!();
+
+const WIDTH: usize = 320;
+const HEIGHT: usize = 240;
+const FRAME_PERIOD_US: u64 = 50_000;
+
+unsafe extern "C" {
+    fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
+    fn deskkin_display_submit(buffer_index: u8) -> c_int;
+    fn deskkin_display_take_completion(buffer_index: *mut u8, duration_us: *mut u32) -> c_int;
+    fn deskkin_display_enable() -> c_int;
+    fn deskkin_renderer_boot_stage(stage: u8);
+    fn deskkin_renderer_observe(stage: u8, render_us: u32, transfer_us: u32);
+    fn deskkin_uptime_us() -> u64;
+    fn deskkin_sleep_ms(delay_ms: u32);
+}
+
+struct DevicePlatform {
+    window: Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>,
+}
+
+impl Platform for DevicePlatform {
+    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
+        self.window.replace(Some(window.clone()));
+        Ok(window)
+    }
+
+    fn duration_since_start(&self) -> Duration {
+        Duration::from_micros(unsafe { deskkin_uptime_us() })
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Default)]
+struct Rgb565BePixel(u16);
+
+impl TargetPixel for Rgb565BePixel {
+    fn blend(&mut self, color: PremultipliedRgbaColor) {
+        let mut native = Rgb565Pixel(u16::from_be(self.0));
+        native.blend(color);
+        self.0 = native.0.to_be();
+    }
+
+    fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
+        let native = <Rgb565Pixel as TargetPixel>::from_rgb(red, green, blue);
+        Self(native.0.to_be())
+    }
+}
+
+struct Framebuffer {
+    pixels: [NonNull<u16>; 2],
+    back: usize,
+    _single_threaded: PhantomData<Rc<()>>,
+}
+
+impl Framebuffer {
+    fn new() -> Option<Self> {
+        Some(Self {
+            pixels: [
+                NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
+                NonNull::new(unsafe { deskkin_framebuffer_alloc(1) })?,
+            ],
+            back: 0,
+            _single_threaded: PhantomData,
+        })
+    }
+
+    fn pixels_mut(&mut self) -> &mut [Rgb565BePixel] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.pixels[self.back].as_ptr().cast::<Rgb565BePixel>(),
+                WIDTH * HEIGHT,
+            )
+        }
+    }
+
+    fn swap(&mut self) {
+        self.back ^= 1;
+    }
+
+    fn back_index(&self) -> u8 {
+        self.back as u8
+    }
+}
+
+fn elapsed_us(start: u64, end: u64) -> u32 {
+    end.saturating_sub(start).try_into().unwrap_or(u32::MAX)
+}
+
+fn render_frame(
+    component: &RendererWindow,
+    window: &MinimalSoftwareWindow,
+    framebuffer: &mut Framebuffer,
+    frame: i32,
+) -> Result<u32, ()> {
+    component.set_frame(frame);
+    slint::platform::update_timers_and_animations();
+    unsafe { deskkin_renderer_observe(2, 0, 0) };
+    let started = unsafe { deskkin_uptime_us() };
+    let rendered = window.draw_if_needed(|renderer| {
+        let _ = renderer.render(framebuffer.pixels_mut(), WIDTH);
+    });
+    rendered
+        .then(|| elapsed_us(started, unsafe { deskkin_uptime_us() }))
+        .ok_or(())
+}
+
+fn take_completion(expected_buffer: u8) -> Result<u32, ()> {
+    loop {
+        let mut buffer_index = 0_u8;
+        let mut duration_us = 0_u32;
+        let completion =
+            unsafe { deskkin_display_take_completion(&mut buffer_index, &mut duration_us) };
+        if completion == 0 {
+            unsafe { deskkin_sleep_ms(1) };
+            continue;
+        }
+        return (completion > 0 && buffer_index == expected_buffer)
+            .then_some(duration_us)
+            .ok_or(());
+    }
+}
+
+#[no_mangle]
+extern "C" fn rust_main() {
+    unsafe { deskkin_renderer_boot_stage(9) };
+    let state = Rc::new(RefCell::new(None));
+    if slint::platform::set_platform(Box::new(DevicePlatform {
+        window: state.clone(),
+    }))
+    .is_err()
+    {
+        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        return;
+    }
+    unsafe { deskkin_renderer_boot_stage(10) };
+    let Ok(component) = RendererWindow::new() else {
+        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        return;
+    };
+    unsafe { deskkin_renderer_boot_stage(11) };
+    let Some(window) = state.borrow().clone() else {
+        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        return;
+    };
+    window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
+    unsafe { deskkin_renderer_boot_stage(12) };
+    if component.show().is_err() {
+        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        return;
+    }
+    unsafe { deskkin_renderer_boot_stage(13) };
+    let Some(mut framebuffer) = Framebuffer::new() else {
+        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        return;
+    };
+    unsafe { deskkin_renderer_boot_stage(14) };
+    let mut frame = 0_i32;
+    let mut next_frame_at = unsafe { deskkin_uptime_us() };
+
+    let Ok(mut in_flight_render_us) = render_frame(&component, &window, &mut framebuffer, frame)
+    else {
+        unsafe { deskkin_renderer_observe(5, 0, 0) };
+        return;
+    };
+    let mut in_flight_buffer = framebuffer.back_index();
+    if unsafe { deskkin_display_submit(in_flight_buffer) } != 0 {
+        unsafe { deskkin_renderer_observe(5, in_flight_render_us, 0) };
+        return;
+    }
+    unsafe { deskkin_renderer_observe(3, in_flight_render_us, 0) };
+    framebuffer.swap();
+    frame = frame.wrapping_add(1);
+    next_frame_at = next_frame_at.saturating_add(FRAME_PERIOD_US);
+
+    let mut first_frame = true;
+    loop {
+        let now = unsafe { deskkin_uptime_us() };
+        if now < next_frame_at {
+            unsafe { deskkin_sleep_ms(((next_frame_at - now) / 1_000) as u32) };
+        }
+        let Ok(ready_render_us) = render_frame(&component, &window, &mut framebuffer, frame) else {
+            unsafe { deskkin_renderer_observe(5, 0, 0) };
+            return;
+        };
+        let Ok(transfer_us) = take_completion(in_flight_buffer) else {
+            unsafe { deskkin_renderer_observe(5, in_flight_render_us, 0) };
+            return;
+        };
+        if first_frame {
+            if unsafe { deskkin_display_enable() } != 0 {
+                unsafe { deskkin_renderer_observe(5, in_flight_render_us, transfer_us) };
+                return;
+            }
+            first_frame = false;
+        }
+        unsafe { deskkin_renderer_observe(4, in_flight_render_us, transfer_us) };
+
+        in_flight_buffer = framebuffer.back_index();
+        in_flight_render_us = ready_render_us;
+        if unsafe { deskkin_display_submit(in_flight_buffer) } != 0 {
+            unsafe { deskkin_renderer_observe(5, in_flight_render_us, 0) };
+            return;
+        }
+        unsafe { deskkin_renderer_observe(3, in_flight_render_us, 0) };
+        framebuffer.swap();
+        frame = frame.wrapping_add(1);
+        next_frame_at = next_frame_at.saturating_add(FRAME_PERIOD_US);
+    }
+}
