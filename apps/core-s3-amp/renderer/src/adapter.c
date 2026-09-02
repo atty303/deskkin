@@ -63,6 +63,13 @@ enum renderer_stage {
 	RENDERER_TRANSFERRING = 3,
 	RENDERER_PRESENTED = 4,
 	RENDERER_FAILED = 5,
+	RENDERER_INITIALIZING_HEAP = 8,
+	RENDERER_INITIALIZING_DISPLAY = 9,
+	RENDERER_STARTING_THREADS = 10,
+	RENDERER_INITIALIZING_DMA = 11,
+	RENDERER_INITIALIZING_SPI = 12,
+	RENDERER_INITIALIZING_MIPI_DBI = 13,
+	RENDERER_INITIALIZING_PANEL = 14,
 };
 
 enum renderer_fault {
@@ -70,6 +77,9 @@ enum renderer_fault {
 	RENDERER_FAULT_HEAP_EXHAUSTED = 11,
 	RENDERER_FAULT_DISPLAY_INIT = 12,
 	RENDERER_FAULT_HEAP_INIT = 13,
+	RENDERER_FAULT_DMA_INIT = 14,
+	RENDERER_FAULT_SPI_INIT = 15,
+	RENDERER_FAULT_MIPI_DBI_INIT = 16,
 };
 
 struct deskkin_dirty_rect {
@@ -303,11 +313,8 @@ void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 
 uint64_t deskkin_uptime_us(void)
 {
-	/* RC_SLOW is approximately 136 kHz. Keep this path entirely inline: the
-	 * independent APPCPU image cannot safely enter another call window before
-	 * Zephyr has normalized its initial register-window state. Seven us/tick is
-	 * a conservative monotonic approximation used only for renderer pacing and
-	 * diagnostics.
+	/* RC_SLOW is approximately 136 kHz. Seven us/tick is a conservative
+	 * monotonic approximation used only for renderer pacing and diagnostics.
 	 */
 	const uint64_t ticks = rtc_timer_ll_get_cycle_count(0);
 	return (ticks << 3U) - ticks;
@@ -560,10 +567,12 @@ static void renderer_entry(void *first, void *second, void *third)
 
 int main(void)
 {
+	deskkin_renderer_observe(RENDERER_WAITING_FOR_DISPLAY, RENDERER_FAULT_NONE, 0, 0);
 	while (deskkin_shared_load(&AMP_SHARED->display_publication) == 0U ||
 	       AMP_SHARED->display.magic != DESKKIN_DISPLAY_MAGIC || AMP_SHARED->display.ready != 1U) {
 		k_busy_wait(100000U);
 	}
+	deskkin_renderer_observe(RENDERER_INITIALIZING_HEAP, RENDERER_FAULT_NONE, 0, 0);
 	if (initialize_renderer_heap() != 0) {
 		atomic_inc(&allocation_failures);
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_INIT, 0, 0);
@@ -580,20 +589,24 @@ int main(void)
 	}
 	initialize_output_only_gpio(display_gpio0);
 	initialize_output_only_gpio(display_gpio);
+	deskkin_renderer_observe(RENDERER_INITIALIZING_DISPLAY, RENDERER_FAULT_NONE, 0, 0);
 	const struct device *const dependencies[] = {
 		display_dma,
 		display_spi,
 		mipi_dbi,
 	};
 	for (size_t index = 0; index < ARRAY_SIZE(dependencies); ++index) {
+		deskkin_renderer_observe((uint8_t)(RENDERER_INITIALIZING_DMA + index),
+					 RENDERER_FAULT_NONE, 0, 0);
 		const int result = device_init(dependencies[index]);
 		if ((result != 0 && result != -EALREADY) ||
 		    !device_is_ready(dependencies[index])) {
-			deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_DISPLAY_INIT,
-						 0, 0);
+			const uint8_t fault = (uint8_t)(RENDERER_FAULT_DMA_INIT + index);
+			deskkin_renderer_observe(RENDERER_FAILED, fault, 0, 0);
 			return 1;
 		}
 	}
+	deskkin_renderer_observe(RENDERER_INITIALIZING_PANEL, RENDERER_FAULT_NONE, 0, 0);
 	const int display_result = device_init(display);
 	if (display_result == -ENOMEM) {
 		atomic_inc(&allocation_failures);
@@ -603,6 +616,7 @@ int main(void)
 		return 1;
 	}
 	deskkin_shared_store(&AMP_SHARED->display_spi_hz, display_spi_frequency_hz());
+	deskkin_renderer_observe(RENDERER_STARTING_THREADS, RENDERER_FAULT_NONE, 0, 0);
 	k_thread_create(&display_thread, display_stack, 4096,
 			display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
 	k_thread_create(&renderer_thread, renderer_stack, 12288,

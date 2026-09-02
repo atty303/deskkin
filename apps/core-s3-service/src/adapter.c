@@ -48,13 +48,11 @@ K_MSGQ_DEFINE(worker_completions, sizeof(struct bounded_completion), 8, 4);
 struct z_thread_stack_element DESKKIN_SRAM2_NOINIT __aligned(ARCH_STACK_PTR_ALIGN)
 	service_stack[K_THREAD_STACK_LEN(24576)];
 static struct k_thread service_thread;
-struct z_thread_stack_element EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)
-	control_stack[K_THREAD_STACK_LEN(4096)];
+extern struct z_thread_stack_element deskkin_control_stack[K_THREAD_STACK_LEN(3072)];
 static struct k_thread control_thread;
 static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 static struct nvs_fs storage;
 static bool storage_ready;
-static atomic_t control_trace;
 
 static void control_entry(void *first, void *second, void *third);
 
@@ -116,11 +114,6 @@ void deskkin_boot_trace(uint8_t stage, uint8_t error)
 }
 
 
-uint8_t deskkin_control_trace(void)
-{
-	return (uint8_t)atomic_get(&control_trace);
-}
-
 int deskkin_csrand(uint8_t *output, size_t length)
 {
 	if (output == NULL || length == 0 || length > CONTROL_FRAME_MAX) {
@@ -150,8 +143,8 @@ int deskkin_start_control_worker(void)
 	if (!device_is_ready(console)) {
 		return -ENODEV;
 	}
-	k_tid_t thread = k_thread_create(&control_thread, control_stack,
-					 K_THREAD_STACK_SIZEOF(control_stack), control_entry, NULL,
+	k_tid_t thread = k_thread_create(&control_thread, deskkin_control_stack,
+					 K_THREAD_STACK_SIZEOF(deskkin_control_stack), control_entry, NULL,
 					 NULL, NULL, -1, 0, K_NO_WAIT);
 	return thread == NULL ? -EIO : 0;
 }
@@ -313,7 +306,6 @@ static void control_entry(void *first, void *second, void *third)
 		if (uart_read_frame(&frame) != 0) {
 			continue;
 		}
-		atomic_set(&control_trace, 1);
 		struct k_msgq *queue = frame.bytes[1] == 9 ? &reserved_control : &application_commands;
 		if (frame.bytes[1] == 2 || frame.bytes[1] == 5 || frame.bytes[1] == 8 ||
 		    frame.bytes[1] == 11) {
@@ -323,10 +315,7 @@ static void control_entry(void *first, void *second, void *third)
 			if (completion.length == 0 || completion.length > sizeof(completion.bytes)) {
 				continue;
 			}
-			atomic_set(&control_trace, 2);
-			if (uart_write_completion(&completion) == 0) {
-				atomic_set(&control_trace, 3);
-			}
+			(void)uart_write_completion(&completion);
 			memset(&frame, 0, sizeof(frame));
 			memset(&completion, 0, sizeof(completion));
 			continue;

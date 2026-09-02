@@ -1,0 +1,74 @@
+From: Deskkin contributors
+Subject: [PATCH] soc: esp32s3: preserve the global MMU split for APPCPU
+
+ESP32-S3 has a shared L1 cache and MMU table. Adding mappings for the stopped
+APPCPU must retain the IROM/DROM split already used by the live PROCPU image.
+Configure that global split only for the initial PROCPU image; the APPCPU uses
+its reserved virtual range without moving it. The caller serializes the
+cache-disabled mapping interval. Use designated initializers so the independent
+image's instruction and data segments are not exchanged.
+
+MCUboot products start APPCPU explicitly after preparing their shared state, so
+do not run the generic automatic startup hook in that configuration.
+
+---
+ soc/espressif/common/loader.c       | 13 +++++++++----
+ soc/espressif/esp32s3/esp32s3-mp.c | 14 +++++++-------
+ 2 files changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/soc/espressif/common/loader.c b/soc/espressif/common/loader.c
+--- a/soc/espressif/common/loader.c
++++ b/soc/espressif/common/loader.c
+@@ -263,13 +263,20 @@ void map_rom_segments(int core, struct rom_segments *map)
+ #endif /* CONFIG_SOC_SERIES_ESP32 */
+ 
+ #if !defined(CONFIG_SOC_SERIES_ESP32) && !defined(CONFIG_SOC_SERIES_ESP32S2)
+-	/* Configure the Cache MMU size for instruction and rodata in flash. */
++	/* The IROM/DROM split is global on ESP32-S3. Configure it only for
++	 * the initial PROCPU image; an independently loaded APPCPU image adds
++	 * mappings in its reserved virtual range without moving that live split.
++	 */
++	if (core == 0) {
++		uint32_t cache_mmu_irom_size =
++			((map->irom_size + CONFIG_MMU_PAGE_SIZE - 1) /
++			 CONFIG_MMU_PAGE_SIZE) * sizeof(uint32_t);
++
++		Cache_Set_IDROM_MMU_Size(cache_mmu_irom_size,
++					CACHE_DROM_MMU_MAX_END - cache_mmu_irom_size);
++	}
+ #endif
+ }
+ #endif /* !CONFIG_MCUBOOT */
+diff --git a/soc/espressif/esp32s3/esp32s3-mp.c b/soc/espressif/esp32s3/esp32s3-mp.c
+--- a/soc/espressif/esp32s3/esp32s3-mp.c
++++ b/soc/espressif/esp32s3/esp32s3-mp.c
+@@ -147,12 +147,12 @@ int IRAM_ATTR esp_appcpu_image_load(unsigned int hdr_offset, unsigned int *entry
+ 		   image_header.drom_size, image_header.drom_size);
+ 
+ 	struct rom_segments rom = {
+-		image_header.drom_map_addr,
+-		image_header.drom_flash_offset + fa_offset,
+-		image_header.drom_size,
+-		image_header.irom_map_addr,
+-		image_header.irom_flash_offset + fa_offset,
+-		image_header.irom_size,
++		.irom_map_addr = image_header.irom_map_addr,
++		.irom_flash_offset = image_header.irom_flash_offset + fa_offset,
++		.irom_size = image_header.irom_size,
++		.drom_map_addr = image_header.drom_map_addr,
++		.drom_flash_offset = image_header.drom_flash_offset + fa_offset,
++		.drom_size = image_header.drom_size,
+ 	};
+ 
+ 	map_rom_segments(1, &rom);
+@@ -197,7 +197,7 @@ int esp_appcpu_init(void)
+ 	return 0;
+ }
+ 
+-#if !defined(CONFIG_MCUBOOT)
++#if !defined(CONFIG_BOOTLOADER_MCUBOOT)
+ extern int esp_appcpu_init(void);
+ SYS_INIT(esp_appcpu_init, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+ #endif
+-- 
+2.51.0

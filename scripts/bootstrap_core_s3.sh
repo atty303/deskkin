@@ -132,7 +132,9 @@ expected_rust_status = [
 ]
 expected_zephyr_status = [
     " M drivers/spi/spi_esp32_spim.c",
+    " M soc/espressif/common/loader.c",
     " M soc/espressif/esp32s3/default.ld",
+    " M soc/espressif/esp32s3/esp32s3-mp.c",
     " M soc/espressif/esp32s3/soc_appcpu.c",
 ]
 expected_espressif_status = [
@@ -179,7 +181,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "bf0b6c23ddf842be5bc5bc82ebfa2a0632150ef71915acba81288047da52fc32":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "471fba02590a34868388df8992388e4937eadc82a420987b1db57c41b47d6a12":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 espressif_patch_diff = subprocess.run(
@@ -306,6 +308,11 @@ case "$zephyr_patch_digest" in
       git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
       mv "$module/$relative.migrating" "$module/$relative"
     done
+    ;;
+  bf0b6c23ddf842be5bc5bc82ebfa2a0632150ef71915acba81288047da52fc32)
+    relative=soc/espressif/esp32s3/soc_appcpu.c
+    git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
+    mv "$module/$relative.migrating" "$module/$relative"
     ;;
 esac
 for patch_file in "$repo_root"/patches/zephyr-core-s3/*.patch; do

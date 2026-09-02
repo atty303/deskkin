@@ -133,17 +133,20 @@ only large render buffers that require internal SRAM.
 PROCPU and APPCPU static DRAM are separated by a link-time boundary assertion.
 The 24 KiB service stack and 8 KiB Wi-Fi stack occupy the separate 32 KiB SRAM2
 bank because those paths can execute while the shared instruction cache is
-disabled. PROCPU's AP-image loader stack is also internal because it remains
-active while `esp_appcpu_init()` disables that cache. APPCPU keeps only its
-boot/device-initialization main stack and driver state in its internal window;
-it creates the long-lived display and Slint/world renderer stacks from its
-PSRAM allocator before starting them.
+disabled. PROCPU prepares shared state and loads APPCPU synchronously on its
+internal main stack before starting control or service threads. The independent
+APPCPU entry normalizes the windowed ABI state and initially uses the first
+Zephyr interrupt stack; normal kernel startup then moves to the internal main
+stack. APPCPU keeps only this cache-independent boot/device-initialization state
+and driver state in its internal window. It creates the long-lived display and
+Slint/world renderer stacks from its PSRAM allocator before starting them.
 
-The ESP32-S3 instruction cache is shared across the CPUs and can be disabled by
-flash work. PROCPU serializes APPCPU startup and NVS access with one flash guard;
-after APPCPU starts, the guard stalls core 1 around the cache-disabled interval
-and always resumes it before unlocking. Device NVS access must not bypass this
-guard.
+The ESP32-S3 L1 cache and MMU table are shared across the CPUs. APPCPU startup
+adds its IROM and DROM mappings to unused entries without disabling the live
+shared cache or changing the global IROM/DROM split. The two segment identities
+are preserved with designated loader fields. After APPCPU starts, the NVS flash
+guard stalls core 1 only around a cache-disabled NVS interval and always resumes
+it before unlocking. Device NVS access must not bypass this guard.
 
 The 1 KiB shared control area contains bounded generation-published records:
 

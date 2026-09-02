@@ -36,6 +36,10 @@
 	status = "disabled";
 };
 
+&usb_serial {
+	status = "disabled";
+};
+
 &gpio0 {
 	status = "okay";
 	zephyr,deferred-init;

@@ -328,12 +328,8 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         self.assertIn("*libsubsys__input.a:input.c.obj", noncritical_patch)
         self.assertIn("*libapp.a:adapter.c.obj", noncritical_patch)
-        self.assertIn(
-            "esp_appcpu_init() reads the AP image while the flash cache is disabled", source
-        )
-        self.assertNotIn(
-            "EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)\n\tboot_stack", source
-        )
+        self.assertIn("CONFIG_MAIN_STACK_SIZE=4096", config)
+        self.assertNotIn("boot_stack", source)
 
         renderer_config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(
             encoding="utf-8"
@@ -348,12 +344,19 @@ class Phase3DeviceTests(unittest.TestCase):
         supervisor = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
         self.assertLess(
+            entry.index("deskkin_amp_prepare_renderer()"),
+            entry.index("deskkin_start_control_worker()"),
+        )
+        self.assertLess(
             entry.index("deskkin_start_control_worker()"),
             entry.index("deskkin_core_s3_service::start()"),
         )
         self.assertIn("atomic_set(&boot_stage, 9);", supervisor)
         self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
         self.assertIn("CONFIG_NET_CONFIG_AUTO_INIT=n", config)
+        self.assertIn("CONFIG_PRINTK=n", config)
+        self.assertNotIn("deskkin_amp_boot_trace", entry)
+        self.assertNotIn("deskkin_amp_boot_trace", supervisor)
 
     def test_amp_stalls_appcpu_while_flash_cache_can_be_disabled(self):
         supervisor = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
@@ -368,14 +371,17 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertLess(guard_exit, unstall)
         self.assertLess(unstall, unlock)
 
-        boot = supervisor.index("static void boot_entry")
-        boot_lock = supervisor.index("k_mutex_lock(&appcpu_flash_mutex, K_FOREVER);", boot)
-        appcpu_init = supervisor.index("esp_appcpu_init()", boot_lock)
+        prepare = supervisor.index("int deskkin_amp_prepare_renderer(void)")
+        shared = supervisor.index("memset((void *)AMP_SHARED", prepare)
+        display_publication = supervisor.index("publish_display_ready();", shared)
+        appcpu_init = supervisor.index("esp_appcpu_init()", shared)
         running = supervisor.index("appcpu_running = true;", appcpu_init)
-        boot_unlock = supervisor.index("k_mutex_unlock(&appcpu_flash_mutex);", running)
-        self.assertLess(boot_lock, appcpu_init)
+        platform_ready = supervisor.index("display_spi_hz) == 0U", running)
+        self.assertLess(shared, display_publication)
+        self.assertLess(display_publication, appcpu_init)
+        self.assertLess(shared, appcpu_init)
         self.assertLess(appcpu_init, running)
-        self.assertLess(running, boot_unlock)
+        self.assertLess(running, platform_ready)
 
         self.assertIn("deskkin_flash_guard_enter();\n\tconst struct flash_area *area;", service)
         self.assertIn("nvs_mount(&storage);", service)
@@ -425,7 +431,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("SPI_DMA_MAX_BUFFER_SIZE (4092 * 8)", spi_patch)
         self.assertIn("SPI_TRANSFER_TIMEOUT_MS 100", spi_patch)
         self.assertNotIn("esp_ptr_dma_ext_capable", spi_patch)
-        self.assertIn("bf0b6c23ddf842be5bc5bc82ebfa2a0632150ef71915acba81288047da52fc32", bootstrap)
+        self.assertIn("471fba02590a34868388df8992388e4937eadc82a420987b1db57c41b47d6a12", bootstrap)
         legacy_migration = bootstrap.split(
             "2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab", 1
         )[1].split(";;", 1)[0]
@@ -441,7 +447,7 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
         self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
-        self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=0", config)
+        self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=1024", config)
         self.assertNotIn("CONFIG_HEAP_MEM_POOL_IGNORE_MIN=y", config)
         overlay = (ROOT / "apps/core-s3-amp/renderer/app.overlay").read_text(encoding="utf-8")
         self.assertIn('&dma {\n\tstatus = "okay";\n\tzephyr,deferred-init;', overlay)
@@ -459,11 +465,32 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         build = (ROOT / "scripts/phase3_device.py").read_text(encoding="utf-8")
         bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
-        self.assertIn("call8 __appcpu_start_c", patch)
-        self.assertIn("wsr.windowbase", patch)
+        self.assertIn("wsr.windowstart a0", patch)
+        self.assertIn('z_interrupt_stacks + " STRINGIFY(CONFIG_ISR_STACK_SIZE) " + 16', patch)
+        self.assertIn("j __appcpu_start_c", patch)
+        self.assertNotIn("call8 __appcpu_start_c", patch)
+        self.assertNotIn("wsr.windowbase", patch)
         self.assertIn('" M soc/espressif/esp32s3/soc_appcpu.c"', bootstrap)
+        prior_migration = bootstrap.split(
+            "bf0b6c23ddf842be5bc5bc82ebfa2a0632150ef71915acba81288047da52fc32",
+            1,
+        )[1].split(";;", 1)[0]
+        self.assertIn("soc/espressif/esp32s3/soc_appcpu.c", prior_migration)
+        self.assertNotIn("drivers/spi/spi_esp32_spim.c", prior_migration)
         self.assertNotIn("patched_appcpu_source", build)
         self.assertNotIn("appcpu_source.write_text", build)
+
+    def test_amp_loader_preserves_live_procpu_cache_and_segment_identity(self):
+        patch = (ROOT / "patches/zephyr-core-s3/0008-preserve-procpu-cache-while-mapping-appcpu.patch").read_text(
+            encoding="utf-8"
+        )
+        bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
+        self.assertIn("if (core == 0)", patch)
+        self.assertIn(".irom_map_addr = image_header.irom_map_addr", patch)
+        self.assertIn(".drom_map_addr = image_header.drom_map_addr", patch)
+        self.assertIn("#if !defined(CONFIG_BOOTLOADER_MCUBOOT)", patch)
+        self.assertIn('" M soc/espressif/common/loader.c"', bootstrap)
+        self.assertIn('" M soc/espressif/esp32s3/esp32s3-mp.c"', bootstrap)
 
     def test_touch_overflow_counter_survives_followup_empty_reads(self):
         adapter = (ROOT / "apps/core-s3-amp/renderer/src/adapter.c").read_text(encoding="utf-8")

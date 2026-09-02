@@ -66,6 +66,7 @@ static atomic_t world_raster_us;
 static atomic_t world_raster_max_us;
 static atomic_t deadline_misses;
 static atomic_t display_ready;
+
 static atomic_t boot_stage;
 static atomic_t boot_error;
 static __aligned(32) uint16_t internal_framebuffer[2U][320U * 240U];
@@ -247,10 +248,8 @@ static void update_observed_yaw(void)
 struct z_thread_stack_element EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)
 	supervisor_stack[K_THREAD_STACK_LEN(2048)];
 static struct k_thread supervisor_thread;
-/* esp_appcpu_init() reads the AP image while the flash cache is disabled. */
-static struct z_thread_stack_element __aligned(ARCH_STACK_PTR_ALIGN)
-	boot_stack[K_THREAD_STACK_LEN(4096)];
-static struct k_thread boot_thread;
+struct z_thread_stack_element __aligned(ARCH_STACK_PTR_ALIGN)
+	deskkin_control_stack[K_THREAD_STACK_LEN(3072)];
 
 extern int esp_appcpu_init(void);
 
@@ -341,6 +340,20 @@ static int initialize_display_power(void)
 	return result;
 }
 
+static void publish_display_ready(void)
+{
+	const struct deskkin_display_ready message = {
+		.magic = DESKKIN_DISPLAY_MAGIC,
+		.generation = 1U,
+		.ready = 1U,
+		.framebuffer = (uint32_t)(uintptr_t)internal_framebuffer,
+		.renderer_heap = (uint32_t)renderer_heap,
+		.renderer_heap_size = (uint32_t)renderer_heap_size,
+	};
+	deskkin_shared_copy_to(&AMP_SHARED->display, &message, sizeof(message));
+	deskkin_shared_store(&AMP_SHARED->display_publication, 1U);
+}
+
 static void supervisor_entry(void *first, void *second, void *third)
 {
 	ARG_UNUSED(first);
@@ -361,51 +374,66 @@ static void supervisor_entry(void *first, void *second, void *third)
 		}
 		if (atomic_get(&display_ready) != 0 &&
 		    deskkin_shared_load(&AMP_SHARED->display_publication) == 0U) {
-			const struct deskkin_display_ready message = {
-				.magic = DESKKIN_DISPLAY_MAGIC,
-				.generation = 1U,
-				.ready = 1U,
-				.framebuffer = (uint32_t)(uintptr_t)internal_framebuffer,
-				.renderer_heap = (uint32_t)renderer_heap,
-				.renderer_heap_size = (uint32_t)renderer_heap_size,
-			};
-			deskkin_shared_copy_to(&AMP_SHARED->display, &message, sizeof(message));
-			deskkin_shared_store(&AMP_SHARED->display_publication, 1U);
+			publish_display_ready();
 		}
 		k_msleep(1);
 	}
 }
 
-void deskkin_amp_boot_trace(uint8_t stage)
+int deskkin_amp_prepare_renderer(void)
 {
-	printk("deskkin_amp:%u\n", stage);
-}
-
-static void boot_entry(void *first, void *second, void *third)
-{
-	ARG_UNUSED(first);
-	ARG_UNUSED(second);
-	ARG_UNUSED(third);
 	atomic_set(&boot_stage, 1);
+	intptr_t mapped_heap = 0;
+	size_t mapped_heap_size = 0;
+	if (esp_psram_get_mapped_region(&mapped_heap, &mapped_heap_size) != 0 ||
+	    mapped_heap == 0 || mapped_heap_size < RENDERER_HEAP_SIZE) {
+		atomic_set(&boot_error, 5);
+		return -ENOMEM;
+	}
+	renderer_heap_size = RENDERER_HEAP_SIZE;
+	renderer_heap = (uintptr_t)mapped_heap + mapped_heap_size - renderer_heap_size;
+	if (renderer_heap <= (uintptr_t)mapped_heap) {
+		atomic_set(&boot_error, 5);
+		return -ENOMEM;
+	}
+	const cache_bus_mask_t appcpu_bus =
+		cache_ll_l1_get_bus(1, (uint32_t)renderer_heap, renderer_heap_size);
+	cache_ll_l1_enable_bus(1, appcpu_bus);
+	memset((void *)AMP_SHARED, 0, sizeof(*AMP_SHARED));
 	atomic_set(&boot_stage, 2);
+	if (initialize_display_power() != 0) {
+		atomic_set(&boot_error, 4);
+		return -EIO;
+	}
+	atomic_set(&display_ready, 1);
+	publish_display_ready();
 	atomic_set(&boot_stage, 3);
-	k_mutex_lock(&appcpu_flash_mutex, K_FOREVER);
-	if (esp_appcpu_init() != 0) {
-		k_mutex_unlock(&appcpu_flash_mutex);
+	deskkin_flash_guard_enter();
+	unsigned int key = irq_lock();
+	const int appcpu_result = esp_appcpu_init();
+	irq_unlock(key);
+	deskkin_flash_guard_exit();
+	if (appcpu_result != 0) {
 		atomic_set(&boot_error, 3);
-		return;
+		return -EIO;
 	}
 	appcpu_running = true;
-	k_mutex_unlock(&appcpu_flash_mutex);
-	atomic_set(&boot_stage, 4);
-	if (initialize_display_power() == 0) {
-		atomic_set(&display_ready, 1);
-	} else {
-		atomic_set(&boot_error, 4);
-		return;
+	const int64_t renderer_deadline = k_uptime_get() + 5000;
+	while (deskkin_shared_load(&AMP_SHARED->display_spi_hz) == 0U &&
+	       k_uptime_get() < renderer_deadline) {
+		receive_heartbeat();
+		if (atomic_get(&renderer_stage) == 5) {
+			atomic_set(&boot_error, 7);
+			return -EIO;
+		}
+		k_msleep(1);
 	}
-	atomic_set(&boot_stage, 5);
-	atomic_set(&boot_stage, 9);
+	if (deskkin_shared_load(&AMP_SHARED->display_spi_hz) == 0U) {
+		atomic_set(&boot_error, 7);
+		return -ETIMEDOUT;
+	}
+	atomic_set(&boot_stage, 4);
+	return 0;
 }
 
 static int read_byte(uint8_t *byte, int64_t deadline)
@@ -525,31 +553,15 @@ void deskkin_amp_service_failed(void)
 
 void deskkin_amp_supervisor_main(void)
 {
-	if (!device_is_ready(console) || !device_is_ready(touch)) {
+	if (!device_is_ready(console) || !device_is_ready(touch) || !appcpu_running ||
+	    atomic_get(&display_ready) == 0 || atomic_get(&boot_error) != 0 ||
+	    deskkin_shared_load(&AMP_SHARED->display_spi_hz) == 0U) {
 		return;
 	}
-	intptr_t mapped_heap = 0;
-	size_t mapped_heap_size = 0;
-	if (esp_psram_get_mapped_region(&mapped_heap, &mapped_heap_size) != 0 ||
-	    mapped_heap == 0 || mapped_heap_size < RENDERER_HEAP_SIZE) {
-		atomic_set(&boot_error, 5);
-		return;
-	}
-	/* The linker keeps all PROCPU external state below this high 4 MiB region. */
-	renderer_heap_size = RENDERER_HEAP_SIZE;
-	renderer_heap = (uintptr_t)mapped_heap + mapped_heap_size - renderer_heap_size;
-	if (renderer_heap <= (uintptr_t)mapped_heap) {
-		atomic_set(&boot_error, 5);
-		return;
-	}
-	const cache_bus_mask_t appcpu_bus =
-		cache_ll_l1_get_bus(1, (uint32_t)renderer_heap, renderer_heap_size);
-	cache_ll_l1_enable_bus(1, appcpu_bus);
-	memset((void *)AMP_SHARED, 0, sizeof(*AMP_SHARED));
+	atomic_set(&boot_stage, 5);
 	k_thread_create(&supervisor_thread, supervisor_stack, K_THREAD_STACK_SIZEOF(supervisor_stack),
 			supervisor_entry, NULL, NULL, NULL, 3, 0, K_NO_WAIT);
-	k_thread_create(&boot_thread, boot_stack, K_THREAD_STACK_SIZEOF(boot_stack), boot_entry, NULL,
-			NULL, NULL, 4, 0, K_NO_WAIT);
+	atomic_set(&boot_stage, 9);
 	for (;;) {
 		k_sleep(K_FOREVER);
 	}

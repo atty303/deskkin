@@ -45,7 +45,6 @@ unsafe extern "C" {
     fn deskkin_nvs_read(record_id: u16, output: *mut u8, capacity: usize) -> c_int;
     fn deskkin_nvs_write_readback(record_id: u16, input: *const u8, length: usize) -> c_int;
     fn deskkin_nvs_delete(record_id: u16) -> c_int;
-    fn deskkin_control_trace() -> u8;
     fn deskkin_wifi_disconnect() -> c_int;
     fn deskkin_wifi_associate(
         ssid: *const u8,
