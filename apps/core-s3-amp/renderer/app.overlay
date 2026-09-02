@@ -47,7 +47,11 @@
 };
 
 &dma {
-	status = "disabled";
+	status = "okay";
+	zephyr,deferred-init;
+	interrupts = <DMA_IN_CH0_INTR_SOURCE IRQ_DEFAULT_PRIORITY ESP_INTR_FLAG_SHARED>,
+		     <DMA_OUT_CH0_INTR_SOURCE IRQ_DEFAULT_PRIORITY ESP_INTR_FLAG_SHARED>;
+	dma-channels = <2>;
 };
 
 &spi2 {
@@ -55,6 +59,9 @@
 	#size-cells = <0>;
 	status = "okay";
 	zephyr,deferred-init;
+	dma-enabled;
+	dmas = <&dma 0>, <&dma 1>;
+	dma-names = "rx", "tx";
 	pinctrl-0 = <&spim2_default>;
 	pinctrl-names = "default";
 	clock-frequency = <20000000>;

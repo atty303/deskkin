@@ -1,0 +1,47 @@
+From: Deskkin contributors
+Subject: [PATCH] esp32s3: place app queues and input worker in SPIRAM
+
+The application message queues and input worker are not touched while flash
+cache is disabled. Keep them in external RAM so the internal DMA window can
+hold both full-screen framebuffers and the boot stack which loads the AP image
+with the cache disabled.
+
+---
+ soc/espressif/esp32s3/default.ld | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/soc/espressif/esp32s3/default.ld b/soc/espressif/esp32s3/default.ld
+index 0b13532d0e7..00000000000 100644
+--- a/soc/espressif/esp32s3/default.ld
++++ b/soc/espressif/esp32s3/default.ld
+@@ -803,6 +803,8 @@ SECTIONS
+       *libsubsys__net__l2__ethernet.a:*
+       *libsubsys__net__lib__config.a:*
+       *libsubsys__net__ip.a:*
+-      *libsubsys__net.a:* ) .noinit)
++      *libsubsys__net.a:*
++      *libsubsys__input.a:input.c.obj
++      *libapp.a:adapter.c.obj ) .noinit)
+     *(EXCLUDE_FILE(
+       *libdrivers__wifi.a:*
+@@ -811,6 +813,8 @@ SECTIONS
+       *libsubsys__net__l2__ethernet.a:*
+       *libsubsys__net__lib__config.a:*
+       *libsubsys__net__ip.a:*
+-      *libsubsys__net.a:* ) .noinit.*)
++      *libsubsys__net.a:*
++      *libsubsys__input.a:input.c.obj
++      *libapp.a:adapter.c.obj ) .noinit.*)
+ #else
+     *(.noinit)
+@@ -1034,6 +1038,8 @@ SECTIONS
+     *libsubsys__net__lib__config.a:(.noinit .noinit.*)
+     *libsubsys__net__ip.a:(.noinit .noinit.*)
+     *libsubsys__net.a:(.noinit .noinit.*)
++    *libsubsys__input.a:input.c.obj(.noinit .noinit.*)
++    *libapp.a:adapter.c.obj(.noinit .noinit.*)
+ #endif
+     . = ALIGN(16);
+     *(.ext_ram_noinit.*)
+-- 
+2.51.0

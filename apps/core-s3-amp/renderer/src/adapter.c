@@ -3,33 +3,24 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
-#include <esp_attr.h>
-#include <esp_cpu.h>
 #include <esp_clk_tree.h>
 #include <hal/rtc_timer_ll.h>
 #include <soc/clk_tree_defs.h>
 #include <soc/spi_struct.h>
 #include <zephyr/device.h>
-#include <zephyr/arch/xtensa/arch_inlines.h>
 #include <zephyr/drivers/display.h>
-#include <zephyr/fatal.h>
 #include <zephyr/kernel.h>
+#include <zephyr/kernel/thread_stack.h>
 #include <zephyr/sys/sys_heap.h>
-#include <xtensa_asm2_context.h>
 #include "../../shared.h"
 
 #define DISPLAY_WIDTH 320U
 #define DISPLAY_HEIGHT 240U
-#define BYTES_PER_LINE (DISPLAY_WIDTH * sizeof(uint16_t))
 #define FRAME_PIXELS (DISPLAY_WIDTH * DISPLAY_HEIGHT)
+#define PIXEL_DMA_CHUNK_BYTES (4092U * 8U)
+#define FULL_FRAME_DMA_BATCHES DIV_ROUND_UP(FRAME_PIXELS * sizeof(uint16_t), PIXEL_DMA_CHUNK_BYTES)
 #define FRAMEBUFFER_COUNT 2U
 #define MAX_DIRTY_RECTS 3U
-#define FULL_WIDTH_CHUNK_LINES 30U
-#ifndef CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM
-#define CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM FULL_WIDTH_CHUNK_LINES
-#endif
-#define BOOT_MARKER                                                                                \
-	((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + DESKKIN_BOOT_MARKER_OFFSET))
 #define AMP_SHARED                                                                                 \
 	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
 					       DESKKIN_CHANNEL_OFFSET))
@@ -102,10 +93,13 @@ struct display_completion {
 
 K_MSGQ_DEFINE(display_requests, sizeof(struct display_request), 2, 4);
 K_MSGQ_DEFINE(display_completions, sizeof(struct display_completion), 2, 4);
-K_THREAD_STACK_DEFINE(display_stack, 4096);
+static k_thread_stack_t *display_stack;
 static struct k_thread display_thread;
+static k_thread_stack_t *renderer_stack;
+static struct k_thread renderer_thread;
 
 static const struct device *const display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+static const struct device *const display_dma = DEVICE_DT_GET(DT_NODELABEL(dma));
 static const struct device *const mipi_dbi = DEVICE_DT_GET(DT_NODELABEL(mipi_dbi));
 static const struct device *const display_spi = DEVICE_DT_GET(DT_NODELABEL(spi2));
 static const struct device *const display_gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -113,11 +107,6 @@ static const struct device *const display_gpio = DEVICE_DT_GET(DT_NODELABEL(gpio
 static uint16_t *framebuffer;
 static struct sys_heap renderer_heap;
 static bool renderer_heap_ready;
-static volatile uint8_t current_boot_stage;
-static volatile uint32_t allocation_count;
-static volatile uint32_t last_allocation_size;
-static volatile uintptr_t last_stack_pointer;
-static volatile bool fatal_active;
 static uint32_t generation;
 static atomic_t completed_frames;
 static atomic_t allocation_failures;
@@ -196,8 +185,6 @@ void deskkin_world_observe(uint32_t generation, uint32_t input, uint32_t drops,
 
 void *malloc(size_t size)
 {
-	allocation_count += 1U;
-	last_allocation_size = (uint32_t)size;
 	if (!renderer_heap_ready) {
 		return NULL;
 	}
@@ -224,16 +211,12 @@ static int initialize_renderer_heap(void)
 	if (address == 0U || size == 0U || (address & 31U) != 0U) {
 		return -ENOMEM;
 	}
-	current_boot_stage = 40U;
 	for (uint32_t offset = 0U; offset < size; offset += 64U * 1024U) {
 		volatile uint32_t *const word = (volatile uint32_t *)(uintptr_t)(address + offset);
 		const uint32_t expected = 0x5a5a0000U ^ offset;
 		*word = expected;
 		__asm__ volatile("memw" ::: "memory");
 		if (*word != expected) {
-			BOOT_MARKER[1] = 40U;
-			BOOT_MARKER[2] = offset;
-			BOOT_MARKER[3] = *word;
 			return -EIO;
 		}
 	}
@@ -242,9 +225,6 @@ static int initialize_renderer_heap(void)
 	*last_word = 0xa5a55a5aU;
 	__asm__ volatile("memw" ::: "memory");
 	if (*last_word != 0xa5a55a5aU) {
-		BOOT_MARKER[1] = 40U;
-		BOOT_MARKER[2] = size - sizeof(uint32_t);
-		BOOT_MARKER[3] = *last_word;
 		return -EIO;
 	}
 	sys_heap_init(&renderer_heap, (void *)(uintptr_t)address, size);
@@ -260,71 +240,6 @@ static void initialize_output_only_gpio(const struct device *gpio)
 	gpio->state->init_res = 0U;
 	gpio->state->initialized = true;
 }
-
-void deskkin_renderer_boot_stage(uint8_t stage)
-{
-	register uintptr_t stack_pointer __asm__("a1");
-	last_stack_pointer = stack_pointer;
-	current_boot_stage = stage;
-	*BOOT_MARKER = stage;
-}
-
-void IRAM_ATTR k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
-{
-	if (fatal_active) {
-		*BOOT_MARKER = 0xefU;
-		for (;;) {
-		}
-	}
-	fatal_active = true;
-	BOOT_MARKER[1] = (uint32_t)(uintptr_t)esf;
-	BOOT_MARKER[2] = last_stack_pointer;
-	BOOT_MARKER[3] = ((uint32_t)current_boot_stage << 24U) |
-			 (allocation_count & 0x00ffffffU);
-	if ((uintptr_t)esf >= 0x3fce2000U && (uintptr_t)esf <= 0x3fcedffcu &&
-	    (((uintptr_t)esf & 3U) == 0U)) {
-		const _xtensa_irq_bsa_t *const bsa =
-			*(const _xtensa_irq_bsa_t *const volatile *)esf;
-		const uintptr_t bsa_address = (uintptr_t)bsa;
-		BOOT_MARKER[2] = (uint32_t)bsa_address;
-		if (bsa_address >= 0x3fce2000U &&
-		    bsa_address <= 0x3fcee000U - sizeof(*bsa) &&
-		    (bsa_address & 3U) == 0U) {
-			BOOT_MARKER[1] = (uint32_t)bsa->pc;
-			BOOT_MARKER[2] = (uint32_t)bsa_address;
-			BOOT_MARKER[3] = (uint32_t)last_stack_pointer;
-		}
-	}
-	*BOOT_MARKER = 0xe0U | (reason & 0x0fU);
-	for (;;) {
-	}
-}
-
-static int renderer_early_marker(void)
-{
-	deskkin_renderer_boot_stage(1U);
-	return 0;
-}
-
-SYS_INIT(renderer_early_marker, EARLY, 0);
-
-#define DEFINE_BOOT_MARKER(name, value, level, priority) \
-	static int name(void)                             \
-	{                                                 \
-		deskkin_renderer_boot_stage(value);          \
-		return 0;                                    \
-	}                                                 \
-	SYS_INIT(name, level, priority)
-
-DEFINE_BOOT_MARKER(renderer_pre_kernel_1_start, 20U, PRE_KERNEL_1, 0);
-DEFINE_BOOT_MARKER(renderer_pre_kernel_1_after_clock, 30U, PRE_KERNEL_1, 30);
-DEFINE_BOOT_MARKER(renderer_pre_kernel_1_end, 21U, PRE_KERNEL_1, 99);
-DEFINE_BOOT_MARKER(renderer_pre_kernel_2_start, 22U, PRE_KERNEL_2, 0);
-DEFINE_BOOT_MARKER(renderer_pre_kernel_2_end, 23U, PRE_KERNEL_2, 99);
-DEFINE_BOOT_MARKER(renderer_post_kernel_start, 24U, POST_KERNEL, 0);
-DEFINE_BOOT_MARKER(renderer_post_kernel_end, 25U, POST_KERNEL, 99);
-DEFINE_BOOT_MARKER(renderer_application_start, 26U, APPLICATION, 0);
-DEFINE_BOOT_MARKER(renderer_application_end, 27U, APPLICATION, 99);
 
 void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 			      uint32_t transfer_us)
@@ -384,8 +299,6 @@ void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 	deskkin_shared_fence();
 	deskkin_shared_store(&AMP_SHARED->renderer_publication, generation);
 	atomic_set(&copy_last_us, (atomic_val_t)(deskkin_uptime_us() - copy_started));
-	BOOT_MARKER[1] = esp_cpu_get_core_id();
-	*BOOT_MARKER = 6U;
 }
 
 uint64_t deskkin_uptime_us(void)
@@ -593,43 +506,6 @@ static uint32_t display_spi_frequency_hz(void)
 	       ((GPSPI2.clock.clkdiv_pre + 1U) * (GPSPI2.clock.clkcnt_n + 1U));
 }
 
-static int display_write_rect(const uint16_t *pixels,
-			      const struct deskkin_dirty_rect *rect)
-{
-	if (rect->width == DISPLAY_WIDTH) {
-		uint16_t line = rect->y;
-		const uint16_t end = rect->y + rect->height;
-		while (line < end) {
-			const uint16_t height = MIN(FULL_WIDTH_CHUNK_LINES, end - line);
-			const struct display_buffer_descriptor descriptor = {
-				.buf_size = DISPLAY_WIDTH * height * sizeof(uint16_t),
-				.pitch = DISPLAY_WIDTH,
-				.width = DISPLAY_WIDTH,
-				.height = height,
-			};
-			const int result =
-				display_write(display, 0, line, &descriptor,
-					      pixels + (size_t)line * DISPLAY_WIDTH);
-			if (result != 0) {
-				return result;
-			}
-			line += height;
-		}
-		return 0;
-	}
-
-	const struct display_buffer_descriptor descriptor = {
-		.buf_size =
-			(((uint32_t)rect->height - 1U) * DISPLAY_WIDTH + rect->width) *
-			sizeof(uint16_t),
-		.pitch = DISPLAY_WIDTH,
-		.width = rect->width,
-		.height = rect->height,
-	};
-	return display_write(display, rect->x, rect->y, &descriptor,
-			     pixels + (size_t)rect->y * DISPLAY_WIDTH + rect->x);
-}
-
 static void display_entry(void *first, void *second, void *third)
 {
 	ARG_UNUSED(first);
@@ -642,26 +518,27 @@ static void display_entry(void *first, void *second, void *third)
 		const uint16_t *pixels =
 			framebuffer + (size_t)request.buffer_index * FRAME_PIXELS;
 		uint32_t request_pixels = 0U;
-		uint32_t request_batches = 0U;
 		for (size_t index = 0; index < request.dirty_rect_count; ++index) {
 			const struct deskkin_dirty_rect *rect = &request.dirty_rects[index];
 			request_pixels += (uint32_t)rect->width * rect->height;
-			request_batches += rect->width == DISPLAY_WIDTH
-					   ? DIV_ROUND_UP(rect->height, FULL_WIDTH_CHUNK_LINES)
-					   : DIV_ROUND_UP(rect->height,
-							  CONFIG_DMA_ESP32_MAX_DESCRIPTOR_NUM);
 		}
 		atomic_set(&dirty_rect_count, request.dirty_rect_count);
-		atomic_set(&pixel_dma_batches, (atomic_val_t)request_batches);
+		if (request.dirty_rect_count != 0U) {
+			atomic_set(&pixel_dma_batches, FULL_FRAME_DMA_BATCHES);
+		}
 		atomic_set(&dirty_pixels, (atomic_val_t)request_pixels);
-		atomic_set(&transferred_bytes,
-			   (atomic_val_t)(request_pixels * sizeof(uint16_t)));
+		atomic_set(&transferred_bytes, request.dirty_rect_count == 0U
+						 ? 0
+						 : (atomic_val_t)(FRAME_PIXELS * sizeof(uint16_t)));
 		int result = 0;
-		for (size_t index = 0; index < request.dirty_rect_count; ++index) {
-			result = display_write_rect(pixels, &request.dirty_rects[index]);
-			if (result != 0) {
-				break;
-			}
+		if (request.dirty_rect_count != 0U) {
+			const struct display_buffer_descriptor descriptor = {
+				.buf_size = FRAME_PIXELS * sizeof(uint16_t),
+				.pitch = DISPLAY_WIDTH,
+				.width = DISPLAY_WIDTH,
+				.height = DISPLAY_HEIGHT,
+			};
+			result = display_write(display, 0, 0, &descriptor, pixels);
 		}
 		const uint64_t elapsed = deskkin_uptime_us() - started;
 		const struct display_completion completion = {
@@ -673,34 +550,42 @@ static void display_entry(void *first, void *second, void *third)
 	}
 }
 
+static void renderer_entry(void *first, void *second, void *third)
+{
+	ARG_UNUSED(first);
+	ARG_UNUSED(second);
+	ARG_UNUSED(third);
+	rust_main();
+}
+
 int main(void)
 {
-	deskkin_renderer_boot_stage(2U);
-	BOOT_MARKER[1] = 0U;
-	BOOT_MARKER[2] = 0U;
-	BOOT_MARKER[3] = 0U;
-	deskkin_renderer_boot_stage(4U);
 	while (deskkin_shared_load(&AMP_SHARED->display_publication) == 0U ||
 	       AMP_SHARED->display.magic != DESKKIN_DISPLAY_MAGIC || AMP_SHARED->display.ready != 1U) {
 		k_busy_wait(100000U);
 	}
-	deskkin_renderer_boot_stage(7U);
 	if (initialize_renderer_heap() != 0) {
 		atomic_inc(&allocation_failures);
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_INIT, 0, 0);
 		return 1;
 	}
-	deskkin_renderer_boot_stage(41U);
+	display_stack = sys_heap_aligned_alloc(&renderer_heap, ARCH_STACK_PTR_ALIGN,
+					       K_THREAD_STACK_LEN(4096));
+	renderer_stack = sys_heap_aligned_alloc(&renderer_heap, ARCH_STACK_PTR_ALIGN,
+					        K_THREAD_STACK_LEN(12288));
+	if (display_stack == NULL || renderer_stack == NULL) {
+		atomic_inc(&allocation_failures);
+		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_EXHAUSTED, 0, 0);
+		return 1;
+	}
 	initialize_output_only_gpio(display_gpio0);
 	initialize_output_only_gpio(display_gpio);
-	deskkin_renderer_boot_stage(42U);
 	const struct device *const dependencies[] = {
+		display_dma,
 		display_spi,
 		mipi_dbi,
 	};
 	for (size_t index = 0; index < ARRAY_SIZE(dependencies); ++index) {
-		BOOT_MARKER[1] = (uint32_t)index + 1U;
-		deskkin_renderer_boot_stage((uint8_t)(43U + index * 2U));
 		const int result = device_init(dependencies[index]);
 		if ((result != 0 && result != -EALREADY) ||
 		    !device_is_ready(dependencies[index])) {
@@ -708,14 +593,8 @@ int main(void)
 						 0, 0);
 			return 1;
 		}
-		deskkin_renderer_boot_stage((uint8_t)(44U + index * 2U));
 	}
-	deskkin_renderer_boot_stage(49U);
 	const int display_result = device_init(display);
-	deskkin_renderer_boot_stage(50U);
-	BOOT_MARKER[1] = (device_is_ready(mipi_dbi) ? 1U : 0U) |
-			 (device_is_ready(display_spi) ? 2U : 0U) |
-			 (device_is_ready(display_gpio) ? 4U : 0U);
 	if (display_result == -ENOMEM) {
 		atomic_inc(&allocation_failures);
 	}
@@ -724,9 +603,9 @@ int main(void)
 		return 1;
 	}
 	deskkin_shared_store(&AMP_SHARED->display_spi_hz, display_spi_frequency_hz());
-	deskkin_renderer_boot_stage(8U);
-	k_thread_create(&display_thread, display_stack, K_THREAD_STACK_SIZEOF(display_stack),
+	k_thread_create(&display_thread, display_stack, 4096,
 			display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
-	rust_main();
+	k_thread_create(&renderer_thread, renderer_stack, 12288,
+			renderer_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
 	return 0;
 }

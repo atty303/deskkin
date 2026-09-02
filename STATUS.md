@@ -27,11 +27,17 @@ motion, culling, sorting, sampling, alpha, and RGB565 output.
 The sole CoreS3 product path is MCUboot plus AMP sysbuild. PROCPU owns touch,
 Wi-Fi, Noise, NVS, the migrated application service, USB control, power/reset,
 and virtual observed pose. APPCPU owns Slint shell/texture generation, world
-rendering, SPI2, and display transfer. GDMA remains an unresolved bring-up
-limitation. The old product task aliases are
-removed. APPCPU primary and secondary slots are 3 MiB. Two RGB565 framebuffers
-are carved from the high 4 MiB PSRAM renderer region rather than PROCPU static
-DRAM.
+rendering, SPI2/GDMA, and display transfer. GDMA is enabled again as the active
+product baseline. The old product task aliases are removed. APPCPU primary and
+secondary slots are 3 MiB. Two RGB565 framebuffers remain in internal SRAM and
+the display thread transfers each completed frame directly through
+APPCPU-owned GDMA channel pair 0. PROCPU owns the low 4 MiB PSRAM region for
+service/network heaps, input/message queues, and non-cache-critical stacks;
+APPCPU owns the explicitly reserved high 4 MiB for textures, decoded assets,
+Slint/world allocations, and its long-lived renderer/display stacks. The
+cache-independent 32 KiB SRAM2 bank contains the 24 KiB service and 8 KiB
+Wi-Fi stacks. The PROCPU AP-image loader stack is internal because it remains
+active while `esp_appcpu_init()` disables the shared cache.
 
 AMP shared memory has schema-checked, generation-published world snapshots, a
 bounded touch ring with per-slot publication and drop count, UI command slot,
@@ -55,23 +61,27 @@ local record is persisted.
 
 ## Verification state
 
-`mise run fix`, the complete host suite, the CoreS3 Python conformance suite,
-and the final aggregate `mise run test` pass, including a clean
-MCUboot/PROCPU/APPCPU/inert build. Repeated live AMP flashes to
-`/dev/ttyACM2` completed every domain write, readback hash, and reset. The clean
-image reaches PROCPU boot stage 9 and APPCPU renderer stage 4 on core 1, reports
-a fresh generation-stable heartbeat and ready display, and continuously renders
-the full-screen unpaired shell. One observed run advanced to 4,026 completed
-frames with zero renderer, allocation, transfer, atlas-cache, or stale-snapshot
-faults at a reported 40 MHz display SPI clock.
+A clean MCUboot/PROCPU/APPCPU/inert build passes with the restored baseline
+memory topology. Link maps place the 307,200-byte double framebuffer and 4 KiB
+AP-image loader stack in internal SRAM, service and Wi-Fi stacks in SRAM2,
+PROCPU heap/network/input/message state and non-critical stacks in low PSRAM,
+and reserve the high 4 MiB allocator for APPCPU render resources and long-lived
+renderer/display stacks. `mise run fix`, `mise run test:host`,
+`mise run test:core-s3`, and the final `mise run test` pass; the final aggregate
+CoreS3 build record is `3b36ec8d-c12c-4e28-b4ef-f5a3f1b8a175`. The bootstrap
+migration also converges both retained legacy Zephyr patch digests after the
+obsolete strided-display patch is removed.
 
-The APPCPU IllegalInstruction was caused by PROCPU NVS/flash work disabling the
-shared instruction cache while APPCPU executed from IROM. The product now
-serializes APPCPU startup and all NVS flash operations with one mutex and stalls
-core 1 only for the cache-disabled interval. A regression test fixes the
-stall/unstall and NVS coverage contract. APPCPU allocations now use its
-caller-owned PSRAM `sys_heap`; the small Zephyr kernel heap remains available
-only for drivers that require `k_malloc`.
+An earlier APPCPU IllegalInstruction was caused by PROCPU NVS/flash work
+disabling the shared instruction cache while APPCPU executed from IROM. During
+restoration of the direct-DMA topology, a separate PROCPU heap panic exposed
+that its AP-image loader stack had incorrectly been placed in PSRAM while
+`esp_appcpu_init()` disabled the cache. The product now keeps that loader stack
+internal, serializes APPCPU startup and all NVS flash operations with one mutex,
+and stalls core 1 only for an NVS cache-disabled interval. A regression test
+fixes the stack placement, stall/unstall, and NVS coverage contracts. APPCPU
+allocations use its caller-owned high-PSRAM `sys_heap`; the small Zephyr kernel
+heap remains available only for drivers that require `k_malloc`.
 
 The APPCPU entry trampoline is part of the repository's ordered, digest-checked
 Zephyr patch series. Product builds no longer rewrite the shared pinned Zephyr
@@ -79,24 +89,31 @@ checkout around each invocation. Touch-ring loss is accumulated from the
 generations actually skipped by the APPCPU consumer and remains visible in
 later heartbeat publications.
 
-The target has no usable identity, so it correctly remains in the Setup shell.
+The normal AMP product was flashed to all domains on `/dev/ttyACM2`; every
+write passed hash verification and the target was reset (flash record
+`3926c1f1-fcd4-4f92-85c9-36bd03b605df`). The subsequent USB control status
+request still ends in the typed `control_timeout` (status record
+`c3bbb27e-a6f5-4d1d-a4a8-86296a70fd94`). The same timeout occurred with an
+AP-disabled diagnostic image, so the remaining failure is not isolated to
+world rendering, AP startup, or GDMA. The current image is the normal dual-core
+product, but boot stage, renderer heartbeat, screen contents, and the
+previously observed Setup shell cannot be confirmed through the control
+transport.
+
 No identity, Wi-Fi profile, host profile, or pairing state was created. The
-paired world path and fixed 60-second physical benchmark therefore remain
-unmeasured. APPCPU display transfer is currently the stable synchronous SPI2
-path; GDMA is still disabled in the APPCPU devicetree overlay and the live
-`pixel_dma_batches` counter is zero. A bounded trial enabled the GDMA node and
-SPI2 `dma-enabled` property, but APPCPU then stopped inside display
-initialization at boot marker 49 before publishing any heartbeat or frame; the
-trial was reverted and the stable image was reflashed.
+paired world path and fixed 60-second physical benchmark remain unmeasured.
 
 The target CoreS3 is the Espressif USB JTAG/serial device at `/dev/ttyACM2`.
 
 ## Next work
 
-Restore and verify SPI2 GDMA without regressing the stable APPCPU boot, shared
-flash-cache guard, framebuffer ownership, or full-screen pairing shell. Remove
-bring-up-only boot markers and replace the pinned APPCPU entry patch only when
-an equivalent upstream-compatible startup path is verified.
+Restore USB control status readback without weakening the fixed AMP ownership,
+memory bounds, or direct-DMA path. JTAG inspection is currently unavailable to
+the development user because the host USB bus node is not writable; no host
+permission or udev policy was changed. Once status is observable, confirm the
+boot/renderer heartbeat and measure full-frame DMA transfer cost through the
+paired world benchmark. Replace the pinned APPCPU entry patch only when an
+equivalent upstream-compatible startup path is verified.
 
 Identity creation, Wi-Fi provisioning, host-profile selection, and pairing each
 remain separate live authority boundaries. Once those prerequisites exist, run

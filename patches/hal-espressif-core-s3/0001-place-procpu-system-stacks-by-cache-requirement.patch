@@ -1,0 +1,43 @@
+From: Deskkin contributors
+Subject: [PATCH] esp32s3: place system stacks by cache requirement
+
+Keep the Wi-Fi stack in the cache-independent SRAM2 bank reserved by the
+Deskkin PROCPU linker and place the timer callback task stack in external RAM.
+The Wi-Fi stack remains accessible while flash cache is disabled; the timer
+task cannot run during the same-core cache-disable critical section.
+
+---
+ components/esp_timer/src/esp_timer.c            | 3 ++-
+ components/esp_wifi/esp32s3/esp_adapter.c       | 3 ++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/components/esp_timer/src/esp_timer.c b/components/esp_timer/src/esp_timer.c
+index 95c2ff772..000000000 100644
+--- a/components/esp_timer/src/esp_timer.c
++++ b/components/esp_timer/src/esp_timer.c
+@@ -89,7 +89,8 @@ static LIST_HEAD(esp_inactive_timer_list, esp_timer) s_inactive_timers[ESP_TIMER
+ };
+ #endif
+ 
+-K_KERNEL_STACK_MEMBER(timer_task_stack, CONFIG_ESP32_TIMER_TASK_STACK_SIZE);
++struct z_thread_stack_element EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)
++    timer_task_stack[K_KERNEL_STACK_LEN(CONFIG_ESP32_TIMER_TASK_STACK_SIZE)];
+ // task used to dispatch timer callbacks
+ static struct k_thread s_timer_task;
+ /* counting semaphore used to notify the timer task from ISR */
+diff --git a/components/esp_wifi/esp32s3/esp_adapter.c b/components/esp_wifi/esp32s3/esp_adapter.c
+index bb9376b96..000000000 100644
+--- a/components/esp_wifi/esp32s3/esp_adapter.c
++++ b/components/esp_wifi/esp32s3/esp_adapter.c
+@@ -46,7 +46,8 @@
+ 
+ LOG_MODULE_REGISTER(esp32_wifi_adapter, CONFIG_WIFI_LOG_LEVEL);
+ 
+-K_THREAD_STACK_DEFINE(wifi_stack, 8192);
++struct z_thread_stack_element __attribute__((section(".sram2.noinit")))
++    __aligned(ARCH_STACK_PTR_ALIGN) wifi_stack[K_THREAD_STACK_LEN(8192)];
+ static struct k_thread wifi_task_handle;
+ static void *wifi_msgq_buffer;
+ 
+-- 
+2.51.0

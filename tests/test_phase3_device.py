@@ -170,6 +170,7 @@ class Phase3DeviceTests(unittest.TestCase):
             response[61:65] = (40_000).to_bytes(4, "big")
             response[80] = 1
             response[81] = 2
+            response[82:84] = (1).to_bytes(2, "big")
             response[84:88] = (1_200).to_bytes(4, "big")
             response[92:96] = generation.to_bytes(4, "big")
             response[96:100] = generation.to_bytes(4, "big")
@@ -281,23 +282,58 @@ class Phase3DeviceTests(unittest.TestCase):
 
     def test_amp_supervisor_dram_ends_at_renderer_origin(self):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
-        self.assertIn("ASSERT(_end <= 0x3fce2000", linker)
+        self.assertIn("ASSERT(_end <= 0x3fce5c00", linker)
 
-    def test_amp_supervisor_reserves_two_full_psram_framebuffers(self):
+    def test_amp_supervisor_keeps_framebuffers_internal_and_renderer_heap_in_psram(self):
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
         source = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
+        service_adapter = (ROOT / "apps/core-s3-service/src/adapter.c").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("CONFIG_ESP_SPIRAM=y", config)
-        self.assertIn("CONFIG_ESP_SPIRAM_HEAP_SIZE=4194304", config)
-        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=8192", config)
+        self.assertIn("CONFIG_ESP_SPIRAM_HEAP_SIZE=3473408", config)
+        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
+        self.assertIn("shared_multi_heap_alloc(SMH_REG_ATTR_EXTERNAL", service_adapter)
         self.assertIn("CONFIG_SPIRAM_MODE_QUAD=y", config)
         self.assertIn("CONFIG_SPIRAM_SPEED_80M=y", config)
-        self.assertIn("2U * 320U * 240U * sizeof(uint16_t)", source)
-        self.assertIn("renderer_framebuffer = renderer_heap", source)
-        self.assertNotIn("internal_framebuffer", source)
+        self.assertIn("static __aligned(32) uint16_t internal_framebuffer[2U][320U * 240U]", source)
+        self.assertIn(".framebuffer = (uint32_t)(uintptr_t)internal_framebuffer", source)
+        self.assertNotIn("renderer_framebuffer", source)
         self.assertIn("esp_psram_get_mapped_region", source)
-        self.assertIn("mapped_heap_size / 2U < CONFIG_ESP_SPIRAM_HEAP_SIZE", source)
+        self.assertIn("#define RENDERER_HEAP_SIZE (4U * 1024U * 1024U)", source)
+        self.assertIn("mapped_heap_size < RENDERER_HEAP_SIZE", source)
         self.assertIn("mapped_heap_size - renderer_heap_size", source)
+        self.assertIn("renderer_heap <= (uintptr_t)mapped_heap", source)
         self.assertIn("cache_ll_l1_enable_bus(1, appcpu_bus)", source)
+
+        sram2 = (ROOT / "apps/core-s3-amp/amp-sram2.ld").read_text(encoding="utf-8")
+        hal_patch = (ROOT / "patches/hal-espressif-core-s3/0001-place-procpu-system-stacks-by-cache-requirement.patch").read_text(
+            encoding="utf-8"
+        )
+        zephyr_patch = (ROOT / "patches/zephyr-core-s3/0006-place-wifi-network-state-in-spiram.patch").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(".sram2.noinit 0x3fcf0000", sram2)
+        self.assertIn("SIZEOF(.sram2.noinit) <= 0x8000", sram2)
+        dram_boundary = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("_ext_ram_heap_end <= 0x3c400000", dram_boundary)
+        self.assertIn('__attribute__((section(".sram2.noinit")))', service_adapter)
+        self.assertIn('__attribute__((section(".sram2.noinit")))', hal_patch)
+        self.assertIn("_ext_ram_bss_start", zephyr_patch)
+        self.assertIn("*libnet80211.a:(.bss .bss.*)", zephyr_patch)
+        noncritical_patch = (ROOT / "patches/zephyr-core-s3/0007-place-app-message-and-input-state-in-spiram.patch").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("*libsubsys__input.a:input.c.obj", noncritical_patch)
+        self.assertIn("*libapp.a:adapter.c.obj", noncritical_patch)
+        self.assertIn(
+            "esp_appcpu_init() reads the AP image while the flash cache is disabled", source
+        )
+        self.assertNotIn(
+            "EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)\n\tboot_stack", source
+        )
 
         renderer_config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(
             encoding="utf-8"
@@ -316,7 +352,7 @@ class Phase3DeviceTests(unittest.TestCase):
             entry.index("deskkin_core_s3_service::start()"),
         )
         self.assertIn("atomic_set(&boot_stage, 9);", supervisor)
-        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=8192", config)
+        self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
         self.assertIn("CONFIG_NET_CONFIG_AUTO_INIT=n", config)
 
     def test_amp_stalls_appcpu_while_flash_cache_can_be_disabled(self):
@@ -366,23 +402,56 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertNotIn("CONFIG_ESP_SPIRAM", config)
         self.assertIn("sys_heap_init(&renderer_heap", adapter)
         self.assertIn("sys_heap_alloc(&renderer_heap", adapter)
+        self.assertIn("sys_heap_aligned_alloc(&renderer_heap", adapter)
+        self.assertIn("k_thread_create(&display_thread, display_stack, 4096", adapter)
+        self.assertIn("k_thread_create(&renderer_thread, renderer_stack, 12288", adapter)
+        self.assertNotIn("K_THREAD_STACK_DEFINE(display_stack", adapter)
+        self.assertNotIn("K_THREAD_STACK_DEFINE(renderer_stack", adapter)
         self.assertIn("atomic_inc(&allocation_failures)", adapter)
         self.assertIn("K_MSGQ_DEFINE(display_requests", adapter)
         self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
         self.assertIn("k_yield();", adapter)
-        spi_patch = (ROOT / "patches/zephyr-core-s3/0003-yield-while-polling-esp32-spi.patch").read_text(
+        self.assertNotIn("DMA_STAGING_LINES", adapter)
+        self.assertNotIn("dma_staging", adapter)
+        self.assertIn("display_write(display, 0, 0, &descriptor, pixels)", adapter)
+        self.assertIn("FULL_FRAME_DMA_BATCHES", adapter)
+        self.assertIn("atomic_set(&pixel_dma_batches, FULL_FRAME_DMA_BATCHES)", adapter)
+        spi_patch = (ROOT / "patches/zephyr-core-s3/0001-route-esp32-spi-pixel-payloads-through-dma.patch").read_text(
             encoding="utf-8"
         )
         self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
         self.assertIn("+\t\t\tk_yield();", spi_patch)
-        self.assertIn("2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab", bootstrap)
+        self.assertIn("transfer_len_bytes > SOC_SPI_MAXIMUM_BUFFER_SIZE", spi_patch)
+        self.assertIn("SPI_DMA_MAX_BUFFER_SIZE (4092 * 8)", spi_patch)
+        self.assertIn("SPI_TRANSFER_TIMEOUT_MS 100", spi_patch)
+        self.assertNotIn("esp_ptr_dma_ext_capable", spi_patch)
+        self.assertIn("bf0b6c23ddf842be5bc5bc82ebfa2a0632150ef71915acba81288047da52fc32", bootstrap)
+        legacy_migration = bootstrap.split(
+            "2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab", 1
+        )[1].split(";;", 1)[0]
+        for legacy_path in (
+            "drivers/spi/spi_esp32_spim.c",
+            "drivers/display/display_ili9xxx.c",
+            "drivers/mipi_dbi/mipi_dbi_esp32.c",
+            "include/zephyr/drivers/mipi_dbi.h",
+        ):
+            self.assertIn(legacy_path, legacy_migration)
+        self.assertFalse(
+            (ROOT / "patches/zephyr-core-s3/0004-write-strided-mipi-dbi-regions.patch").exists()
+        )
         self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
         self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
         self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=0", config)
         self.assertNotIn("CONFIG_HEAP_MEM_POOL_IGNORE_MIN=y", config)
         overlay = (ROOT / "apps/core-s3-amp/renderer/app.overlay").read_text(encoding="utf-8")
-        self.assertIn('&dma {\n\tstatus = "disabled";', overlay)
-        self.assertNotIn("\tdma-enabled;", overlay)
+        self.assertIn('&dma {\n\tstatus = "okay";\n\tzephyr,deferred-init;', overlay)
+        self.assertIn("DMA_IN_CH0_INTR_SOURCE", overlay)
+        self.assertIn("DMA_OUT_CH0_INTR_SOURCE", overlay)
+        self.assertIn("\tdma-channels = <2>;", overlay)
+        self.assertIn("\tdma-enabled;", overlay)
+        self.assertIn("\tdmas = <&dma 0>, <&dma 1>;", overlay)
+        self.assertIn('\tdma-names = "rx", "tx";', overlay)
+        self.assertIn("display_dma,\n\t\tdisplay_spi,\n\t\tmipi_dbi,", adapter)
 
     def test_amp_entry_trampoline_is_a_pinned_zephyr_patch(self):
         patch = (ROOT / "patches/zephyr-core-s3/0005-initialize-appcpu-window-state.patch").read_text(
@@ -746,6 +815,7 @@ int main(void) {
             "renderer_fault": 0,
             "allocation_failures": 0,
             "transfer_failures": 0,
+            "pixel_dma_batches": 1,
             "stale_snapshots": 0,
             "valid_availability_result": True,
             "valid_view_generation": 6,
@@ -760,6 +830,7 @@ int main(void) {
             ("valid_availability_result", False),
             ("valid_view_generation", 0),
             ("renderer_fault", 1),
+            ("pixel_dma_batches", 0),
             ("stale_snapshots", 1),
         ):
             self.assertFalse(device.run_succeeded([record | {key: invalid}], 7))

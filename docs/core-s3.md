@@ -11,10 +11,11 @@ material stay below ignored `.deskkin/` state.
 PROCPU owns USB control, touch, Wi-Fi, DHCP/TCP, Noise, NVS, application
 service, virtual pose, APPCPU boot, display power/reset, and status. APPCPU owns
 the Slint instances, canonical billboard textures, custom world renderer,
-SPI2, and LCD transfer. The verified product path currently uses synchronous
-SPI2; GDMA is disabled because enabling it blocks APPCPU display initialization
-and remains a bring-up limitation. There is no supported single-image firmware or
-`core-s3:amp-*` task alias.
+SPI2/GDMA, and LCD transfer. Framebuffers remain in internal SRAM; the display
+thread submits each completed framebuffer directly through GDMA. The
+allocated PSRAM is reserved for heaps, cached textures and assets, networking,
+and stacks that do not need cache-independent execution. There is no supported
+single-image firmware or `core-s3:amp-*` task alias.
 
 ## Task and authority boundaries
 
@@ -120,11 +121,23 @@ solid `#16191d`.
 
 ## AMP memory and channels
 
-PROCPU initializes Quad PSRAM and reserves the high 4 MiB for APPCPU-owned
-render resources. Two 320x240 RGB565 framebuffers occupy the beginning of that
-region; the remaining region is the APPCPU allocator. PROCPU and APPCPU static
-DRAM remain separated by the link-time boundary assertion. APPCPU exclusively
-owns the allocator metadata and display transfer.
+PROCPU initializes 8 MiB Quad PSRAM. Its allocator owns the low 4 MiB for the
+portable service heap, Wi-Fi/network state, input/message queues, and other
+non-cache-critical system stacks. The explicitly reserved high 4 MiB is a
+caller-owned APPCPU allocator for canonical textures, decoded assets,
+Slint/world allocations, and the display and renderer thread stacks. Two
+320x240 RGB565 framebuffers remain in internal SRAM so SPI2 can submit each
+completed frame directly through APPCPU-owned GDMA channel pair 0. They are the
+only large render buffers that require internal SRAM.
+
+PROCPU and APPCPU static DRAM are separated by a link-time boundary assertion.
+The 24 KiB service stack and 8 KiB Wi-Fi stack occupy the separate 32 KiB SRAM2
+bank because those paths can execute while the shared instruction cache is
+disabled. PROCPU's AP-image loader stack is also internal because it remains
+active while `esp_appcpu_init()` disables that cache. APPCPU keeps only its
+boot/device-initialization main stack and driver state in its internal window;
+it creates the long-lived display and Slint/world renderer stacks from its
+PSRAM allocator before starting them.
 
 The ESP32-S3 instruction cache is shared across the CPUs and can be disabled by
 flash work. PROCPU serializes APPCPU startup and NVS access with one flash guard;

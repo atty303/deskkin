@@ -12,8 +12,8 @@
 #define DESKKIN_WORLD_SCHEMA 1U
 #define DESKKIN_CHANNEL_SCHEMA 1U
 #define DESKKIN_TOUCH_CAPACITY 16U
+#define DESKKIN_SHARED_SIZE 0x1000U
 #define DESKKIN_CHANNEL_OFFSET 0x400U
-#define DESKKIN_BOOT_MARKER_OFFSET 0xbf0U
 
 static inline void deskkin_shared_fence(void)
 {
@@ -170,8 +170,7 @@ struct deskkin_amp_shared {
 	uint32_t target_yaw_publication;
 };
 
-_Static_assert(sizeof(struct deskkin_amp_shared) <=
-		       DESKKIN_BOOT_MARKER_OFFSET - DESKKIN_CHANNEL_OFFSET,
-	       "AMP channels overlap the APPCPU boot marker");
+_Static_assert(sizeof(struct deskkin_amp_shared) <= DESKKIN_SHARED_SIZE - DESKKIN_CHANNEL_OFFSET,
+	       "AMP channels exceed the shared control region");
 
 #endif

@@ -1,0 +1,62 @@
+From: Deskkin contributors
+Subject: [PATCH] esp32s3: place Wi-Fi network state in SPIRAM
+
+CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM already moves Wi-Fi and network no-init
+allocations to external RAM. Apply the same policy to their BSS and the
+ESP32-S3 Wi-Fi blobs, reserving internal DMA SRAM for cache-disable-safe state
+and display buffers.
+
+---
+ soc/espressif/esp32s3/default.ld | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/soc/espressif/esp32s3/default.ld b/soc/espressif/esp32s3/default.ld
+index 04388054a49..0b13532d0e7 100644
+--- a/soc/espressif/esp32s3/default.ld
++++ b/soc/espressif/esp32s3/default.ld
+@@ -848,8 +848,27 @@ SECTIONS
+     *(.sbss2.*)
+     *(.gnu.linkonce.sb2.*)
+     *(.dynbss)
++#ifdef CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM
++    *(EXCLUDE_FILE(
++      *libdrivers__wifi.a:*
++      *libsubsys__net__l2__ethernet.a:*
++      *libsubsys__net__lib__config.a:*
++      *libsubsys__net__ip.a:*
++      *libsubsys__net.a:*
++      *libnet80211.a:*
++      *libpp.a:* ) .bss)
++    *(EXCLUDE_FILE(
++      *libdrivers__wifi.a:*
++      *libsubsys__net__l2__ethernet.a:*
++      *libsubsys__net__lib__config.a:*
++      *libsubsys__net__ip.a:*
++      *libsubsys__net.a:*
++      *libnet80211.a:*
++      *libpp.a:* ) .bss.*)
++#else
+     *(.bss)
+     *(.bss.*)
++#endif
+     *(.share.mem)
+     *(.gnu.linkonce.b.*)
+     *(COMMON)
+@@ -1041,6 +1060,15 @@ SECTIONS
+     _ext_ram_noinit_end = ABSOLUTE(.);
+ 
+     _ext_ram_bss_start = ABSOLUTE(.);
++#ifdef CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM
++    *libdrivers__wifi.a:(.bss .bss.*)
++    *libsubsys__net__l2__ethernet.a:(.bss .bss.*)
++    *libsubsys__net__lib__config.a:(.bss .bss.*)
++    *libsubsys__net__ip.a:(.bss .bss.*)
++    *libsubsys__net.a:(.bss .bss.*)
++    *libnet80211.a:(.bss .bss.*)
++    *libpp.a:(.bss .bss.*)
++#endif
+     *(.ext_ram.bss*)
+     . = ALIGN(16);
+ 
+-- 
+2.51.0

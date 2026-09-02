@@ -110,14 +110,22 @@ The CoreS3 product is one MCUboot plus dual-Zephyr AMP sysbuild. PROCPU owns
 touch, Wi-Fi, Noise, NVS, the application service, virtual observed pose, USB
 control, power/reset, and status supervision. APPCPU exclusively owns Slint
 texture generation, the custom world renderer, SPI2, and display transfer.
-GDMA is not part of the verified product baseline: enabling the ESP32-S3 GDMA
-path currently blocks APPCPU display initialization, so the accepted live path
-uses synchronous SPI2 transfer until that driver bring-up is resolved.
-PROCPU reserves the high 4 MiB Quad-PSRAM region, places both full-screen RGB565
-framebuffers at its beginning, and publishes the remaining caller-owned heap to
-APPCPU. Character QOI is decoded only for the active loop and converted once to
-RGB565+A8; canonical information textures and the fixed object texture stay in
-the same bounded PSRAM cache.
+SPI2 pixel payloads use APPCPU-owned GDMA channel pair 0. The display thread
+submits a completed full-screen RGB565 framebuffer directly from internal SRAM.
+PROCPU owns the low 4 MiB Quad-PSRAM region for service allocation,
+Wi-Fi/network state, input/message queues, and non-cache-critical stacks. It
+publishes the explicitly reserved high 4 MiB as the APPCPU caller-owned heap
+for Character decode, canonical information and object textures, Slint/world
+allocation, and the long-lived renderer/display stacks. The two full-screen
+framebuffers remain in internal SRAM because GDMA requires them there; other
+large storage defaults to PSRAM.
+
+The cache-independent SRAM2 bank contains the PROCPU service and Wi-Fi stacks
+that can run across flash cache-disable intervals. The PROCPU stack that loads
+the AP image is internal for the same cache-disable requirement. APPCPU internal
+SRAM contains only boot/device initialization, drivers, kernel state, and the
+framebuffers; its long-lived rendering work runs on stacks allocated from the
+high PSRAM region.
 
 ESP32-S3 flash operations can temporarily disable the instruction cache shared
 by both CPUs. PROCPU therefore serializes APPCPU startup and every device NVS

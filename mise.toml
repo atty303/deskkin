@@ -162,7 +162,7 @@ description = "Start the already configured CoreS3 application"
 run = "python scripts/phase3_device.py run"
 
 [tasks."core-s3:benchmark"]
-description = "Run the fixed 60-second CoreS3 Pet rendering benchmark"
+description = "Run the fixed 60-second CoreS3 billboard world benchmark"
 run = "python scripts/phase3_device.py benchmark"
 
 [tasks."core-s3:recover"]

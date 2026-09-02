@@ -2,7 +2,8 @@
 
 /*
  * Keep the 416 KiB SRAM1 bank contiguous for the two Zephyr images and the
- * full-screen framebuffers. The shared AMP control block only needs one KiB;
+ * DMA-capable full-screen framebuffers. The shared AMP control block needs
+ * only one KiB;
  * place it, the IPM payload, and the software doorbells at the top of SRAM1.
  */
 / {

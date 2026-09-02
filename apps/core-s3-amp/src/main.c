@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <esp_cpu.h>
+#include <esp_attr.h>
 #include <esp_psram.h>
 #include <hal/cache_ll.h>
 #include <zephyr/device.h>
@@ -12,6 +13,7 @@
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
+#include <zephyr/kernel/thread_stack.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/byteorder.h>
 #include "../shared.h"
@@ -19,8 +21,6 @@
 #define CONTROL_FRAME_MAX 188
 #define STATUS_RESPONSE_SIZE 160
 #define HEARTBEAT_STALE_MS 500
-#define APPCPU_BOOT_MARKER                                                                        \
-	((volatile uint32_t *)(DT_REG_ADDR(DT_NODELABEL(shm0)) + DESKKIN_BOOT_MARKER_OFFSET))
 #define AMP_SHARED                                                                                 \
 	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
 					       DESKKIN_CHANNEL_OFFSET))
@@ -68,7 +68,8 @@ static atomic_t deadline_misses;
 static atomic_t display_ready;
 static atomic_t boot_stage;
 static atomic_t boot_error;
-static uintptr_t renderer_framebuffer;
+static __aligned(32) uint16_t internal_framebuffer[2U][320U * 240U];
+#define RENDERER_HEAP_SIZE (4U * 1024U * 1024U)
 static uintptr_t renderer_heap;
 static size_t renderer_heap_size;
 static const struct device *const touch = DEVICE_DT_GET(DT_CHOSEN(zephyr_touch));
@@ -243,9 +244,12 @@ static void update_observed_yaw(void)
 	observed_yaw += step;
 }
 
-K_THREAD_STACK_DEFINE(supervisor_stack, 2048);
+struct z_thread_stack_element EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)
+	supervisor_stack[K_THREAD_STACK_LEN(2048)];
 static struct k_thread supervisor_thread;
-K_THREAD_STACK_DEFINE(boot_stack, 4096);
+/* esp_appcpu_init() reads the AP image while the flash cache is disabled. */
+static struct z_thread_stack_element __aligned(ARCH_STACK_PTR_ALIGN)
+	boot_stack[K_THREAD_STACK_LEN(4096)];
 static struct k_thread boot_thread;
 
 extern int esp_appcpu_init(void);
@@ -361,7 +365,7 @@ static void supervisor_entry(void *first, void *second, void *third)
 				.magic = DESKKIN_DISPLAY_MAGIC,
 				.generation = 1U,
 				.ready = 1U,
-				.framebuffer = (uint32_t)renderer_framebuffer,
+				.framebuffer = (uint32_t)(uintptr_t)internal_framebuffer,
 				.renderer_heap = (uint32_t)renderer_heap,
 				.renderer_heap_size = (uint32_t)renderer_heap_size,
 			};
@@ -472,8 +476,6 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 	response[56] = (uint8_t)atomic_get(&display_ready);
 	sys_put_be32((uint32_t)atomic_get(&render_max_us), &response[57]);
 	sys_put_be32((uint32_t)atomic_get(&transfer_max_us), &response[61]);
-	response[65] = (uint8_t)*APPCPU_BOOT_MARKER;
-	response[66] = (uint8_t)APPCPU_BOOT_MARKER[1];
 	response[67] = deskkin_shared_load(&AMP_SHARED->renderer_publication) != 0U ? 1U : 0U;
 	response[68] = (uint8_t)atomic_get(&boot_stage);
 	response[69] = (uint8_t)atomic_get(&boot_error);
@@ -529,27 +531,20 @@ void deskkin_amp_supervisor_main(void)
 	intptr_t mapped_heap = 0;
 	size_t mapped_heap_size = 0;
 	if (esp_psram_get_mapped_region(&mapped_heap, &mapped_heap_size) != 0 ||
-	    mapped_heap == 0 || mapped_heap_size / 2U < CONFIG_ESP_SPIRAM_HEAP_SIZE) {
+	    mapped_heap == 0 || mapped_heap_size < RENDERER_HEAP_SIZE) {
 		atomic_set(&boot_error, 5);
 		return;
 	}
-	/* Keep APPCPU allocations disjoint from PROCPU's heap at the low end. */
-	renderer_heap_size = CONFIG_ESP_SPIRAM_HEAP_SIZE;
+	/* The linker keeps all PROCPU external state below this high 4 MiB region. */
+	renderer_heap_size = RENDERER_HEAP_SIZE;
 	renderer_heap = (uintptr_t)mapped_heap + mapped_heap_size - renderer_heap_size;
-	const size_t framebuffer_bytes = 2U * 320U * 240U * sizeof(uint16_t);
-	if (renderer_heap_size <= framebuffer_bytes) {
-		atomic_set(&allocation_failures, 1);
+	if (renderer_heap <= (uintptr_t)mapped_heap) {
 		atomic_set(&boot_error, 5);
 		return;
 	}
-	renderer_framebuffer = renderer_heap;
-	renderer_heap += framebuffer_bytes;
-	renderer_heap_size -= framebuffer_bytes;
 	const cache_bus_mask_t appcpu_bus =
-		cache_ll_l1_get_bus(1, (uint32_t)renderer_framebuffer,
-				    renderer_heap_size + framebuffer_bytes);
+		cache_ll_l1_get_bus(1, (uint32_t)renderer_heap, renderer_heap_size);
 	cache_ll_l1_enable_bus(1, appcpu_bus);
-	memset((void *)renderer_framebuffer, 0, framebuffer_bytes);
 	memset((void *)AMP_SHARED, 0, sizeof(*AMP_SHARED));
 	k_thread_create(&supervisor_thread, supervisor_stack, K_THREAD_STACK_SIZEOF(supervisor_stack),
 			supervisor_entry, NULL, NULL, NULL, 3, 0, K_NO_WAIT);

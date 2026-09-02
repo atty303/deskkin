@@ -106,7 +106,6 @@ unsafe extern "C" {
     ) -> c_int;
     fn deskkin_display_take_completion(buffer_index: *mut u8, duration_us: *mut u32) -> c_int;
     fn deskkin_display_enable() -> c_int;
-    fn deskkin_renderer_boot_stage(stage: u8);
     fn deskkin_renderer_observe(stage: u8, fault: u8, render_us: u32, transfer_us: u32);
     fn deskkin_uptime_us() -> u64;
     fn deskkin_yield();
@@ -875,7 +874,6 @@ fn sas_text(sas: u32) -> slint::SharedString {
 
 #[no_mangle]
 extern "C" fn rust_main() {
-    unsafe { deskkin_renderer_boot_stage(9) };
     let state = Rc::new(RefCell::new(Vec::new()));
     if slint::platform::set_platform(Box::new(DevicePlatform {
         windows: state.clone(),
@@ -892,7 +890,6 @@ extern "C" fn rust_main() {
         };
         return;
     }
-    unsafe { deskkin_renderer_boot_stage(10) };
     let Ok(component) = RendererWindow::new() else {
         unsafe {
             deskkin_renderer_observe(
@@ -918,14 +915,12 @@ extern "C" fn rust_main() {
     };
     drop(windows);
     window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
-    unsafe { deskkin_renderer_boot_stage(12) };
     if component.show().is_err() {
         unsafe {
             deskkin_renderer_observe(RendererStage::Failed as u8, RendererFault::Show as u8, 0, 0)
         };
         return;
     }
-    unsafe { deskkin_renderer_boot_stage(13) };
     let Some(mut framebuffer) = Framebuffer::new() else {
         unsafe {
             deskkin_renderer_observe(
@@ -937,7 +932,6 @@ extern "C" fn rust_main() {
         };
         return;
     };
-    unsafe { deskkin_renderer_boot_stage(14) };
     let mut animator = PetAnimator::new();
     let _ = animator.set_state(PetAnimationState::MoveRight);
     let mut decoded = None;
@@ -956,7 +950,6 @@ extern "C" fn rust_main() {
     component.on_pair(|| unsafe { deskkin_publish_ui_command(1) });
     component.on_confirm(|| unsafe { deskkin_publish_ui_command(2) });
     component.on_cancel(|| unsafe { deskkin_publish_ui_command(3) });
-    unsafe { deskkin_renderer_boot_stage(15) };
     let mut display_enabled = false;
     let mut next_frame_at_us = unsafe { deskkin_uptime_us() }.saturating_add(50_000);
     let mut touch = TouchYawAdapter::new(UnwrappedAngle::ZERO);

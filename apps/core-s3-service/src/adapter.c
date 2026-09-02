@@ -4,12 +4,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/flash.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kvss/nvs.h>
 #include <zephyr/kernel.h>
+#include <zephyr/kernel/thread_stack.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/dhcpv4.h>
 #include <zephyr/net/socket.h>
@@ -17,6 +19,9 @@
 #include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/multi_heap/shared_multi_heap.h>
+#include <esp_attr.h>
+#include <esp_memory_utils.h>
 
 #include "dhcp_wait.h"
 
@@ -38,9 +43,13 @@ struct bounded_completion {
 K_MSGQ_DEFINE(application_commands, sizeof(struct bounded_frame), 4, 4);
 K_MSGQ_DEFINE(reserved_control, sizeof(struct bounded_frame), 1, 4);
 K_MSGQ_DEFINE(worker_completions, sizeof(struct bounded_completion), 8, 4);
-K_THREAD_STACK_DEFINE(service_stack, 24576);
+#define DESKKIN_SRAM2_NOINIT __attribute__((section(".sram2.noinit")))
+
+struct z_thread_stack_element DESKKIN_SRAM2_NOINIT __aligned(ARCH_STACK_PTR_ALIGN)
+	service_stack[K_THREAD_STACK_LEN(24576)];
 static struct k_thread service_thread;
-K_THREAD_STACK_DEFINE(control_stack, 4096);
+struct z_thread_stack_element EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)
+	control_stack[K_THREAD_STACK_LEN(4096)];
 static struct k_thread control_thread;
 static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 static struct nvs_fs storage;
@@ -55,6 +64,51 @@ extern size_t deskkin_rust_control_snapshot(const uint8_t *input, size_t input_l
 						   uint8_t *output);
 extern void deskkin_flash_guard_enter(void);
 extern void deskkin_flash_guard_exit(void);
+
+void *malloc(size_t size)
+{
+	return shared_multi_heap_alloc(SMH_REG_ATTR_EXTERNAL, MAX(size, 1U));
+}
+
+void *calloc(size_t count, size_t size)
+{
+	size_t bytes;
+	if (__builtin_mul_overflow(count, size, &bytes)) {
+		return NULL;
+	}
+	void *const block = malloc(bytes);
+	if (block != NULL) {
+		memset(block, 0, bytes);
+	}
+	return block;
+}
+
+void *realloc(void *block, size_t size)
+{
+	if (block == NULL) {
+		return malloc(size);
+	}
+	if (size == 0U) {
+		free(block);
+		return NULL;
+	}
+	if (esp_ptr_in_dram(block)) {
+		return k_realloc(block, size);
+	}
+	return shared_multi_heap_realloc(SMH_REG_ATTR_EXTERNAL, block, size);
+}
+
+void free(void *block)
+{
+	if (block == NULL) {
+		return;
+	}
+	if (esp_ptr_in_dram(block)) {
+		k_free(block);
+	} else {
+		shared_multi_heap_free(block);
+	}
+}
 
 void deskkin_boot_trace(uint8_t stage, uint8_t error)
 {

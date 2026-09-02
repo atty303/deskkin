@@ -637,8 +637,6 @@ def decode_world_status(status: bytes) -> dict[str, int]:
         "display_ready": status[56],
         "render_max_us": unsigned(57, 61),
         "transfer_max_us": unsigned(61, 65),
-        "appcpu_boot_stage": status[65],
-        "appcpu_core_id": status[66],
         "heartbeat_memory_side": status[67],
         "procpu_boot_stage": status[68],
         "procpu_boot_error": status[69],
@@ -804,6 +802,7 @@ def world_benchmark(
         and completed_frames > 0
         and last["stage"] != 5
         and last["display_ready"] == 1
+        and last["pixel_dma_batches"] > 0
         and last["fault"] == 0
         and last["allocation_failures"] == 0
         and last["transfer_failures"] == 0
@@ -848,8 +847,6 @@ def world_benchmark(
         "max_status_response_ms": max_response_ms,
         "allocation_failures": last["allocation_failures"],
         "transfer_failures": last["transfer_failures"],
-        "appcpu_boot_stage": last["appcpu_boot_stage"],
-        "appcpu_core_id": last["appcpu_core_id"],
         "mailbox_published": last["heartbeat_memory_side"],
         "procpu_boot_stage": last["procpu_boot_stage"],
         "procpu_boot_error": last["procpu_boot_error"],
@@ -976,7 +973,7 @@ DIAGNOSTIC_RECORD_KEYS = frozenset(
         "last_generation", "generation", "render_last_us", "transfer_last_us",
         "render_max_us", "transfer_max_us", "renderer_stage", "renderer_fault",
         "display_ready", "max_status_response_ms", "allocation_failures", "transfer_failures",
-        "appcpu_boot_stage", "appcpu_core_id", "mailbox_published", "procpu_boot_stage",
+        "mailbox_published", "procpu_boot_stage",
         "procpu_boot_error", "display_spi_hz", "copy_last_us", "wire_last_us",
         "pixel_dma_batches", "view_generation", "valid_view_generation",
         "pose_generation", "input_generation", "stale_snapshots", "touch_drops",
@@ -1126,6 +1123,7 @@ def run_succeeded(records: list[dict[str, object]], expected_attempt: int) -> bo
         and record.get("renderer_fault") == 0
         and record.get("allocation_failures") == 0
         and record.get("transfer_failures") == 0
+        and int(record.get("pixel_dma_batches", 0)) > 0
         and record.get("stale_snapshots") == 0
         for record in records
     )

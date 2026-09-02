@@ -1,0 +1,212 @@
+From: Deskkin contributors
+Subject: [PATCH] spi: esp32: route pixel payloads through bounded DMA
+
+Use the SPI FIFO for command-sized transfers and GDMA for larger pixel
+payloads. Chain up to eight internal-memory descriptors for full-screen pixel
+transfers, yield while polling, and return a bounded timeout rather than
+hanging the caller.
+
+---
+ drivers/spi/spi_esp32_spim.c | 69 ++++++++++++++++++++++++++++---------
+ 1 file changed, 52 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/spi/spi_esp32_spim.c b/drivers/spi/spi_esp32_spim.c
+index 4b1e549ea3b..00000000000 100644
+--- a/drivers/spi/spi_esp32_spim.c
++++ b/drivers/spi/spi_esp32_spim.c
+@@ -36,7 +36,14 @@ LOG_MODULE_REGISTER(esp32_spi, CONFIG_SPI_LOG_LEVEL);
+ #error "spi3 must not have dma-enabled if ADC_ESP32_DMA is enabled for ESP32-S2"
+ #endif
+ 
++#if defined(CONFIG_SOC_SERIES_ESP32S3)
++#define SPI_DMA_MAX_BUFFER_SIZE (4092 * 8)
++#else
+ #define SPI_DMA_MAX_BUFFER_SIZE 4092
++#endif
++
++#define SPI_TRANSFER_TIMEOUT_MS 100
++
+ #define SPI_DMA_RX 0
+ #define SPI_DMA_TX 1
+ 
+@@ -178,10 +180,12 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	uint8_t *tx_temp = NULL;
+ 	size_t dma_len_tx = MIN(ctx->tx_len * data->dfs, SPI_DMA_MAX_BUFFER_SIZE);
+ 	size_t dma_len_rx = MIN(ctx->rx_len * data->dfs, SPI_DMA_MAX_BUFFER_SIZE);
++	bool use_dma = cfg->dma_enabled && transfer_len_bytes > SOC_SPI_MAXIMUM_BUFFER_SIZE;
+ 	bool prepare_data = true;
++	uint32_t transfer_start_cycles;
+ 	int err = 0;
+ 
+-	if (cfg->dma_enabled) {
++	if (use_dma) {
+ 		/* bit_len needs to be at least one byte long when using DMA */
+ 		bit_len = !bit_len ? 8 : bit_len;
+ 		if (ctx->tx_buf && !esp_ptr_dma_capable((uint32_t *)&ctx->tx_buf[0])) {
+@@ -244,7 +248,7 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	spi_hal_setup_trans(hal, hal_dev, hal_trans);
+ 
+ #if defined(SOC_GDMA_SUPPORTED)
+-	if (cfg->dma_enabled && hal_trans->rcv_buffer) {
++	if (use_dma && hal_trans->rcv_buffer) {
+ 		/* setup DMA channels via DMA driver */
+ 		err = spi_esp32_gdma_config(dev, SPI_DMA_RX, hal_trans->rcv_buffer,
+ 					    transfer_len_bytes);
+@@ -253,7 +257,7 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 		}
+ 	}
+ 
+-	if (cfg->dma_enabled && hal_trans->send_buffer) {
++	if (use_dma && hal_trans->send_buffer) {
+ 		err = spi_esp32_gdma_config(dev, SPI_DMA_TX, hal_trans->send_buffer,
+ 					    transfer_len_bytes);
+ 		if (err) {
+@@ -261,7 +265,7 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 		}
+ 	}
+ 
+-	if (cfg->dma_enabled && hal_trans->rcv_buffer) {
++	if (use_dma && hal_trans->rcv_buffer) {
+ 		spi_ll_dma_rx_fifo_reset(hal->hw);
+ 		spi_ll_infifo_full_clr(hal->hw);
+ 		spi_ll_dma_rx_enable(hal->hw, 1);
+@@ -272,7 +276,7 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 		}
+ 	}
+ 
+-	if (cfg->dma_enabled && hal_trans->send_buffer) {
++	if (use_dma && hal_trans->send_buffer) {
+ 		spi_ll_dma_tx_fifo_reset(hal->hw);
+ 		spi_ll_outfifo_empty_clr(hal->hw);
+ 		spi_ll_dma_tx_enable(hal->hw, 1);
+@@ -283,7 +287,7 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 		}
+ 	}
+ 
+-	if (cfg->dma_enabled) {
++	if (use_dma) {
+ 		/* Enable MOSI/MISO data lines AFTER DMA is configured.
+ 		 * Note: For RX-only DMA, we allocate a zero-filled TX buffer above,
+ 		 * so send_buffer is always set when rcv_buffer is set.
+@@ -292,17 +296,17 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 					 hal_trans->rcv_buffer != NULL);
+ 	}
+ 
+-	prepare_data = !cfg->dma_enabled;
++	prepare_data = !use_dma;
+ #else /* !SOC_GDMA_SUPPORTED - ESP32/ESP32-S2 integrated SPI-DMA */
+ 	/*
+ 	 * For ESP32/ESP32-S2, DMA is integrated into the SPI peripheral.
+ 	 * Use spi_dma_ll_* functions to control it.
+ 	 */
+-	if (cfg->dma_enabled && hal_trans->rcv_buffer) {
++	if (use_dma && hal_trans->rcv_buffer) {
+ 		spi_esp32_dma_rx_start(dev, hal_trans->rcv_buffer, transfer_len_bytes);
+ 	}
+ #if defined(CONFIG_SOC_SERIES_ESP32)
+-	else if (cfg->dma_enabled && !hal_dev->half_duplex) {
++	else if (use_dma && !hal_dev->half_duplex) {
+ 		/* ESP32: RX DMA channel must be running for TX-only full-duplex
+ 		 * transfers, otherwise DMA does not operate correctly.
+ 		 */
+@@ -311,16 +315,16 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	}
+ #endif
+ 
+-	if (cfg->dma_enabled && hal_trans->send_buffer) {
++	if (use_dma && hal_trans->send_buffer) {
+ 		spi_esp32_dma_tx_start(dev, hal_trans->send_buffer, transfer_len_bytes);
+ 	}
+ 
+-	if (cfg->dma_enabled) {
++	if (use_dma) {
+ 		spi_hal_enable_data_line(hal->hw, hal_trans->send_buffer != NULL,
+ 					 hal_trans->rcv_buffer != NULL);
+ 	}
+ 
+-	prepare_data = !cfg->dma_enabled;
++	prepare_data = !use_dma;
+ #endif /* SOC_GDMA_SUPPORTED */
+ 
+ 	if (prepare_data) {
+@@ -332,15 +336,23 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	}
+ 
+ 	/* send data */
++	transfer_start_cycles = k_cycle_get_32();
+ 	spi_hal_user_start(hal);
+ 	spi_context_update_tx(&data->ctx, data->dfs, transfer_len_frames);
+ 
+ 	while (!spi_hal_usr_is_done(hal)) {
+-		/* nop */
++		if (k_cycle_get_32() - transfer_start_cycles >=
++		    k_ms_to_cyc_ceil32(SPI_TRANSFER_TIMEOUT_MS)) {
++			err = -ETIMEDOUT;
++			break;
++		}
++		if (!k_is_pre_kernel()) {
++			k_yield();
++		}
+ 	}
+ 
+ #if defined(SOC_GDMA_SUPPORTED)
+-	if (cfg->dma_enabled) {
++	if (use_dma) {
+ 		if (hal_trans->rcv_buffer) {
+ 			dma_stop(cfg->dma_dev, cfg->dma_rx_ch);
+ #if defined(CONFIG_SOC_SERIES_ESP32S3) || defined(CONFIG_SOC_SERIES_ESP32S2)
+@@ -357,16 +369,18 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+ 	}
+ #endif
+ 
+-	if (!cfg->dma_enabled) {
++	if (!use_dma && err == 0) {
+ 		/* read data */
+ 		spi_hal_fetch_result(hal);
+ 	}
+ 
+-	if (rx_temp) {
++	if (rx_temp && err == 0) {
+ 		memcpy(&ctx->rx_buf[0], rx_temp, transfer_len_bytes);
+ 	}
+ 
+-	spi_context_update_rx(&data->ctx, data->dfs, transfer_len_frames);
++	if (err == 0) {
++		spi_context_update_rx(&data->ctx, data->dfs, transfer_len_frames);
++	}
+ 
+ free:
+ 	k_free(tx_temp);
+@@ -381,12 +395,13 @@ static void IRAM_ATTR spi_esp32_isr(void *arg)
+ 	const struct device *dev = (const struct device *)arg;
+ 	const struct spi_esp32_config *cfg = dev->config;
+ 	struct spi_esp32_data *data = dev->data;
++	int err;
+ 
+ 	do {
+-		spi_esp32_transfer(dev);
+-	} while (spi_esp32_transfer_ongoing(data));
++		err = spi_esp32_transfer(dev);
++	} while (err == 0 && spi_esp32_transfer_ongoing(data));
+ 
+-	spi_esp32_complete(dev, data, cfg->spi, 0);
++	spi_esp32_complete(dev, data, cfg->spi, err);
+ }
+ #endif
+ 
+@@ -683,10 +698,10 @@ static int transceive(const struct device *dev,
+ #else
+ 
+ 	do {
+-		spi_esp32_transfer(dev);
+-	} while (spi_esp32_transfer_ongoing(data));
++		ret = spi_esp32_transfer(dev);
++	} while (ret == 0 && spi_esp32_transfer_ongoing(data));
+ 
+-	spi_esp32_complete(dev, data, cfg->spi, 0);
++	spi_esp32_complete(dev, data, cfg->spi, ret);
+ 
+ #endif  /* CONFIG_SPI_ESP32_INTERRUPT */
+ 
+-- 
+2.51.0
