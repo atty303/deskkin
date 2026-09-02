@@ -35,9 +35,13 @@ APPCPU-owned GDMA channel pair 0. PROCPU owns the low 4 MiB PSRAM region for
 service/network heaps, input/message queues, and non-cache-critical stacks;
 APPCPU owns the explicitly reserved high 4 MiB for textures, decoded assets,
 Slint/world allocations, and its long-lived renderer/display stacks. The
-cache-independent 32 KiB SRAM2 bank contains the 24 KiB service and 8 KiB
-Wi-Fi stacks. PROCPU loads APPCPU synchronously on its internal main stack
-before it starts control and service threads.
+cache-independent 32 KiB SRAM2 bank contains the 21 KiB service, 3 KiB control,
+and 8 KiB Wi-Fi stacks. PROCPU loads APPCPU synchronously on its internal main
+stack before it starts control and service threads. After both cores leave
+their main threads, the two 4 KiB main stacks plus the unused 1 KiB shared
+prefix become a zeroized 9 KiB internal runtime heap. The Wi-Fi boot
+coordinator temporarily borrows 1.5 KiB from the inactive service stack and is
+joined and zeroized before service ownership begins.
 
 AMP shared memory has schema-checked, generation-published world snapshots, a
 bounded touch ring with per-slot publication and drop count, UI command slot,
@@ -61,31 +65,28 @@ local record is persisted.
 
 ## Verification state
 
-A clean MCUboot/PROCPU/APPCPU/inert build succeeds with the restored baseline
-memory topology (final aggregate build record
-`aa9e5061-3f6f-4d1c-9c53-d11f6939296c`). Link
-maps place the 307,200-byte double framebuffer at `0x3fc97f60` in internal
-SRAM, keep the cache-independent stacks in internal SRAM/SRAM2, and preserve
-the caller-owned high 4 MiB PSRAM allocator for APPCPU textures, decoded
-assets, Slint/world allocations, and long-lived renderer/display stacks.
-`mise run fix`, `mise run test:host`, `mise run test:core-s3`, and the final
-`mise run test` aggregate pass. A fresh review found no remaining blocking
-issue after its bootstrap-migration and raw boot-trace findings were corrected.
-One unchanged desktop-host concurrency test failed once during host verification
-and passed on the immediate full-suite rerun and final aggregate run.
+The current clean MCUboot/PROCPU/APPCPU build succeeds with strict
+PROCPU/APPCPU separation. The PROCPU static image ends at `0x3fce4650`, its
+libc heap ends at the APPCPU origin `0x3fce4c00`, and the APPCPU image begins
+at that same address. The device completes AP startup, publishes the main-stack
+handoff, creates the 9,216-byte phase heap, and completes `esp_wifi_init`, its
+mode setup, and the boot coordinator join. The pinned Zephyr patch series also
+applies from a clean upstream HEAD and passes the normal bootstrap verifier.
 
 Three independent failures were separated during live bring-up. PROCPU
 NVS/flash work initially disabled the shared instruction cache while APPCPU
 executed from IROM. AP-image loading then exposed a PROCPU heap panic when it
 ran on a PSRAM stack during cache-disabled flash reads. Finally, the
-independently loaded APPCPU inherited an uncontrolled stack pointer at
-`0x3fced6f0`, inside its Zephyr system heap, so device initialization corrupted
-the heap and made GDMA startup layout-dependent. AP loading now runs on the
-PROCPU internal main stack. The APPCPU entry clears inherited window state,
-switches to the first 2 KiB Zephyr interrupt stack, and tail-jumps into normal
-C startup; it no longer creates an artificial bottom call frame or uses the
-loader-provided stack. Runtime NVS remains serialized and stalls core 1 only
-for an actual cache-disabled NVS interval.
+independently loaded APPCPU inherited window state and the first entry
+trampoline placed its stack pointer 16 bytes beyond the Zephyr interrupt-stack
+allocation. Its first call8 spill therefore repeated indefinitely. AP loading
+now runs on the PROCPU internal main stack. The APPCPU entry clears inherited
+window state, establishes the reset window, uses the exact end of the first
+2 KiB Zephyr interrupt stack, and tail-jumps into normal C startup. Runtime NVS
+remains serialized and stalls core 1 only for an actual cache-disabled NVS
+interval. APPCPU whole-stack initialization is disabled because it overwrote
+that active pre-kernel stack; its terminated main stack is still zeroized and
+reclaimed, but its boot high-water value remains unavailable.
 
 The APPCPU entry trampoline is part of the repository's ordered, digest-checked
 Zephyr patch series. Product builds no longer rewrite the shared pinned Zephyr
@@ -93,18 +94,25 @@ checkout around each invocation. Touch-ring loss is accumulated from the
 generations actually skipped by the APPCPU consumer and remains visible in
 later heartbeat publications.
 
-The normal AMP product was flashed to every domain through `/dev/ttyACM0`;
+The current AMP product was flashed to every domain through `/dev/ttyACM0`;
 every write passed hash verification and reset (flash record
-`a533146d-6242-43f2-b13b-af023688cb55`). USB status now reports
-`heartbeat_freshness=1`, `renderer_stage=4`, `renderer_fault=0`,
-`boot_stage=9`, and no boot error (status record
-`8eec5148-e253-49c7-9e57-621a72e6fac9`). A further hardware reset without
-reflashing produced the same healthy status in record
-`64cc87ba-5b2d-4388-bbf4-530209a3a3f4`. GDMA is active; the setup shell is
-running because the device remains unpaired.
+`5a90aa6f-783a-4646-8886-302185ed3c53`). USB status record
+`e8ffd69e-2e76-4daf-8605-0436e3a3d15a` reports `heartbeat_freshness=1`,
+`renderer_stage=4`, `renderer_fault=0`, `boot_stage=9`, 40 MHz display SPI,
+and no allocation, transfer, stale-state, touch-drop, or boot fault. GDMA is
+active; follow-up status record `ae201ac8-58ac-4e14-9190-dc53ef25f707`
+observed completed frames increase from 147 to 4,696 with the same zero-fault
+state. Push-stream record
+`ac0a0682-78d2-4869-b309-3f5925d3d8cf` directly observed AP startup, the
+9,216-byte runtime-SRAM handoff, Wi-Fi boot completion, service start, and the
+debug auto-pair command without dropped events. The setup shell remains because
+there is no configured host peer.
 
-No identity, Wi-Fi profile, host profile, or pairing state was created. The
+No new identity, Wi-Fi profile, host profile, or pairing state was created. The
 paired world path and fixed 60-second physical benchmark remain unmeasured.
+`mise run fix`, the host and portable suite, the clean CoreS3 conformance build,
+the inert recovery build, and the repository-wide `mise run test` all pass.
+Fresh review found no remaining blocking issue.
 
 The stable target is the Espressif USB JTAG/serial device selected through its
 by-id path and currently exposed as `/dev/ttyACM0`.

@@ -2,10 +2,6 @@
 #include "amp-partitions.overlay"
 #include "amp-memory.overlay"
 
-&ipm0 {
-	status = "okay";
-};
-
 &mipi_dbi {
 	status = "disabled";
 };

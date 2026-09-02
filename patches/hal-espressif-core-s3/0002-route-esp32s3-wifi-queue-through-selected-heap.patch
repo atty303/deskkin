@@ -1,0 +1,61 @@
+From: Deskkin contributors
+Subject: [PATCH] esp32s3: route Wi-Fi queue through selected heap
+
+The ESP32-S3 adapter allocated its static queue, backing buffer, and Zephyr
+queue handle directly from the kernel heap even when
+CONFIG_ESP_WIFI_HEAP_SPIRAM selected the external Wi-Fi allocator. Other
+Espressif targets already route these objects through wifi_malloc(). Do the
+same on ESP32-S3 so the kernel heap remains reserved for allocations that
+actually require internal SRAM.
+
+---
+ components/esp_wifi/esp32s3/esp_adapter.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/components/esp_wifi/esp32s3/esp_adapter.c b/components/esp_wifi/esp32s3/esp_adapter.c
+index 00000000000..00000000000 100644
+--- a/components/esp_wifi/esp32s3/esp_adapter.c
++++ b/components/esp_wifi/esp32s3/esp_adapter.c
+@@ -100,24 +100,26 @@ wifi_static_queue_t *wifi_create_queue(int queue_len, int item_size)
+ {
+ 	wifi_static_queue_t *queue = NULL;
+ 
+-	queue = (wifi_static_queue_t *)k_malloc(sizeof(wifi_static_queue_t));
++	queue = (wifi_static_queue_t *)wifi_malloc(sizeof(wifi_static_queue_t));
+ 
+ 	if (!queue) {
+ 		LOG_ERR("msg buffer allocation failed");
+ 		return NULL;
+ 	}
+ 
+-	wifi_msgq_buffer = k_malloc(queue_len * item_size);
++	wifi_msgq_buffer = wifi_malloc(queue_len * item_size);
+ 
+ 	if (wifi_msgq_buffer == NULL) {
+ 		LOG_ERR("msg buffer allocation failed");
++		wifi_free(queue);
+ 		return NULL;
+ 	}
+ 
+-	queue->handle = k_malloc(sizeof(struct k_msgq));
++	queue->handle = wifi_malloc(sizeof(struct k_msgq));
+ 
+ 	if (queue->handle == NULL) {
+-		k_free(wifi_msgq_buffer);
++		wifi_free(wifi_msgq_buffer);
++		wifi_free(queue);
+ 		LOG_ERR("queue handle allocation failed");
+ 		return NULL;
+ 	}
+@@ -131,7 +133,7 @@ void wifi_delete_queue(wifi_static_queue_t *queue)
+ {
+ 	if (queue) {
+-		k_free(queue->handle);
+-		k_free(queue);
++		wifi_free(queue->handle);
++		wifi_free(queue);
+ 	}
+ }
+ 
+-- 
+2.51.0

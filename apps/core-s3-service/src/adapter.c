@@ -19,14 +19,18 @@
 #include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/multi_heap/shared_multi_heap.h>
 #include <esp_attr.h>
 #include <esp_memory_utils.h>
+#include <rom/ets_sys.h>
 
+#include "adapter.h"
 #include "dhcp_wait.h"
 
 #define CONTROL_FRAME_MAX 188
 #define COMPLETION_FRAME_MAX 160
+#define DIAGNOSTIC_EVENT_SIZE 24
 #define WIFI_ASSOCIATION_TIMEOUT_MS 15000
 #define DHCP_TIMEOUT_MS 10000
 
@@ -46,13 +50,28 @@ K_MSGQ_DEFINE(worker_completions, sizeof(struct bounded_completion), 8, 4);
 #define DESKKIN_SRAM2_NOINIT __attribute__((section(".sram2.noinit")))
 
 struct z_thread_stack_element DESKKIN_SRAM2_NOINIT __aligned(ARCH_STACK_PTR_ALIGN)
-	service_stack[K_THREAD_STACK_LEN(24576)];
+	service_stack[K_THREAD_STACK_LEN(DESKKIN_SERVICE_STACK_SIZE)];
 static struct k_thread service_thread;
 extern struct z_thread_stack_element deskkin_control_stack[K_THREAD_STACK_LEN(3072)];
 static struct k_thread control_thread;
 static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 static struct nvs_fs storage;
 static bool storage_ready;
+static atomic_t nvs_failure;
+
+enum deskkin_nvs_failure_stage {
+	DESKKIN_NVS_FAILURE_NONE = 0,
+	DESKKIN_NVS_FAILURE_AREA_OPEN = 1,
+	DESKKIN_NVS_FAILURE_PAGE_INFO = 2,
+	DESKKIN_NVS_FAILURE_MOUNT = 3,
+	DESKKIN_NVS_FAILURE_INTENT_WRITE = 4,
+	DESKKIN_NVS_FAILURE_RECORD_WRITE = 5,
+	DESKKIN_NVS_FAILURE_INTENT_READBACK = 6,
+	DESKKIN_NVS_FAILURE_RECORD_READBACK = 7,
+	DESKKIN_NVS_FAILURE_INTENT_DELETE = 8,
+	DESKKIN_NVS_FAILURE_INTENT_READ = 9,
+	DESKKIN_NVS_FAILURE_RECORD_READ = 10,
+};
 
 static void control_entry(void *first, void *second, void *third);
 
@@ -62,6 +81,26 @@ extern size_t deskkin_rust_control_snapshot(const uint8_t *input, size_t input_l
 						   uint8_t *output);
 extern void deskkin_flash_guard_enter(void);
 extern void deskkin_flash_guard_exit(void);
+extern void deskkin_debug_pair_request(void);
+extern int deskkin_diagnostic_read(uint32_t after_sequence, uint8_t *output, size_t capacity);
+extern bool deskkin_runtime_internal_owns(const void *block);
+
+static void set_nvs_failure(enum deskkin_nvs_failure_stage stage, int result)
+{
+	const uint32_t code = result < 0 ? (uint32_t)(-(int64_t)result) : (uint32_t)result;
+	atomic_set(&nvs_failure,
+		   (atomic_val_t)(((uint32_t)stage << 8) | MIN(code, UINT8_MAX)));
+}
+
+static void clear_nvs_failure(void)
+{
+	atomic_set(&nvs_failure, DESKKIN_NVS_FAILURE_NONE);
+}
+
+uint16_t deskkin_nvs_last_failure(void)
+{
+	return (uint16_t)atomic_get(&nvs_failure);
+}
 
 void *malloc(size_t size)
 {
@@ -101,10 +140,16 @@ void free(void *block)
 	if (block == NULL) {
 		return;
 	}
+	if (deskkin_runtime_internal_owns(block)) {
+		shared_multi_heap_free(block);
+		return;
+	}
 	if (esp_ptr_in_dram(block)) {
 		k_free(block);
-	} else {
+	} else if (esp_ptr_external_ram(block)) {
 		shared_multi_heap_free(block);
+	} else {
+		ets_printf("deskkin rejected invalid free %p\n", block);
 	}
 }
 
@@ -306,9 +351,41 @@ static void control_entry(void *first, void *second, void *third)
 		if (uart_read_frame(&frame) != 0) {
 			continue;
 		}
+		if (frame.bytes[1] == 11U && (frame.length == 30U || frame.length == 31U)) {
+			const uint16_t seconds = ((uint16_t)frame.bytes[28] << 8) | frame.bytes[29];
+			const bool auto_pair = frame.length == 31U && frame.bytes[30] == 1U;
+			if (seconds == 0U || seconds > 300U ||
+			    (frame.length == 31U && frame.bytes[30] > 1U)) {
+				uart_write_closed_error(&frame, 4);
+				continue;
+			}
+			struct bounded_completion acknowledgement = {.length = 18};
+			acknowledgement.bytes[0] = 1U;
+			acknowledgement.bytes[1] = 0U;
+			memcpy(&acknowledgement.bytes[2], &frame.bytes[2], 16);
+			(void)uart_write_completion(&acknowledgement);
+			k_msleep(100);
+			if (auto_pair) {
+				deskkin_debug_pair_request();
+			}
+			uint32_t cursor = 0U;
+			const int64_t deadline = k_uptime_get() + (int64_t)seconds * 1000;
+			while (k_uptime_get() < deadline) {
+				struct bounded_completion event = {0};
+				const int length = deskkin_diagnostic_read(
+					cursor, event.bytes, sizeof(event.bytes));
+				if (length <= 0) {
+					k_msleep(5);
+					continue;
+				}
+				event.length = (uint16_t)length;
+				cursor = sys_get_be32(&event.bytes[4]);
+				(void)uart_write_completion(&event);
+			}
+			continue;
+		}
 		struct k_msgq *queue = frame.bytes[1] == 9 ? &reserved_control : &application_commands;
-		if (frame.bytes[1] == 2 || frame.bytes[1] == 5 || frame.bytes[1] == 8 ||
-		    frame.bytes[1] == 11) {
+		if (frame.bytes[1] == 2 || frame.bytes[1] == 5 || frame.bytes[1] == 8) {
 			struct bounded_completion completion;
 			completion.length = deskkin_rust_control_snapshot(frame.bytes, frame.length,
 								   completion.bytes);
@@ -352,6 +429,7 @@ static int ensure_storage(void)
 	const struct flash_area *area;
 	int result = flash_area_open(PARTITION_ID(storage_partition), &area);
 	if (result != 0) {
+		set_nvs_failure(DESKKIN_NVS_FAILURE_AREA_OPEN, result);
 		deskkin_flash_guard_exit();
 		return result;
 	}
@@ -363,6 +441,11 @@ static int ensure_storage(void)
 		storage.sector_size = page.size;
 		storage.sector_count = area->fa_size / page.size;
 		result = nvs_mount(&storage);
+		if (result != 0) {
+			set_nvs_failure(DESKKIN_NVS_FAILURE_MOUNT, result);
+		}
+	} else {
+		set_nvs_failure(DESKKIN_NVS_FAILURE_PAGE_INFO, result);
 	}
 	flash_area_close(area);
 	storage_ready = result == 0;
@@ -379,12 +462,19 @@ int deskkin_nvs_read(uint16_t record_id, uint8_t *output, size_t capacity)
 	deskkin_flash_guard_enter();
 	const int length = nvs_read(&storage, record_id, output, capacity);
 	deskkin_flash_guard_exit();
+	if (length < 0 && length != -ENOENT) {
+		set_nvs_failure(record_id == 0x102 || record_id == 0x202
+					? DESKKIN_NVS_FAILURE_INTENT_READ
+					: DESKKIN_NVS_FAILURE_RECORD_READ,
+				length);
+	}
 	return length == -ENOENT ? 0 : length < 0 ? length : length + 1;
 }
 
 int deskkin_nvs_write_readback(uint16_t record_id, const uint8_t *input, size_t length)
 {
 	uint8_t readback[CONTROL_FRAME_MAX];
+	clear_nvs_failure();
 	int result = ensure_storage();
 	if (result != 0 || input == NULL || length > sizeof(readback)) {
 		result = result != 0 ? result : -EINVAL;
@@ -394,11 +484,21 @@ int deskkin_nvs_write_readback(uint16_t record_id, const uint8_t *input, size_t 
 	result = nvs_write(&storage, record_id, input, length);
 	if (result < 0 || (size_t)result != length) {
 		result = result < 0 ? result : -EIO;
+		set_nvs_failure(record_id == 0x102 || record_id == 0x202
+					? DESKKIN_NVS_FAILURE_INTENT_WRITE
+					: DESKKIN_NVS_FAILURE_RECORD_WRITE,
+				result);
 		goto guarded_cleanup;
 	}
 	result = nvs_read(&storage, record_id, readback, sizeof(readback));
 	if (result < 0 || (size_t)result != length || memcmp(input, readback, length) != 0) {
-		result = -EIO;
+		if (result >= 0) {
+			result = -EIO;
+		}
+		set_nvs_failure(record_id == 0x102 || record_id == 0x202
+					? DESKKIN_NVS_FAILURE_INTENT_READBACK
+					: DESKKIN_NVS_FAILURE_RECORD_READBACK,
+				result);
 		goto guarded_cleanup;
 	}
 	result = 0;
@@ -411,6 +511,7 @@ cleanup:
 
 int deskkin_nvs_delete(uint16_t record_id)
 {
+	clear_nvs_failure();
 	const int result = ensure_storage();
 	if (result != 0) {
 		return result;
@@ -418,6 +519,9 @@ int deskkin_nvs_delete(uint16_t record_id)
 	deskkin_flash_guard_enter();
 	const int delete_result = nvs_delete(&storage, record_id);
 	deskkin_flash_guard_exit();
+	if (delete_result != 0) {
+		set_nvs_failure(DESKKIN_NVS_FAILURE_INTENT_DELETE, delete_result);
+	}
 	return delete_result;
 }
 
@@ -432,6 +536,9 @@ static int wifi_connection_state(struct net_if *iface)
 int deskkin_wifi_disconnect(void)
 {
 	struct net_if *iface = net_if_get_wifi_sta();
+	if (iface == NULL) {
+		return -ENODEV;
+	}
 	net_dhcpv4_stop(iface);
 	const int result = net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
 	return result == -EALREADY ? 0 : result;
@@ -445,6 +552,22 @@ int deskkin_wifi_associate(const uint8_t *ssid, uint8_t ssid_length, const uint8
 		return -EINVAL;
 	}
 	struct net_if *iface = net_if_get_wifi_sta();
+	if (iface == NULL) {
+		return -ENODEV;
+	}
+	const struct device *const wifi = net_if_get_device(iface);
+	if (wifi == NULL) {
+		return -ENODEV;
+	}
+	if (!device_is_ready(wifi)) {
+		return wifi->state->initialized && wifi->state->init_res != 0U
+			       ? -(int)wifi->state->init_res
+			       : -ENXIO;
+	}
+	const int up_result = net_if_up(iface);
+	if (up_result != 0 && up_result != -EALREADY) {
+		return up_result;
+	}
 	const int64_t deadline = k_uptime_get() + WIFI_ASSOCIATION_TIMEOUT_MS;
 	if (wifi_connection_state(iface) == WIFI_STATE_COMPLETED) {
 		const int result = deskkin_wifi_disconnect();
@@ -486,6 +609,11 @@ int deskkin_wifi_associate(const uint8_t *ssid, uint8_t ssid_length, const uint8
 		if (connect_requested && state == WIFI_STATE_COMPLETED) {
 			return 0;
 		}
+		if (state == -ENETDOWN || state == -EINPROGRESS || state == -EAGAIN ||
+		    state == -EBUSY) {
+			k_msleep(50);
+			continue;
+		}
 		if (state < 0) {
 			return state;
 		}
@@ -500,7 +628,7 @@ int deskkin_wifi_associate(const uint8_t *ssid, uint8_t ssid_length, const uint8
 		if (!connect_requested && state < WIFI_STATE_SCANNING) {
 			const int result = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &parameters,
 						   sizeof(parameters));
-			if (result == 0 || result == -EALREADY) {
+			if (result == 0 || result == -EALREADY || result == -EINPROGRESS) {
 				connect_requested = true;
 			} else if (result != -EAGAIN && result != -EIO && result != -EBUSY) {
 				return result;
@@ -514,6 +642,9 @@ int deskkin_wifi_associate(const uint8_t *ssid, uint8_t ssid_length, const uint8
 int deskkin_wait_dhcp(void)
 {
 	struct net_if *iface = net_if_get_wifi_sta();
+	if (iface == NULL) {
+		return -ENODEV;
+	}
 	if (iface->config.dhcpv4.state != NET_DHCPV4_BOUND) {
 		net_dhcpv4_start(iface);
 	}

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { Button } from "std-widgets.slint";
 import { ApplicationSurface } from "../../../../ui/application-surface.slint";
 import { StatusSurface } from "../../../../ui/status-surface.slint";
 
@@ -14,6 +13,7 @@ export component RendererWindow inherits Window {
     in-out property <image> pet-atlas;
     in-out property <int> pet-frame-index: 0;
     in property <string> shell-state: "SetupRequired";
+    in property <int> shell-code: 0;
     in property <string> authentication-string: "";
     callback pair();
     callback confirm();
@@ -21,21 +21,81 @@ export component RendererWindow inherits Window {
 
     background: #16191d;
 
-    VerticalLayout {
+    Rectangle {
         visible: !root.capture-mode;
-        padding: 18px;
-        spacing: 12px;
-        Text { text: root.shell-state; color: #d7e3f4; font-size: 20px; }
+        x: 18px;
+        y: 18px;
+        width: 284px;
+        height: 204px;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 24px;
+            text: root.shell-state;
+            color: #d7e3f4;
+            font-size: 20px;
+        }
         StatusSurface {
-            height: 124px;
-            status-text: root.authentication-string == "" ? "Setup required" : root.authentication-string;
+            x: 0px;
+            y: 36px;
+            width: 100%;
+            height: 108px;
+            status-text: root.authentication-string != ""
+                ? root.authentication-string
+                : root.shell-code == 1 ? "Ready to pair" : "Setup required";
             status-color: #f3b33d;
         }
+        Rectangle {
+            x: 0px;
+            y: 156px;
+            width: 100%;
+            height: 48px;
+            visible: root.shell-code == 1;
+            background: #f3b33d;
+            border-radius: 10px;
+            Text {
+                text: "Pair";
+                color: #16191d;
+                font-size: 22px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.pair(); }
+            }
+        }
         HorizontalLayout {
+            x: 0px;
+            y: 156px;
+            width: 100%;
+            height: 48px;
             spacing: 8px;
-            Button { text: "Pair"; visible: root.shell-state == "ReadyToPair"; clicked => { root.pair(); } }
-            Button { text: "Confirm"; visible: root.authentication-string != ""; clicked => { root.confirm(); } }
-            Button { text: "Cancel"; visible: root.authentication-string != ""; clicked => { root.cancel(); } }
+            visible: root.authentication-string != "";
+            Rectangle {
+                background: #f3b33d;
+                border-radius: 10px;
+                Text { text: "Confirm"; color: #16191d; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.confirm(); }
+                }
+            }
+            Rectangle {
+                background: #343b45;
+                border-radius: 10px;
+                Text { text: "Cancel"; color: #d7e3f4; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    clicked => { root.cancel(); }
+                }
+            }
         }
     }
 

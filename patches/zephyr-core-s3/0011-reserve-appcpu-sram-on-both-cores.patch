@@ -1,0 +1,57 @@
+From: Deskkin contributors
+Subject: [PATCH] soc: esp32s3: reserve APPCPU SRAM on both cores
+
+diff --git a/soc/espressif/esp32s3/default_appcpu.ld b/soc/espressif/esp32s3/default_appcpu.ld
+index 321452e07ab..6a2b695e193 100644
+--- a/soc/espressif/esp32s3/default_appcpu.ld
++++ b/soc/espressif/esp32s3/default_appcpu.ld
+@@ -15,8 +15,8 @@
+ #include "memory.h"
+ 
+ /* User available SRAM memory segments */
+-appcpu_iram_end = USER_IRAM_END;
+-appcpu_dram_end = USER_DRAM_END;
++appcpu_dram_end = MIN(USER_DRAM_END, DRAM_ROM_BSS_DATA_START) & ~0x3ff;
++appcpu_iram_end = appcpu_dram_end + IRAM_DRAM_OFFSET;
+ 
+ appcpu_iram_org = appcpu_iram_end - APPCPU_SRAM_SIZE;
+ appcpu_dram_org = appcpu_dram_end - APPCPU_SRAM_SIZE;
+diff --git a/soc/espressif/esp32s3/memory.h b/soc/espressif/esp32s3/memory.h
+index 2753f843d09..b2253a02c1c 100644
+--- a/soc/espressif/esp32s3/memory.h
++++ b/soc/espressif/esp32s3/memory.h
+@@ -50,7 +50,7 @@
+ #define DRAM_PROCPU_STACK_START  0x3fce9710
+ #define DRAM_STACK_START DRAM_PROCPU_STACK_START
+ #define DRAM_APPCPU_STACK_START  0x3fceb710
+-#define DRAM_ROM_BSS_DATA_START  0x3fcf0000
++#define DRAM_ROM_BSS_DATA_START  0x3fced710
+ 
+ /* Upper boundary of user-usable SRAM */
+ #define DRAM_USER_END      DRAM_SHARED_BUFFERS_END
+@@ -87,7 +87,6 @@
+ /* Upper boundary for user DRAM allocation */
+ 
+ /* AMP */
+-#if defined(CONFIG_SOC_ESP32S3_APPCPU)
+ #if defined(CONFIG_SOC_ENABLE_APPCPU)
+ #define APPCPU_IRAM_SIZE CONFIG_ESP_APPCPU_IRAM_SIZE
+ #define APPCPU_DRAM_SIZE CONFIG_ESP_APPCPU_DRAM_SIZE
+@@ -97,13 +96,12 @@
+ #define DRAM_USER_END DT_REG_ADDR(DT_NODELABEL(ipmmem0))
+ #define APPCPU_IROM_SIZE CONFIG_ESP_APPCPU_IROM_SIZE
+ #define APPCPU_DROM_SIZE CONFIG_ESP_APPCPU_DROM_SIZE
+-#else
++#elif defined(CONFIG_SOC_ESP32S3_APPCPU)
+ /* Fallback for non-AMP APPCPU builds */
+ #define APPCPU_IRAM_SIZE 0x8000
+ #define APPCPU_DRAM_SIZE 0x8000
+ #define APPCPU_IROM_SIZE 0x10000
+ #define APPCPU_DROM_SIZE 0x10000
+-#endif /* CONFIG_SOC_ENABLE_APPCPU */
+ #else
+ #define APPCPU_IRAM_SIZE 0
+ #define APPCPU_DRAM_SIZE 0
+-- 
+2.51.0
+

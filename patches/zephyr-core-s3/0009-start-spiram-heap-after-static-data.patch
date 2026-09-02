@@ -1,0 +1,35 @@
+From: Deskkin contributors
+Subject: [PATCH] esp32: start SPIRAM heap after linked static data
+
+diff --git a/soc/espressif/common/esp_psram.c b/soc/espressif/common/esp_psram.c
+index adb399728fa..d275066fdc1 100644
+--- a/soc/espressif/common/esp_psram.c
++++ b/soc/espressif/common/esp_psram.c
+@@ -19,6 +19,9 @@ extern int _rodata_reserved_end;
+ extern int _ext_ram_bss_start;
+ extern int _ext_ram_bss_end;
+ 
++extern int _ext_ram_heap_start;
++extern int _ext_ram_heap_end;
++
+ struct shared_multi_heap_region smh_psram = {
+ 	.attr = SMH_REG_ATTR_EXTERNAL,
+ };
+@@ -73,8 +76,14 @@ void esp_init_psram(void)
+ 	 * unified cache (e.g. C5, C6, H2), the exact virtual address
+ 	 * depends on MMU page allocation at runtime.
+ 	 */
++#if defined(CONFIG_SOC_SERIES_ESP32S3)
++	/* The ESP32-S3 linker reserves this range after external static data. */
++	smh_psram.addr = (uintptr_t)&_ext_ram_heap_start;
++	smh_psram.size = (uintptr_t)&_ext_ram_heap_end - smh_psram.addr;
++#else
+ 	smh_psram.addr = (uintptr_t)mapped_vaddr;
+ 	smh_psram.size = MIN(mapped_size, CONFIG_ESP_SPIRAM_HEAP_SIZE);
++#endif
+ 
+ 	if (IS_ENABLED(CONFIG_ESP_SPIRAM_MEMTEST)) {
+ 		if (esp_psram_is_initialized()) {
+-- 
+2.51.0
+

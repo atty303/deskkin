@@ -38,6 +38,8 @@ static PEER_ID: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 
 unsafe extern "C" {
     fn deskkin_boot_trace(stage: u8, error: u8);
+    fn deskkin_service_result(stage: u8, result: i32);
+    fn deskkin_service_trace(stage: u8, error: u8);
     fn deskkin_csrand(output: *mut u8, length: usize) -> c_int;
     fn deskkin_start_service_worker() -> c_int;
     fn deskkin_service_take_command(output: *mut u8, capacity: usize) -> c_int;
@@ -568,6 +570,18 @@ enum SessionFailure {
     Control(ActiveControl),
 }
 
+fn set_last_stage(stage: u8) {
+    if LAST_STAGE.swap(stage, Ordering::AcqRel) != stage {
+        unsafe { deskkin_service_trace(stage, LAST_ERROR.load(Ordering::Acquire)) };
+    }
+}
+
+fn set_last_error(error: u8) {
+    if LAST_ERROR.swap(error, Ordering::AcqRel) != error {
+        unsafe { deskkin_service_trace(LAST_STAGE.load(Ordering::Acquire), error) };
+    }
+}
+
 fn load_identity() -> Result<StoredIdentity, SessionFailure> {
     let mut first = zeroize::Zeroizing::new([0_u8; deskkin_core_s3::NVS_RECORD_MAX]);
     let mut second = zeroize::Zeroizing::new([0_u8; deskkin_core_s3::NVS_RECORD_MAX]);
@@ -974,7 +988,7 @@ fn availability_loop(
                 return Err(SessionFailure::Control(active));
             }
             let operation = random_context()?;
-            LAST_STAGE.store(6, Ordering::Release);
+            set_last_stage(6);
             store_context(&OPERATION_CONTEXT, operation);
             let request_id = adapter
                 .begin_read(read_effect.id.local.get(), operation)
@@ -1047,8 +1061,8 @@ fn availability_loop(
                             Ordering::Release,
                         );
                         VALID_RESULT.store(1, Ordering::Release);
-                        LAST_STAGE.store(7, Ordering::Release);
-                        LAST_ERROR.store(0, Ordering::Release);
+                        set_last_stage(7);
+                        set_last_error(0);
                         application
                             .transition(deskkin_application::ApplicationInput::availability(
                                 timer.id,
@@ -1263,38 +1277,42 @@ fn connect_once(pair_requested: bool) -> Result<(), SessionFailure> {
     };
     let (identity, mut config, fallback_shell) = fallback;
     UI_SHELL.store(2, Ordering::Release);
-    LAST_STAGE.store(1, Ordering::Release);
-    LAST_ERROR.store(0, Ordering::Release);
-    if unsafe {
+    set_last_stage(1);
+    set_last_error(0);
+    let wifi_result = unsafe {
         deskkin_wifi_associate(
             config.ssid.as_ptr(),
             config.ssid_length,
             config.passphrase.as_ptr(),
             config.passphrase_length,
         )
-    } != 0
-    {
+    };
+    if wifi_result != 0 {
+        unsafe { deskkin_service_result(1, wifi_result) };
         config.passphrase.zeroize();
         UI_SHELL.store(fallback_shell, Ordering::Release);
         return Err(SessionFailure::Wifi);
     }
-    LAST_STAGE.store(2, Ordering::Release);
-    if unsafe { deskkin_wait_dhcp() } != 0 {
+    set_last_stage(2);
+    let dhcp_result = unsafe { deskkin_wait_dhcp() };
+    if dhcp_result != 0 {
+        unsafe { deskkin_service_result(2, dhcp_result) };
         config.passphrase.zeroize();
         UI_SHELL.store(fallback_shell, Ordering::Release);
         return Err(SessionFailure::Dhcp);
     }
     config.passphrase.zeroize();
-    LAST_STAGE.store(3, Ordering::Release);
+    set_last_stage(3);
     let descriptor = unsafe { deskkin_tcp_connect(config.host.as_ptr(), 39_042) };
     if descriptor < 0 {
+        unsafe { deskkin_service_result(3, descriptor) };
         UI_SHELL.store(fallback_shell, Ordering::Release);
         return Err(SessionFailure::Tcp);
     }
     let result = (|| {
-        LAST_STAGE.store(4, Ordering::Release);
+        set_last_stage(4);
         let noise = noise_connect(descriptor, &identity)?;
-        LAST_STAGE.store(5, Ordering::Release);
+        set_last_stage(5);
         match identity.state {
             deskkin_core_s3::PeerState::Unpaired if pair_requested => {
                 pair_session(descriptor, identity, noise)
@@ -1688,17 +1706,17 @@ extern "C" fn deskkin_rust_service_worker() {
                     next_attempt_ms = Instant::now().as_millis().saturating_add(u64::from(delay));
                 }
                 Err(SessionFailure::Incompatible) => {
-                    LAST_ERROR.store(10, Ordering::Release);
+                    set_last_error(10);
                     UI_SHELL.store(4, Ordering::Release);
                     connection.hello_rejected(deskkin_protocol::HelloRejectReason::NoCommonVersion)
                 }
                 Err(SessionFailure::AuthorizationDenied) => {
-                    LAST_ERROR.store(11, Ordering::Release);
+                    set_last_error(11);
                     UI_SHELL.store(4, Ordering::Release);
                     connection.hello_rejected(deskkin_protocol::HelloRejectReason::PermissionDenied)
                 }
                 Err(SessionFailure::SessionBusy) => {
-                    LAST_ERROR.store(8, Ordering::Release);
+                    set_last_error(8);
                     let delay = connection.connection_failed().unwrap_or(5_000);
                     next_attempt_ms = Instant::now().as_millis().saturating_add(u64::from(delay));
                 }
@@ -1717,7 +1735,7 @@ extern "C" fn deskkin_rust_service_worker() {
                         | SessionFailure::AuthorizationDenied
                         | SessionFailure::SessionBusy => 6,
                     };
-                    LAST_ERROR.store(error_code, Ordering::Release);
+                    set_last_error(error_code);
                     let delay = connection.connection_failed().unwrap_or(5_000);
                     next_attempt_ms = Instant::now().as_millis().saturating_add(u64::from(delay));
                 }

@@ -1,0 +1,82 @@
+From: Deskkin contributors
+Subject: [PATCH] wifi: esp32: defer hardware init to the runtime phase
+
+diff --git a/drivers/wifi/esp32/src/esp_wifi_drv.c b/drivers/wifi/esp32/src/esp_wifi_drv.c
+index d96c3bfd85d..63aec5d8f1c 100644
+--- a/drivers/wifi/esp32/src/esp_wifi_drv.c
++++ b/drivers/wifi/esp32/src/esp_wifi_drv.c
+@@ -80,6 +80,7 @@ struct esp32_wifi_runtime {
+ };
+ 
+ static struct net_mgmt_event_callback esp32_dhcp_cb;
++static atomic_t esp32_wifi_runtime_state;
+ 
+ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
+ 			       struct net_if *iface)
+@@ -973,7 +974,6 @@ static void esp32_wifi_init(struct net_if *iface)
+ 
+ 	/* Start interface when we are actually connected with Wi-Fi network */
+ 	esp_read_mac(dev_data->mac_addr, ESP_MAC_WIFI_STA);
+-	esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, eth_esp32_rx);
+ 	wifi_nm_register_mgd_type_iface(nm, WIFI_TYPE_STA, esp32_wifi_iface);
+ 
+ #else
+@@ -983,8 +983,6 @@ static void esp32_wifi_init(struct net_if *iface)
+ 
+ 	/* Start interface when we are actually connected with Wi-Fi network */
+ 	esp_read_mac(dev_data->mac_addr, ESP_MAC_WIFI_STA);
+-	esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, eth_esp32_rx);
+-
+ #endif
+ 
+ 	/* Assign link local address. */
+@@ -1052,27 +1050,45 @@ static int esp32_wifi_reset_stats(const struct device *dev)
+ 
+ static int esp32_wifi_dev_init(const struct device *dev)
+ {
++	ARG_UNUSED(dev);
++	return 0;
++}
++
++int esp32_wifi_runtime_init(void)
++{
++	if (atomic_get(&esp32_wifi_runtime_state) == 2) {
++		return 0;
++	}
++	if (!atomic_cas(&esp32_wifi_runtime_state, 0, 1)) {
++		return -EBUSY;
++	}
+ #if CONFIG_SOC_SERIES_ESP32S2 || CONFIG_SOC_SERIES_ESP32C3
+ 	adc2_cal_include();
+ #endif /* CONFIG_SOC_SERIES_ESP32S2 || CONFIG_SOC_SERIES_ESP32C3 */
+ 
+ 	wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+ 	esp_err_t ret = esp_wifi_init(&config);
+-	esp_wifi_set_mode(ESP32_WIFI_MODE_NULL);
+ 
+ 	if (ret == ESP_ERR_NO_MEM) {
+ 		LOG_ERR("Not enough memory to initialize Wi-Fi.");
+ 		LOG_ERR("Consider increasing CONFIG_HEAP_MEM_POOL_SIZE value.");
++		atomic_set(&esp32_wifi_runtime_state, 0);
+ 		return -ENOMEM;
+ 	} else if (ret != ESP_OK) {
+ 		LOG_ERR("Unable to initialize the Wi-Fi: %d", ret);
++		atomic_set(&esp32_wifi_runtime_state, 0);
+ 		return -EIO;
+ 	}
++	esp_wifi_set_mode(ESP32_WIFI_MODE_NULL);
++	if (esp32_wifi_iface != NULL) {
++		esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, eth_esp32_rx);
++	}
+ 	if (IS_ENABLED(CONFIG_ESP32_WIFI_STA_AUTO_DHCPV4)) {
+ 		net_mgmt_init_event_callback(&esp32_dhcp_cb, wifi_event_handler, DHCPV4_MASK);
+ 		net_mgmt_add_event_callback(&esp32_dhcp_cb);
+ 	}
+ 
++	atomic_set(&esp32_wifi_runtime_state, 2);
+ 	return 0;
+ }
+ 
+-- 
+2.51.0
+

@@ -1,29 +1,28 @@
 From: Deskkin contributors
 Subject: [PATCH] soc: esp32s3: preserve the global MMU split for APPCPU
 
-ESP32-S3 has a shared L1 cache and MMU table. Adding mappings for the stopped
-APPCPU must retain the IROM/DROM split already used by the live PROCPU image.
-Configure that global split only for the initial PROCPU image; the APPCPU uses
-its reserved virtual range without moving it. The caller serializes the
-cache-disabled mapping interval. Use designated initializers so the independent
-image's instruction and data segments are not exchanged.
-
-MCUboot products start APPCPU explicitly after preparing their shared state, so
-do not run the generic automatic startup hook in that configuration.
-
----
- soc/espressif/common/loader.c       | 13 +++++++++----
- soc/espressif/esp32s3/esp32s3-mp.c | 14 +++++++-------
- 2 files changed, 17 insertions(+), 10 deletions(-)
-
 diff --git a/soc/espressif/common/loader.c b/soc/espressif/common/loader.c
+index 06001713cce..81a611838cc 100644
 --- a/soc/espressif/common/loader.c
 +++ b/soc/espressif/common/loader.c
-@@ -263,13 +263,20 @@ void map_rom_segments(int core, struct rom_segments *map)
+@@ -202,6 +202,9 @@ void map_rom_segments(int core, struct rom_segments *map)
+ 	Cache_Read_Disable(core);
+ 	Cache_Flush(core);
+ #else
++	/* Preserve dirty external-RAM lines before stopping the shared ESP32-S3
++	 * data cache to add the APPCPU mappings. */
++	Cache_WriteBack_All();
+ 	cache_hal_disable(1, CACHE_TYPE_ALL);
+ #endif /* CONFIG_SOC_SERIES_ESP32 */
+ 
+@@ -263,13 +266,18 @@ void map_rom_segments(int core, struct rom_segments *map)
  #endif /* CONFIG_SOC_SERIES_ESP32 */
  
  #if !defined(CONFIG_SOC_SERIES_ESP32) && !defined(CONFIG_SOC_SERIES_ESP32S2)
 -	/* Configure the Cache MMU size for instruction and rodata in flash. */
+-	uint32_t cache_mmu_irom_size =
+-		((map->irom_size + CONFIG_MMU_PAGE_SIZE - 1) / CONFIG_MMU_PAGE_SIZE) *
+-		sizeof(uint32_t);
 +	/* The IROM/DROM split is global on ESP32-S3. Configure it only for
 +	 * the initial PROCPU image; an independently loaded APPCPU image adds
 +	 * mappings in its reserved virtual range without moving that live split.
@@ -32,7 +31,9 @@ diff --git a/soc/espressif/common/loader.c b/soc/espressif/common/loader.c
 +		uint32_t cache_mmu_irom_size =
 +			((map->irom_size + CONFIG_MMU_PAGE_SIZE - 1) /
 +			 CONFIG_MMU_PAGE_SIZE) * sizeof(uint32_t);
-+
+ 
+-	/* Split the cache usage by the segment sizes */
+-	Cache_Set_IDROM_MMU_Size(cache_mmu_irom_size, CACHE_DROM_MMU_MAX_END - cache_mmu_irom_size);
 +		Cache_Set_IDROM_MMU_Size(cache_mmu_irom_size,
 +					CACHE_DROM_MMU_MAX_END - cache_mmu_irom_size);
 +	}
@@ -40,9 +41,10 @@ diff --git a/soc/espressif/common/loader.c b/soc/espressif/common/loader.c
  }
  #endif /* !CONFIG_MCUBOOT */
 diff --git a/soc/espressif/esp32s3/esp32s3-mp.c b/soc/espressif/esp32s3/esp32s3-mp.c
+index 0fd40cd1407..b3f3518f04a 100644
 --- a/soc/espressif/esp32s3/esp32s3-mp.c
 +++ b/soc/espressif/esp32s3/esp32s3-mp.c
-@@ -147,12 +147,12 @@ int IRAM_ATTR esp_appcpu_image_load(unsigned int hdr_offset, unsigned int *entry
+@@ -142,12 +142,12 @@ int IRAM_ATTR esp_appcpu_image_load(unsigned int hdr_offset, unsigned int *entry
  		   image_header.drom_size, image_header.drom_size);
  
  	struct rom_segments rom = {
@@ -61,7 +63,7 @@ diff --git a/soc/espressif/esp32s3/esp32s3-mp.c b/soc/espressif/esp32s3/esp32s3-
  	};
  
  	map_rom_segments(1, &rom);
-@@ -197,7 +197,7 @@ int esp_appcpu_init(void)
+@@ -192,7 +192,7 @@ int esp_appcpu_init(void)
  	return 0;
  }
  
@@ -72,3 +74,4 @@ diff --git a/soc/espressif/esp32s3/esp32s3-mp.c b/soc/espressif/esp32s3/esp32s3-
  #endif
 -- 
 2.51.0
+

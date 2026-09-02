@@ -1,17 +1,8 @@
 From: Deskkin contributors
-Subject: [PATCH] soc: esp32s3: normalize APPCPU window state at entry
-
-The independently loaded APPCPU image is entered without a windowed-ABI
-caller or a valid Zephyr stack. Clear inherited windows and CALLINC, switch
-to the first interrupt stack used by normal early boot, and tail-jump into C
-so no artificial bottom frame can be spilled.
-
----
- soc/espressif/esp32s3/soc_appcpu.c | 28 +++++++++++++++++++++++++++-
- 1 file changed, 27 insertions(+), 1 deletion(-)
+Subject: [PATCH] soc: esp32s3: initialize APPCPU register-window state
 
 diff --git a/soc/espressif/esp32s3/soc_appcpu.c b/soc/espressif/esp32s3/soc_appcpu.c
-index b45a928..0000000 100644
+index b3e2c52d3e8..6e77d386d26 100644
 --- a/soc/espressif/esp32s3/soc_appcpu.c
 +++ b/soc/espressif/esp32s3/soc_appcpu.c
 @@ -38,6 +38,7 @@
@@ -22,7 +13,7 @@ index b45a928..0000000 100644
  static HDR_ATTR void (*_entry_point)(void) = &__appcpu_start;
  
  extern FUNC_NORETURN void z_prep_c(void);
-@@ -51,7 +52,32 @@ static void core_intr_matrix_clear(void)
+@@ -51,12 +52,38 @@ static void core_intr_matrix_clear(void)
  	}
  }
  
@@ -40,11 +31,12 @@ index b45a928..0000000 100644
 +        "wsr.ps a2\n\t"
 +        "rsync\n\t"
 +        "movi a0, 0\n\t"
-+        "wsr.windowstart a0\n\t"
-+        "movi a1, z_interrupt_stacks + " STRINGIFY(CONFIG_ISR_STACK_SIZE) " + 16\n\t"
-+        "movi a3, 4\n\t"
-+        "slli a3, a3, 16\n\t"
-+        "or a2, a2, a3\n\t"
++        "movi a1, 1\n\t"
++        "wsr.windowstart a1\n\t"
++        "wsr.windowbase a0\n\t"
++        "rsync\n\t"
++        "movi a1, z_interrupt_stacks + " STRINGIFY(CONFIG_ISR_STACK_SIZE) "\n\t"
++        "movi a2, " STRINGIFY(PS_UM | PS_WOE | PS_INTLEVEL(XCHAL_EXCM_LEVEL)) "\n\t"
 +        "wsr.ps a2\n\t"
 +        "rsync\n\t"
 +        "movi a0, 0\n\t"
@@ -56,5 +48,12 @@ index b45a928..0000000 100644
  {
  	extern uint32_t _init_start;
  
+ 	/* Move the exception vector table to IRAM. */
+-	__asm__ __volatile__("wsr %0, vecbase" : : "r"(&_init_start));
++	__asm__ __volatile__("wsr %0, vecbase; rsync" : : "r"(&_init_start));
+ 
+ 	/* Zero out BSS.  Clobber _bss_start to avoid memset() elision. */
+ 	arch_bss_zero();
 -- 
 2.51.0
+

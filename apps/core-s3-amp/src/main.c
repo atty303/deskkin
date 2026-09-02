@@ -5,8 +5,10 @@
 #include <string.h>
 #include <esp_cpu.h>
 #include <esp_attr.h>
+#include <esp_heap_caps.h>
 #include <esp_psram.h>
 #include <hal/cache_ll.h>
+#include <rom/ets_sys.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/input/input.h>
@@ -14,13 +16,17 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/kernel/thread_stack.h>
+#include <zephyr/multi_heap/shared_multi_heap.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/byteorder.h>
+#include "../../core-s3-service/src/adapter.h"
 #include "../shared.h"
 
 #define CONTROL_FRAME_MAX 188
 #define STATUS_RESPONSE_SIZE 160
 #define HEARTBEAT_STALE_MS 500
+#define DIAGNOSTIC_EVENT_CAPACITY 64U
+#define DIAGNOSTIC_EVENT_SIZE 24U
 #define AMP_SHARED                                                                                 \
 	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
 					       DESKKIN_CHANNEL_OFFSET))
@@ -54,6 +60,8 @@ static atomic_t atlas_cache_misses;
 static atomic_t atlas_cache_failures;
 static atomic_t visible_billboards;
 static atomic_t culled_billboards;
+static atomic_t renderer_shell;
+static atomic_t renderer_shell_property_matches;
 static atomic_t nearest_samples;
 static atomic_t bilinear_samples;
 static atomic_t projection_us;
@@ -92,13 +100,143 @@ static uint32_t valid_snapshot_attempt;
 K_MUTEX_DEFINE(appcpu_flash_mutex);
 static bool appcpu_running;
 
+enum deskkin_diagnostic_kind {
+	DESKKIN_DIAGNOSTIC_BOOT = 1,
+	DESKKIN_DIAGNOSTIC_RENDERER = 2,
+	DESKKIN_DIAGNOSTIC_SHELL = 3,
+	DESKKIN_DIAGNOSTIC_TOUCH = 4,
+	DESKKIN_DIAGNOSTIC_UI_COMMAND = 5,
+	DESKKIN_DIAGNOSTIC_SERVICE = 6,
+	DESKKIN_DIAGNOSTIC_MEMORY = 7,
+};
+
+struct deskkin_diagnostic_event {
+	uint32_t sequence;
+	uint32_t uptime_ms;
+	int16_t x;
+	int16_t y;
+	uint32_t value;
+	uint8_t kind;
+	uint8_t flags;
+	uint8_t reserved[2];
+};
+
+static struct deskkin_diagnostic_event diagnostic_events[DIAGNOSTIC_EVENT_CAPACITY]
+	__attribute__((section(".ext_ram.bss")));
+static uint32_t diagnostic_sequence;
 extern void deskkin_service_ui_command(uint8_t command);
+
+static void diagnostic_record(uint8_t kind, uint8_t flags, int16_t x, int16_t y,
+			      uint32_t value)
+{
+	unsigned int key = irq_lock();
+	diagnostic_sequence++;
+	if (diagnostic_sequence == 0U) {
+		diagnostic_sequence = 1U;
+	}
+	diagnostic_events[(diagnostic_sequence - 1U) % DIAGNOSTIC_EVENT_CAPACITY] =
+		(struct deskkin_diagnostic_event){
+			.sequence = diagnostic_sequence,
+			.uptime_ms = k_uptime_get_32(),
+			.x = x,
+			.y = y,
+			.value = value,
+			.kind = kind,
+			.flags = flags,
+		};
+	irq_unlock(key);
+}
+
+void deskkin_service_trace(uint8_t stage, uint8_t error)
+{
+	diagnostic_record(DESKKIN_DIAGNOSTIC_SERVICE, stage, 0, 0, error);
+}
+
+void deskkin_service_result(uint8_t stage, int32_t result)
+{
+	diagnostic_record(DESKKIN_DIAGNOSTIC_SERVICE, stage | 0x80U, 0, 0,
+			  (uint32_t)result);
+}
+
+void deskkin_debug_pair_request(void)
+{
+	diagnostic_record(DESKKIN_DIAGNOSTIC_UI_COMMAND, 1U, 0, 0, 1U);
+	deskkin_service_ui_command(1U);
+}
+
+static void allocation_failed_probe(size_t requested_size, uint32_t caps,
+				    const char *function_name)
+{
+	ARG_UNUSED(caps);
+	ARG_UNUSED(function_name);
+	diagnostic_record(DESKKIN_DIAGNOSTIC_SERVICE, 0x88U, 0, 0,
+			  requested_size > INT32_MAX ? INT32_MAX : (uint32_t)requested_size);
+}
+
+void deskkin_install_allocation_failed_probe(void)
+{
+	(void)heap_caps_register_failed_alloc_callback(allocation_failed_probe);
+}
+
+int deskkin_diagnostic_read(uint32_t after_sequence, uint8_t *output, size_t capacity)
+{
+	if (output == NULL || capacity < DIAGNOSTIC_EVENT_SIZE) {
+		return -EINVAL;
+	}
+	unsigned int key = irq_lock();
+	const uint32_t newest = diagnostic_sequence;
+	if (newest == 0U || after_sequence == newest) {
+		irq_unlock(key);
+		return 0;
+	}
+	const uint32_t oldest = newest >= DIAGNOSTIC_EVENT_CAPACITY
+				? newest - DIAGNOSTIC_EVENT_CAPACITY + 1U
+				: 1U;
+	const uint32_t wanted = after_sequence + 1U < oldest ? oldest : after_sequence + 1U;
+	const struct deskkin_diagnostic_event event =
+		diagnostic_events[(wanted - 1U) % DIAGNOSTIC_EVENT_CAPACITY];
+	irq_unlock(key);
+	memset(output, 0, DIAGNOSTIC_EVENT_SIZE);
+	output[0] = 1U;
+	output[1] = 0x80U;
+	output[2] = event.kind;
+	output[3] = event.flags;
+	sys_put_be32(event.sequence, &output[4]);
+	sys_put_be32(event.uptime_ms, &output[8]);
+	sys_put_be16((uint16_t)event.x, &output[12]);
+	sys_put_be16((uint16_t)event.y, &output[14]);
+	sys_put_be32(event.value, &output[16]);
+	sys_put_be32(wanted - (after_sequence + 1U), &output[20]);
+	return DIAGNOSTIC_EVENT_SIZE;
+}
+
+static void set_boot_stage(uint8_t stage)
+{
+	if ((uint8_t)atomic_get(&boot_stage) == stage) {
+		return;
+	}
+	atomic_set(&boot_stage, stage);
+	diagnostic_record(DESKKIN_DIAGNOSTIC_BOOT, stage, 0, 0,
+			  (uint32_t)(uint8_t)atomic_get(&boot_error));
+}
+
+static void set_boot_error(uint8_t error)
+{
+	if ((uint8_t)atomic_get(&boot_error) == error) {
+		return;
+	}
+	atomic_set(&boot_error, error);
+	diagnostic_record(DESKKIN_DIAGNOSTIC_BOOT, (uint8_t)atomic_get(&boot_stage), 0, 0,
+			  error);
+}
+
 extern uint8_t deskkin_service_shell(void);
 extern uint32_t deskkin_service_sas(void);
 extern uint8_t deskkin_service_availability(void);
 extern uint8_t deskkin_service_notice(void);
 extern uint8_t deskkin_service_valid_result(void);
 extern uint32_t deskkin_service_result_attempt(void);
+extern uint16_t deskkin_nvs_last_failure(void);
 
 void deskkin_flash_guard_enter(void)
 {
@@ -130,10 +268,12 @@ static void receive_ui_command(void)
 	}
 	if (command.generation != before || command.schema != DESKKIN_CHANNEL_SCHEMA ||
 	    command.command < 1U || command.command > 3U) {
-		atomic_set(&boot_error, 9);
+		set_boot_error(9);
 		return;
 	}
 	command_generation = before;
+	diagnostic_record(DESKKIN_DIAGNOSTIC_UI_COMMAND, command.command, 0, 0,
+			  command.generation);
 	deskkin_service_ui_command(command.command);
 }
 
@@ -168,12 +308,17 @@ static void touch_callback(struct input_event *event, void *user_data)
 	}
 	if (event->sync) {
 		publish_touch();
+		diagnostic_record(DESKKIN_DIAGNOSTIC_TOUCH,
+				  atomic_get(&touch_pressed) != 0 ? 1U : 0U,
+				  (int16_t)atomic_get(&touch_x), (int16_t)atomic_get(&touch_y),
+				  touch_generation);
 	}
 }
 INPUT_CALLBACK_DEFINE(touch, touch_callback, NULL);
 
 static void publish_world_snapshot(void)
 {
+	static uint8_t last_diagnostic_shell = UINT8_MAX;
 	bool benchmark = atomic_get(&world_benchmark_active) != 0;
 	const bool valid_result = deskkin_service_valid_result() != 0U;
 	const uint32_t result_attempt = deskkin_service_result_attempt();
@@ -191,6 +336,11 @@ static void publish_world_snapshot(void)
 		.availability = benchmark ? 2U : deskkin_service_availability(),
 		.notice = benchmark ? 1U : deskkin_service_notice(),
 	};
+	if (snapshot.shell != last_diagnostic_shell) {
+		last_diagnostic_shell = snapshot.shell;
+		diagnostic_record(DESKKIN_DIAGNOSTIC_SHELL, snapshot.shell, 0, 0,
+				  snapshot.generation);
+	}
 	deskkin_shared_copy_to(&AMP_SHARED->world, &snapshot, sizeof(snapshot));
 	deskkin_shared_store(&AMP_SHARED->world_publication, world_generation);
 	if (valid_result &&
@@ -232,7 +382,7 @@ static void update_observed_yaw(void)
 		    target.schema == DESKKIN_CHANNEL_SCHEMA) {
 			target_yaw = target.value;
 		} else if (before == after) {
-			atomic_set(&boot_error, 9);
+			set_boot_error(9);
 		}
 	}
 	/* Preserve the exact 0.5 turn/s bound across the 1 kHz supervisor ticks. */
@@ -245,17 +395,195 @@ static void update_observed_yaw(void)
 	observed_yaw += step;
 }
 
-struct z_thread_stack_element EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)
+static struct z_thread_stack_element EXT_RAM_NOINIT_ATTR __aligned(ARCH_STACK_PTR_ALIGN)
 	supervisor_stack[K_THREAD_STACK_LEN(2048)];
 static struct k_thread supervisor_thread;
-struct z_thread_stack_element __aligned(ARCH_STACK_PTR_ALIGN)
+static struct k_thread wifi_boot_thread;
+struct z_thread_stack_element __attribute__((section(".sram2.noinit")))
+	__aligned(ARCH_STACK_PTR_ALIGN)
 	deskkin_control_stack[K_THREAD_STACK_LEN(3072)];
 
 extern int esp_appcpu_init(void);
+extern int esp32_wifi_runtime_init(void);
+extern int deskkin_amp_prepare_renderer(void);
+extern int deskkin_start_control_worker(void);
+extern int deskkin_start_service_after_runtime_handoff(void);
+extern void deskkin_amp_service_failed(void);
+extern struct k_thread z_main_thread;
+#define WIFI_BOOT_STACK_SIZE 1536U
+BUILD_ASSERT(WIFI_BOOT_STACK_SIZE <= DESKKIN_SERVICE_STACK_SIZE);
+static struct shared_multi_heap_region runtime_sram_regions[3];
+static atomic_t runtime_sram_ready;
+static uintptr_t wifi_boot_stack_start;
+static int wifi_boot_result;
+bool deskkin_runtime_internal_owns(const void *block);
+
+BUILD_ASSERT(DT_REG_SIZE(DT_NODELABEL(shm0)) == DESKKIN_SHARED_SIZE,
+	     "AMP shared SRAM must match the bounded wire contract");
+BUILD_ASSERT(DT_REG_ADDR(DT_NODELABEL(shm0)) == 0x3fcee400U,
+	     "AMP shared SRAM must retain the proven APPCPU layout anchor");
+BUILD_ASSERT((DT_REG_ADDR(DT_NODELABEL(shm0)) + DESKKIN_CHANNEL_OFFSET +
+	      sizeof(struct deskkin_amp_shared)) <= 0x3fcf0000U,
+	     "AMP channels must end before the cache-reserved SRAM2 range");
+
+static int initialize_runtime_sram(void)
+{
+	const int join_result = k_thread_join(&z_main_thread, K_FOREVER);
+	if (join_result != 0) {
+		return join_result;
+	}
+
+	size_t main_unused = 0U;
+	const int stack_result = k_thread_stack_space_get(&z_main_thread, &main_unused);
+	if (stack_result != 0) {
+		return stack_result;
+	}
+	const uintptr_t main_start = (uintptr_t)z_main_thread.stack_info.start;
+	const size_t main_size = z_main_thread.stack_info.size;
+	const uintptr_t shared_start = DT_REG_ADDR(DT_NODELABEL(shm0));
+	const size_t prefix_size = DESKKIN_CHANNEL_OFFSET;
+	if (main_start == 0U || main_size == 0U || prefix_size == 0U ||
+	    (main_start % sizeof(uintptr_t)) != 0U ||
+	    (shared_start % sizeof(uintptr_t)) != 0U) {
+		return -EINVAL;
+	}
+	diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 1U, 0, 0,
+			  (uint32_t)(main_size - MIN(main_unused, main_size)));
+	memset((void *)main_start, 0, main_size);
+	memset((void *)shared_start, 0, prefix_size);
+	struct deskkin_runtime_sram_handoff app_handoff = {0};
+	const int64_t handoff_deadline = k_uptime_get() + 5000;
+	for (;;) {
+		const uint32_t before =
+			deskkin_shared_load(&AMP_SHARED->runtime_sram_publication);
+		if (before != 0U) {
+			deskkin_shared_copy_from(&app_handoff, &AMP_SHARED->runtime_sram,
+						 sizeof(app_handoff));
+			const uint32_t after =
+				deskkin_shared_load(&AMP_SHARED->runtime_sram_publication);
+			if (before == after && app_handoff.generation == before &&
+			    app_handoff.magic == DESKKIN_RUNTIME_SRAM_MAGIC) {
+				break;
+			}
+		}
+		if (k_uptime_get() >= handoff_deadline) {
+			diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 5U, 0, 0,
+					  *(volatile uint32_t *)(shared_start + prefix_size - 16U));
+			return -ETIMEDOUT;
+		}
+		k_msleep(1);
+	}
+	const uintptr_t app_start = app_handoff.address;
+	const size_t app_size = app_handoff.size;
+	if (app_start <= main_start + main_size || app_size == 0U ||
+	    app_start + app_size < app_start || app_start + app_size > shared_start ||
+	    (app_start % sizeof(uintptr_t)) != 0U) {
+		return -EINVAL;
+	}
+	runtime_sram_regions[0] = (struct shared_multi_heap_region){
+		.attr = SMH_REG_ATTR_CACHEABLE,
+		.addr = shared_start,
+		.size = prefix_size,
+	};
+	wifi_boot_stack_start = (uintptr_t)service_stack;
+	runtime_sram_regions[1] = (struct shared_multi_heap_region){
+		.attr = SMH_REG_ATTR_CACHEABLE,
+		.addr = main_start,
+		.size = main_size,
+	};
+	runtime_sram_regions[2] = (struct shared_multi_heap_region){
+		.attr = SMH_REG_ATTR_CACHEABLE,
+		.addr = app_start,
+		.size = app_size,
+	};
+	for (size_t index = 0U; index < 3U; ++index) {
+		const int result = shared_multi_heap_add(&runtime_sram_regions[index], NULL);
+		if (result != 0) {
+			return result;
+		}
+	}
+	atomic_set(&runtime_sram_ready, 1);
+	diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 2U, (int16_t)prefix_size,
+			  (int16_t)main_size,
+			  (uint32_t)(prefix_size + main_size + app_size));
+	diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 4U, 0, 0, app_handoff.used);
+	return 0;
+}
+
+static void wifi_boot_entry(void *first, void *second, void *third)
+{
+	ARG_UNUSED(first);
+	ARG_UNUSED(second);
+	ARG_UNUSED(third);
+	wifi_boot_result = esp32_wifi_runtime_init();
+}
+
+static int complete_wifi_boot_phase(void)
+{
+	k_tid_t thread =
+		k_thread_create(&wifi_boot_thread, (k_thread_stack_t *)wifi_boot_stack_start,
+				WIFI_BOOT_STACK_SIZE, wifi_boot_entry, NULL, NULL, NULL, 2, 0,
+				K_NO_WAIT);
+	if (thread == NULL) {
+		memset((void *)wifi_boot_stack_start, 0, WIFI_BOOT_STACK_SIZE);
+		return -EIO;
+	}
+	const int join_result = k_thread_join(&wifi_boot_thread, K_FOREVER);
+	memset((void *)wifi_boot_stack_start, 0, WIFI_BOOT_STACK_SIZE);
+	if (join_result != 0 || wifi_boot_result != 0) {
+		return join_result != 0 ? join_result : wifi_boot_result;
+	}
+	return 0;
+}
+
+void *deskkin_runtime_internal_calloc(size_t count, size_t size)
+{
+	size_t bytes;
+	if (__builtin_mul_overflow(count, size, &bytes) || bytes == 0U) {
+		return NULL;
+	}
+	void *const block = atomic_get(&runtime_sram_ready) != 0
+				    ? shared_multi_heap_alloc(SMH_REG_ATTR_CACHEABLE, bytes)
+				    : k_calloc(1U, bytes);
+	if (block != NULL) {
+		memset(block, 0, bytes);
+	} else if (atomic_get(&runtime_sram_ready) != 0) {
+		diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 3U, 0, 0, (uint32_t)bytes);
+	}
+	return block;
+}
+
+void deskkin_runtime_internal_free(void *block)
+{
+	if (block == NULL) {
+		return;
+	}
+	if (deskkin_runtime_internal_owns(block)) {
+		shared_multi_heap_free(block);
+	} else {
+		k_free(block);
+	}
+}
+
+bool deskkin_runtime_internal_owns(const void *block)
+{
+	if (block == NULL || atomic_get(&runtime_sram_ready) == 0) {
+		return false;
+	}
+	const uintptr_t address = (uintptr_t)block;
+	for (size_t index = 0U; index < ARRAY_SIZE(runtime_sram_regions); ++index) {
+		const uintptr_t start = runtime_sram_regions[index].addr;
+		if (address >= start && address < start + runtime_sram_regions[index].size) {
+			return true;
+		}
+	}
+	return false;
+}
 
 static void receive_heartbeat(void)
 {
 	static uint32_t received_publication;
+	static uint32_t recorded_stage_mask;
 	struct deskkin_renderer_heartbeat heartbeat = {0};
 	uint32_t publication = 0U;
 	bool stable = false;
@@ -272,7 +600,7 @@ static void receive_heartbeat(void)
 		if (heartbeat.magic != DESKKIN_HEARTBEAT_MAGIC ||
 		    heartbeat.generation != publication ||
 		    heartbeat.schema != DESKKIN_CHANNEL_SCHEMA) {
-			atomic_set(&boot_error, 9);
+			set_boot_error(9);
 			return;
 		}
 		stable = true;
@@ -282,6 +610,7 @@ static void receive_heartbeat(void)
 		return;
 	}
 	received_publication = publication;
+	const uint8_t previous_fault = (uint8_t)atomic_get(&renderer_fault);
 	atomic_set(&heartbeat_received_ms, (atomic_val_t)k_uptime_get_32());
 	atomic_set(&heartbeat_generation, (atomic_val_t)heartbeat.generation);
 	atomic_set(&completed_frames, (atomic_val_t)heartbeat.completed_frames);
@@ -292,6 +621,15 @@ static void receive_heartbeat(void)
 	atomic_set(&transfer_max_us, (atomic_val_t)heartbeat.transfer_max_us);
 	atomic_set(&renderer_stage, heartbeat.stage);
 	atomic_set(&renderer_fault, heartbeat.fault);
+	const uint32_t stage_bit = heartbeat.stage < 32U ? BIT(heartbeat.stage) : 0U;
+	const bool first_stage = stage_bit != 0U && (recorded_stage_mask & stage_bit) == 0U;
+	if (first_stage) {
+		recorded_stage_mask |= stage_bit;
+	}
+	if (first_stage || heartbeat.fault != previous_fault) {
+		diagnostic_record(DESKKIN_DIAGNOSTIC_RENDERER, heartbeat.stage, 0, 0,
+				  heartbeat.fault);
+	}
 	atomic_set(&allocation_failures, heartbeat.allocation_failures);
 	atomic_set(&transfer_failures, heartbeat.transfer_failures);
 	atomic_set(&dirty_rect_count, heartbeat.dirty_rect_count);
@@ -308,6 +646,8 @@ static void receive_heartbeat(void)
 	atomic_set(&atlas_cache_failures, heartbeat.atlas_cache_failures);
 	atomic_set(&visible_billboards, heartbeat.visible_billboards);
 	atomic_set(&culled_billboards, heartbeat.culled_billboards);
+	atomic_set(&renderer_shell, heartbeat.observed_shell);
+	atomic_set(&renderer_shell_property_matches, heartbeat.shell_property_matches);
 	atomic_set(&nearest_samples, (atomic_val_t)heartbeat.nearest_samples);
 	atomic_set(&bilinear_samples, (atomic_val_t)heartbeat.bilinear_samples);
 	atomic_set(&projection_us, (atomic_val_t)heartbeat.projection_us);
@@ -359,6 +699,25 @@ static void supervisor_entry(void *first, void *second, void *third)
 	ARG_UNUSED(first);
 	ARG_UNUSED(second);
 	ARG_UNUSED(third);
+	int result = initialize_runtime_sram();
+	if (result != 0) {
+		diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 0x80U, 0, 0, (uint32_t)result);
+		set_boot_error(10);
+		return;
+	}
+	set_boot_stage(10);
+	result = complete_wifi_boot_phase();
+	if (result != 0) {
+		diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 0x81U, 0, 0, (uint32_t)result);
+		set_boot_error(11);
+		return;
+	}
+	set_boot_stage(11);
+	if (deskkin_start_service_after_runtime_handoff() != 0) {
+		deskkin_amp_service_failed();
+		return;
+	}
+	set_boot_stage(8);
 	uint32_t next_world_ms = k_uptime_get_32();
 	for (;;) {
 		receive_heartbeat();
@@ -367,6 +726,7 @@ static void supervisor_entry(void *first, void *second, void *third)
 		const uint32_t now = k_uptime_get_32();
 		if ((int32_t)(now - next_world_ms) >= 0) {
 			publish_world_snapshot();
+			set_boot_stage(9);
 			next_world_ms += 50U;
 			if ((int32_t)(now - next_world_ms) >= 0) {
 				next_world_ms = now + 50U;
@@ -382,104 +742,59 @@ static void supervisor_entry(void *first, void *second, void *third)
 
 int deskkin_amp_prepare_renderer(void)
 {
-	atomic_set(&boot_stage, 1);
+	set_boot_stage(1);
 	intptr_t mapped_heap = 0;
 	size_t mapped_heap_size = 0;
 	if (esp_psram_get_mapped_region(&mapped_heap, &mapped_heap_size) != 0 ||
 	    mapped_heap == 0 || mapped_heap_size < RENDERER_HEAP_SIZE) {
-		atomic_set(&boot_error, 5);
+		set_boot_error(5);
 		return -ENOMEM;
 	}
 	renderer_heap_size = RENDERER_HEAP_SIZE;
 	renderer_heap = (uintptr_t)mapped_heap + mapped_heap_size - renderer_heap_size;
 	if (renderer_heap <= (uintptr_t)mapped_heap) {
-		atomic_set(&boot_error, 5);
+		set_boot_error(5);
 		return -ENOMEM;
 	}
 	const cache_bus_mask_t appcpu_bus =
 		cache_ll_l1_get_bus(1, (uint32_t)renderer_heap, renderer_heap_size);
 	cache_ll_l1_enable_bus(1, appcpu_bus);
 	memset((void *)AMP_SHARED, 0, sizeof(*AMP_SHARED));
-	atomic_set(&boot_stage, 2);
+	set_boot_stage(2);
 	if (initialize_display_power() != 0) {
-		atomic_set(&boot_error, 4);
+		set_boot_error(4);
 		return -EIO;
 	}
 	atomic_set(&display_ready, 1);
 	publish_display_ready();
-	atomic_set(&boot_stage, 3);
-	deskkin_flash_guard_enter();
-	unsigned int key = irq_lock();
+	set_boot_stage(3);
 	const int appcpu_result = esp_appcpu_init();
-	irq_unlock(key);
-	deskkin_flash_guard_exit();
+	if (appcpu_result == 0) {
+		appcpu_running = true;
+		esp_cpu_unstall(1);
+	}
 	if (appcpu_result != 0) {
-		atomic_set(&boot_error, 3);
+		set_boot_error(3);
 		return -EIO;
 	}
-	appcpu_running = true;
 	const int64_t renderer_deadline = k_uptime_get() + 5000;
 	while (deskkin_shared_load(&AMP_SHARED->display_spi_hz) == 0U &&
 	       k_uptime_get() < renderer_deadline) {
 		receive_heartbeat();
 		if (atomic_get(&renderer_stage) == 5) {
-			atomic_set(&boot_error, 7);
+			set_boot_error(7);
 			return -EIO;
 		}
 		k_msleep(1);
 	}
 	if (deskkin_shared_load(&AMP_SHARED->display_spi_hz) == 0U) {
-		atomic_set(&boot_error, 7);
+		diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 5U, 0, 0,
+				  (uint32_t)atomic_get(&renderer_stage));
+		set_boot_error(7);
 		return -ETIMEDOUT;
 	}
-	atomic_set(&boot_stage, 4);
+	set_boot_stage(4);
 	return 0;
-}
-
-static int read_byte(uint8_t *byte, int64_t deadline)
-{
-	while (k_uptime_get() < deadline) {
-		if (uart_poll_in(console, byte) == 0) {
-			return 0;
-		}
-		k_msleep(1);
-	}
-	return -ETIMEDOUT;
-}
-
-static int read_status_request(uint8_t *frame)
-{
-	uint8_t prefix[3] = {0};
-	size_t prefix_length = 0;
-	const int64_t deadline = k_uptime_get() + 2000;
-	while (k_uptime_get() < deadline) {
-		uint8_t byte;
-		if (read_byte(&byte, deadline) != 0) {
-			return -ETIMEDOUT;
-		}
-		if (prefix_length < sizeof(prefix)) {
-			prefix[prefix_length++] = byte;
-		} else {
-			prefix[0] = prefix[1];
-			prefix[1] = prefix[2];
-			prefix[2] = byte;
-		}
-		if (prefix_length < sizeof(prefix)) {
-			continue;
-		}
-		const size_t length = sys_get_be16(prefix);
-		if (length != 28 || prefix[2] != 1U) {
-			continue;
-		}
-		frame[0] = prefix[2];
-		for (size_t index = 1; index < length; ++index) {
-			if (read_byte(&frame[index], k_uptime_get() + 2000) != 0) {
-				return -ETIMEDOUT;
-			}
-		}
-		return frame[1] == 8U ? 0 : -ENOTSUP;
-	}
-	return -ETIMEDOUT;
 }
 
 size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
@@ -504,6 +819,9 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 	response[56] = (uint8_t)atomic_get(&display_ready);
 	sys_put_be32((uint32_t)atomic_get(&render_max_us), &response[57]);
 	sys_put_be32((uint32_t)atomic_get(&transfer_max_us), &response[61]);
+	const uint16_t nvs_failure = deskkin_nvs_last_failure();
+	response[65] = (uint8_t)(nvs_failure >> 8);
+	response[66] = (uint8_t)nvs_failure;
 	response[67] = deskkin_shared_load(&AMP_SHARED->renderer_publication) != 0U ? 1U : 0U;
 	response[68] = (uint8_t)atomic_get(&boot_stage);
 	response[69] = (uint8_t)atomic_get(&boot_error);
@@ -531,8 +849,13 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 	sys_put_be16((uint16_t)atomic_get(&atlas_cache_hits), &response[112]);
 	sys_put_be16((uint16_t)atomic_get(&atlas_cache_misses), &response[114]);
 	sys_put_be16((uint16_t)atomic_get(&atlas_cache_failures), &response[116]);
-	response[118] = (uint8_t)atomic_get(&visible_billboards);
-	response[119] = (uint8_t)atomic_get(&culled_billboards);
+	if (deskkin_service_shell() == DESKKIN_SHELL_PAIRED) {
+		response[118] = (uint8_t)atomic_get(&visible_billboards);
+		response[119] = (uint8_t)atomic_get(&culled_billboards);
+	} else {
+		response[118] = (uint8_t)atomic_get(&renderer_shell);
+		response[119] = (uint8_t)atomic_get(&renderer_shell_property_matches);
+	}
 	sys_put_be32((uint32_t)atomic_get(&nearest_samples), &response[120]);
 	sys_put_be32((uint32_t)atomic_get(&bilinear_samples), &response[124]);
 	sys_put_be32((uint32_t)atomic_get(&projection_us), &response[128]);
@@ -548,7 +871,7 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 
 void deskkin_amp_service_failed(void)
 {
-	atomic_set(&boot_error, 6);
+	set_boot_error(6);
 }
 
 void deskkin_amp_supervisor_main(void)
@@ -558,11 +881,6 @@ void deskkin_amp_supervisor_main(void)
 	    deskkin_shared_load(&AMP_SHARED->display_spi_hz) == 0U) {
 		return;
 	}
-	atomic_set(&boot_stage, 5);
 	k_thread_create(&supervisor_thread, supervisor_stack, K_THREAD_STACK_SIZEOF(supervisor_stack),
 			supervisor_entry, NULL, NULL, NULL, 3, 0, K_NO_WAIT);
-	atomic_set(&boot_stage, 9);
-	for (;;) {
-		k_sleep(K_FOREVER);
-	}
 }

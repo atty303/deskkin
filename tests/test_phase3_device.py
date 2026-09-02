@@ -141,10 +141,14 @@ class Phase3DeviceTests(unittest.TestCase):
         status[40:44] = (2).to_bytes(4, "big")
         status[54] = 1
         status[56] = 1
+        status[65] = 5
+        status[66] = 28
         decoded = device.decode_world_status(bytes(status))
 
         self.assertEqual(decoded["allocation_failures"], 1)
         self.assertEqual(decoded["completed_frames"], 2)
+        self.assertEqual(decoded["nvs_failure_stage"], 5)
+        self.assertEqual(decoded["nvs_failure_code"], 28)
 
     def test_world_measurement_reports_less_than_twenty_fps(self):
         clock = mock.Mock()
@@ -282,7 +286,13 @@ class Phase3DeviceTests(unittest.TestCase):
 
     def test_amp_supervisor_dram_ends_at_renderer_origin(self):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
-        self.assertIn("ASSERT(_end <= 0x3fce5c00", linker)
+        self.assertIn("ASSERT(_end <= 0x3fce4c00", linker)
+        reservation = (
+            ROOT / "patches/zephyr-core-s3/0011-reserve-appcpu-sram-on-both-cores.patch"
+        ).read_text(encoding="utf-8")
+        self.assertIn("#if defined(CONFIG_SOC_ENABLE_APPCPU)", reservation)
+        self.assertIn("DRAM_ROM_BSS_DATA_START", reservation)
+        self.assertIn("appcpu_dram_end = MIN", reservation)
 
     def test_amp_supervisor_keeps_framebuffers_internal_and_renderer_heap_in_psram(self):
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
@@ -293,7 +303,14 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("CONFIG_ESP_SPIRAM=y", config)
         self.assertIn("CONFIG_ESP_SPIRAM_HEAP_SIZE=3473408", config)
         self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
+        self.assertIn("CONFIG_INPUT_FT5336_INTERRUPT=y", config)
+        self.assertIn("CONFIG_INPUT_MODE_SYNCHRONOUS=y", config)
         self.assertIn("shared_multi_heap_alloc(SMH_REG_ATTR_EXTERNAL", service_adapter)
+        heap_patch = (ROOT / "patches/zephyr-core-s3/0009-start-spiram-heap-after-static-data.patch").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("_ext_ram_heap_start", heap_patch)
+        self.assertIn("_ext_ram_heap_end", heap_patch)
         self.assertIn("CONFIG_SPIRAM_MODE_QUAD=y", config)
         self.assertIn("CONFIG_SPIRAM_SPEED_80M=y", config)
         self.assertIn("static __aligned(32) uint16_t internal_framebuffer[2U][320U * 240U]", source)
@@ -320,16 +337,75 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         self.assertIn("_ext_ram_heap_end <= 0x3c400000", dram_boundary)
         self.assertIn('__attribute__((section(".sram2.noinit")))', service_adapter)
+        self.assertIn('__attribute__((section(".sram2.noinit")))', source)
+        self.assertIn(
+            "service_stack[K_THREAD_STACK_LEN(DESKKIN_SERVICE_STACK_SIZE)]",
+            service_adapter,
+        )
+        service_adapter_header = (
+            ROOT / "apps/core-s3-service/src/adapter.h"
+        ).read_text(encoding="utf-8")
+        self.assertIn("#define DESKKIN_SERVICE_STACK_SIZE 21504U", service_adapter_header)
+        self.assertIn("deskkin_control_stack[K_THREAD_STACK_LEN(3072)]", source)
         self.assertIn('__attribute__((section(".sram2.noinit")))', hal_patch)
         self.assertIn("_ext_ram_bss_start", zephyr_patch)
         self.assertIn("*libnet80211.a:(.bss .bss.*)", zephyr_patch)
-        noncritical_patch = (ROOT / "patches/zephyr-core-s3/0007-place-app-message-and-input-state-in-spiram.patch").read_text(
+        self.assertNotIn("*libsubsys__input.a:input.c.obj", zephyr_patch)
+        self.assertIn("*libapp.a:adapter.c.obj", zephyr_patch)
+        self.assertIn("CONFIG_MAIN_STACK_SIZE=4096", config)
+        self.assertNotIn("renderer_boot_stack", source)
+
+        amp_memory = (ROOT / "apps/core-s3-amp/amp-memory.overlay").read_text(
             encoding="utf-8"
         )
-        self.assertIn("*libsubsys__input.a:input.c.obj", noncritical_patch)
-        self.assertIn("*libapp.a:adapter.c.obj", noncritical_patch)
-        self.assertIn("CONFIG_MAIN_STACK_SIZE=4096", config)
-        self.assertNotIn("boot_stack", source)
+        self.assertIn("reg = <0x3fcee000 0x400>", amp_memory)
+        self.assertIn("reg = <0x3fcee400 0x1000>", amp_memory)
+        self.assertIn("#define DESKKIN_CHANNEL_OFFSET 0x400U", (ROOT / "apps/core-s3-amp/shared.h").read_text(encoding="utf-8"))
+        self.assertIn("CONFIG_INIT_STACKS=y", config)
+        renderer_config = (
+            ROOT / "apps/core-s3-amp/renderer/prj.conf"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("CONFIG_INIT_STACKS=y", renderer_config)
+        self.assertIn("k_thread_join(&z_main_thread, K_FOREVER)", source)
+        self.assertIn("k_thread_stack_space_get(&z_main_thread", source)
+        self.assertIn("memset((void *)main_start, 0, main_size)", source)
+        self.assertIn("memset((void *)shared_start, 0, prefix_size)", source)
+        self.assertNotIn("memset((void *)tail_start, 0, tail_size)", source)
+        self.assertIn("shared_multi_heap_add(&runtime_sram_regions[index]", source)
+        self.assertIn("wifi_boot_stack_start = (uintptr_t)service_stack", source)
+        self.assertIn("memset((void *)wifi_boot_stack_start, 0, WIFI_BOOT_STACK_SIZE)", source)
+        self.assertIn("if (thread == NULL)", source)
+        self.assertLess(
+            source.index("const int join_result = k_thread_join(&wifi_boot_thread"),
+            source.rindex("memset((void *)wifi_boot_stack_start, 0, WIFI_BOOT_STACK_SIZE)"),
+        )
+        self.assertIn("atomic_set(&runtime_sram_ready, 1)", source)
+        self.assertLess(
+            source.index("atomic_set(&runtime_sram_ready, 1)"),
+            source.index("wifi_boot_result = esp32_wifi_runtime_init()"),
+        )
+        supervisor_rust = (
+            ROOT / "apps/core-s3-amp/src/lib.rs"
+        ).read_text(encoding="utf-8")
+        self.assertLess(
+            supervisor_rust.index("if unsafe { deskkin_start_control_worker() }"),
+            supervisor_rust.index("let _renderer_ready = unsafe { deskkin_amp_prepare_renderer() }"),
+        )
+        self.assertLess(
+            source.index("wifi_boot_result = esp32_wifi_runtime_init()"),
+            source.index("deskkin_start_service_after_runtime_handoff()"),
+        )
+
+        wifi_patch = (ROOT / "patches/zephyr-core-s3/0010-defer-wifi-until-runtime-sram-handoff.patch").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("int esp32_wifi_runtime_init(void)", wifi_patch)
+        self.assertIn("atomic_cas(&esp32_wifi_runtime_state, 0, 1)", wifi_patch)
+        runtime_heap_patch = (ROOT / "patches/hal-espressif-core-s3/0003-use-phase-owned-internal-runtime-heap.patch").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("deskkin_runtime_internal_calloc", runtime_heap_patch)
+        self.assertIn("deskkin_runtime_internal_free", runtime_heap_patch)
 
         renderer_config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(
             encoding="utf-8"
@@ -339,19 +415,32 @@ class Phase3DeviceTests(unittest.TestCase):
             renderer_config,
         )
 
-    def test_amp_control_precedes_service_boot_and_publishes_complete_stage(self):
+    def test_amp_boot_control_precedes_phase_handoff_wifi_and_service(self):
         entry = (ROOT / "apps/core-s3-amp/src/lib.rs").read_text(encoding="utf-8")
         supervisor = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
         config = (ROOT / "apps/core-s3-amp/prj.conf").read_text(encoding="utf-8")
+        rust_main = entry.split('extern "C" fn rust_main()', 1)[1].split("#[no_mangle]", 1)[0]
         self.assertLess(
-            entry.index("deskkin_amp_prepare_renderer()"),
-            entry.index("deskkin_start_control_worker()"),
+            rust_main.index("deskkin_start_control_worker()"),
+            rust_main.index("deskkin_amp_prepare_renderer()"),
         )
         self.assertLess(
-            entry.index("deskkin_start_control_worker()"),
-            entry.index("deskkin_core_s3_service::start()"),
+            rust_main.index("deskkin_amp_prepare_renderer()"),
+            rust_main.index("deskkin_amp_supervisor_main()"),
         )
-        self.assertIn("atomic_set(&boot_stage, 9);", supervisor)
+        self.assertNotIn("deskkin_core_s3_service::start()", rust_main)
+        self.assertIn("deskkin_start_service_after_runtime_handoff", entry)
+        self.assertLess(
+            supervisor.index("result = initialize_runtime_sram()"),
+            supervisor.index("result = complete_wifi_boot_phase()"),
+        )
+        self.assertLess(
+            supervisor.index("result = complete_wifi_boot_phase()"),
+            supervisor.index("deskkin_start_service_after_runtime_handoff()"),
+        )
+        self.assertNotIn("deskkin_start_control_worker()", supervisor)
+        self.assertNotIn("deskkin_allocator_init", entry)
+        self.assertIn("set_boot_stage(9);", supervisor)
         self.assertIn("CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE=0", config)
         self.assertIn("CONFIG_NET_CONFIG_AUTO_INIT=n", config)
         self.assertIn("CONFIG_PRINTK=n", config)
@@ -388,6 +477,11 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("deskkin_flash_guard_enter();\n\tconst int length = nvs_read", service)
         self.assertIn("deskkin_flash_guard_enter();\n\tresult = nvs_write", service)
         self.assertIn("deskkin_flash_guard_enter();\n\tconst int delete_result = nvs_delete", service)
+        self.assertIn("DESKKIN_NVS_FAILURE_INTENT_READ", service)
+        self.assertIn("DESKKIN_NVS_FAILURE_RECORD_READBACK", service)
+        self.assertIn("const uint16_t nvs_failure = deskkin_nvs_last_failure();", supervisor)
+        self.assertIn("response[65] = (uint8_t)(nvs_failure >> 8);", supervisor)
+        self.assertIn("response[66] = (uint8_t)nvs_failure;", supervisor)
 
     def test_amp_renderer_swaps_full_frames_without_reuse_overlap(self):
         config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(encoding="utf-8")
@@ -427,11 +521,10 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
         self.assertIn("+\t\t\tk_yield();", spi_patch)
-        self.assertIn("transfer_len_bytes > SOC_SPI_MAXIMUM_BUFFER_SIZE", spi_patch)
         self.assertIn("SPI_DMA_MAX_BUFFER_SIZE (4092 * 8)", spi_patch)
         self.assertIn("SPI_TRANSFER_TIMEOUT_MS 100", spi_patch)
         self.assertNotIn("esp_ptr_dma_ext_capable", spi_patch)
-        self.assertIn("471fba02590a34868388df8992388e4937eadc82a420987b1db57c41b47d6a12", bootstrap)
+        self.assertIn("e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871", bootstrap)
         legacy_migration = bootstrap.split(
             "2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab", 1
         )[1].split(";;", 1)[0]
@@ -465,11 +558,13 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         build = (ROOT / "scripts/phase3_device.py").read_text(encoding="utf-8")
         bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
-        self.assertIn("wsr.windowstart a0", patch)
-        self.assertIn('z_interrupt_stacks + " STRINGIFY(CONFIG_ISR_STACK_SIZE) " + 16', patch)
+        self.assertIn("wsr.windowstart a1", patch)
+        self.assertIn('wsr.windowbase a0', patch)
+        self.assertIn('STRINGIFY(CONFIG_ISR_STACK_SIZE) "\\n\\t"', patch)
+        self.assertNotIn('STRINGIFY(CONFIG_ISR_STACK_SIZE) " + 16', patch)
+        self.assertIn("vecbase; rsync", patch)
         self.assertIn("j __appcpu_start_c", patch)
         self.assertNotIn("call8 __appcpu_start_c", patch)
-        self.assertNotIn("wsr.windowbase", patch)
         self.assertIn('" M soc/espressif/esp32s3/soc_appcpu.c"', bootstrap)
         prior_migration = bootstrap.split(
             "bf0b6c23ddf842be5bc5bc82ebfa2a0632150ef71915acba81288047da52fc32",
@@ -802,6 +897,11 @@ int main(void) {
         status[27] = 1
         status[80] = 1
         status[68] = 7
+        status[92:96] = (5).to_bytes(4, "big")
+        status[96:100] = (6).to_bytes(4, "big")
+        status[100:104] = (7).to_bytes(4, "big")
+        status[104:108] = (1).to_bytes(4, "big")
+        status[108:112] = (2).to_bytes(4, "big")
         with mock.patch.object(device.sys, "stderr") as stderr:
             device.report_status(bytes(status))
         reported = json.loads("".join(call.args[0] for call in stderr.write.call_args_list))
@@ -813,6 +913,29 @@ int main(void) {
                 "heartbeat_freshness": 1,
                 "renderer_stage": 0,
                 "renderer_fault": 0,
+                "completed_frames": 0,
+                "render_us": 0,
+                "transfer_us": 0,
+                "render_max_us": 0,
+                "transfer_max_us": 0,
+                "display_ready": 0,
+                "display_spi_hz": 0,
+                "pixel_dma_batches": 0,
+                "allocation_failures": 0,
+                "transfer_failures": 0,
+                "nvs_failure_stage": 0,
+                "nvs_failure_code": 0,
+                "view_generation": 5,
+                "renderer_shell": None,
+                "shell_property_matches": None,
+                "pixel_transfer_count": None,
+                "pixel_transfer_last_us": None,
+                "frame_difference_last": None,
+                "frame_difference_max": None,
+                "pose_generation": 6,
+                "input_generation": 7,
+                "stale_snapshots": 1,
+                "touch_drops": 2,
                 "boot_stage": 7,
                 "boot_error": None,
             },

@@ -9,6 +9,7 @@
 #define DESKKIN_HEARTBEAT_MAGIC 0x44534b4eU
 #define DESKKIN_DISPLAY_MAGIC 0x4453504cU
 #define DESKKIN_WORLD_MAGIC 0x4453574cU
+#define DESKKIN_RUNTIME_SRAM_MAGIC 0x4453524dU
 #define DESKKIN_WORLD_SCHEMA 1U
 #define DESKKIN_CHANNEL_SCHEMA 1U
 #define DESKKIN_TOUCH_CAPACITY 16U
@@ -84,6 +85,8 @@ struct deskkin_renderer_heartbeat {
 	uint16_t atlas_cache_failures;
 	uint8_t visible_billboards;
 	uint8_t culled_billboards;
+	uint8_t observed_shell;
+	uint8_t shell_property_matches;
 	uint32_t nearest_samples;
 	uint32_t bilinear_samples;
 	uint32_t projection_us;
@@ -104,6 +107,14 @@ struct deskkin_display_ready {
 	uint32_t framebuffer;
 	uint32_t renderer_heap;
 	uint32_t renderer_heap_size;
+};
+
+struct deskkin_runtime_sram_handoff {
+	uint32_t magic;
+	uint32_t generation;
+	uint32_t address;
+	uint32_t size;
+	uint32_t used;
 };
 
 enum deskkin_shell_state {
@@ -161,6 +172,8 @@ struct deskkin_amp_shared {
 	struct deskkin_display_ready display;
 	uint32_t display_publication;
 	uint32_t display_spi_hz;
+	struct deskkin_runtime_sram_handoff runtime_sram;
+	uint32_t runtime_sram_publication;
 	struct deskkin_world_snapshot world;
 	uint32_t world_publication;
 	struct deskkin_touch_ring touch;

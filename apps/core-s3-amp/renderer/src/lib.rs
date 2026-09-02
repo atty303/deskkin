@@ -98,6 +98,7 @@ struct TouchSample {
 }
 
 unsafe extern "C" {
+    fn deskkin_renderer_entry_probe();
     fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
     fn deskkin_display_submit(
         buffer_index: u8,
@@ -134,6 +135,7 @@ unsafe extern "C" {
         raster_us: u32,
     );
     fn deskkin_deadline_missed();
+    fn deskkin_shell_observe(shell: u8, property_matches: u8);
 }
 
 struct DevicePlatform {
@@ -403,6 +405,7 @@ fn replace_loop(
 fn render_frame(
     window: &MinimalSoftwareWindow,
     framebuffer: &mut Framebuffer,
+    force_full_transfer: bool,
 ) -> Result<(), RendererFault> {
     slint::platform::update_timers_and_animations();
     framebuffer.publish_completions()?;
@@ -447,6 +450,15 @@ fn render_frame(
     if !rendered {
         framebuffer.ownership.cancel_render(index);
         return Err(RendererFault::RenderSkipped);
+    }
+    if force_full_transfer {
+        dirty_rects[0] = DirtyRect {
+            x: 0,
+            y: 0,
+            width: WIDTH as u16,
+            height: HEIGHT as u16,
+        };
+        dirty_rect_count = 1;
     }
     framebuffer.submit(
         elapsed_us(started, unsafe { deskkin_uptime_us() }),
@@ -874,6 +886,7 @@ fn sas_text(sas: u32) -> slint::SharedString {
 
 #[no_mangle]
 extern "C" fn rust_main() {
+    unsafe { deskkin_renderer_entry_probe() };
     let state = Rc::new(RefCell::new(Vec::new()));
     if slint::platform::set_platform(Box::new(DevicePlatform {
         windows: state.clone(),
@@ -954,8 +967,10 @@ extern "C" fn rust_main() {
     let mut next_frame_at_us = unsafe { deskkin_uptime_us() }.saturating_add(50_000);
     let mut touch = TouchYawAdapter::new(UnwrappedAngle::ZERO);
     let mut touch_generation = 0_u32;
+    let mut ui_pointer_pressed = false;
     let mut world_snapshot = WorldSnapshot::default();
     let mut have_world_snapshot = false;
+    let mut rendered_shell = None;
     let mut world_motion = WorldMotion::new(unsafe { deskkin_uptime_us() });
 
     loop {
@@ -999,28 +1014,46 @@ extern "C" fn rust_main() {
             }
             touch_generation = sample.generation;
             if have_world_snapshot && world_snapshot.shell == 4 {
+                ui_pointer_pressed = false;
                 let target = touch.sample(sample.x, sample.pressed != 0);
                 unsafe { deskkin_publish_target_yaw(target.units()) };
             } else {
                 let position = LogicalPosition::new(f32::from(sample.x), f32::from(sample.y));
-                window.dispatch_event(if sample.pressed != 0 {
+                let event = if sample.pressed != 0 && !ui_pointer_pressed {
+                    ui_pointer_pressed = true;
                     WindowEvent::PointerPressed {
                         position,
                         button: PointerEventButton::Left,
                     }
-                } else {
+                } else if sample.pressed != 0 {
+                    WindowEvent::PointerMoved { position }
+                } else if ui_pointer_pressed {
+                    ui_pointer_pressed = false;
                     WindowEvent::PointerReleased {
                         position,
                         button: PointerEventButton::Left,
                     }
-                });
+                } else {
+                    continue;
+                };
+                window.dispatch_event(event);
             }
         }
         if have_world_snapshot && world_snapshot.shell != 4 {
             component.set_shell_state(shell_name(world_snapshot.shell).into());
+            component.set_shell_code(i32::from(world_snapshot.shell));
             component.set_authentication_string(sas_text(world_snapshot.sas));
+            unsafe {
+                deskkin_shell_observe(
+                    world_snapshot.shell,
+                    u8::from(
+                        component.get_shell_state().as_str() == shell_name(world_snapshot.shell),
+                    ),
+                )
+            };
             window.request_redraw();
         }
+        let shell_changed = have_world_snapshot && rendered_shell != Some(world_snapshot.shell);
         let render_result = if have_world_snapshot && world_snapshot.shell == 4 {
             if let Err(fault) = ensure_world_textures(
                 &mut world_textures,
@@ -1072,11 +1105,34 @@ extern "C" fn rust_main() {
                 &mut world_telemetry,
             )
         } else {
-            render_frame(&window, &mut framebuffer)
+            render_frame(&window, &mut framebuffer, shell_changed)
         };
         if let Err(fault) = render_result {
             unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };
             return;
+        }
+        if have_world_snapshot {
+            rendered_shell = Some(world_snapshot.shell);
+        }
+        if have_world_snapshot && world_snapshot.shell != 4 {
+            unsafe {
+                deskkin_world_observe(
+                    world_snapshot.generation,
+                    touch_generation,
+                    world_telemetry.touch_drops,
+                    world_telemetry.cache_hits,
+                    world_telemetry.cache_misses,
+                    world_telemetry.cache_failures,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    world_telemetry.texture_us,
+                    0,
+                )
+            };
         }
         if !display_enabled {
             if unsafe { deskkin_display_enable() } != 0 {

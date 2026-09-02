@@ -7,6 +7,7 @@
 #include <hal/rtc_timer_ll.h>
 #include <soc/clk_tree_defs.h>
 #include <soc/spi_struct.h>
+#include <rom/ets_sys.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/kernel.h>
@@ -24,6 +25,18 @@
 #define AMP_SHARED                                                                                 \
 	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
 					       DESKKIN_CHANNEL_OFFSET))
+
+void deskkin_renderer_entry_probe(void)
+{
+	const struct deskkin_renderer_heartbeat heartbeat = {
+		.magic = DESKKIN_HEARTBEAT_MAGIC,
+		.generation = 1U,
+		.schema = DESKKIN_CHANNEL_SCHEMA,
+		.stage = 6U,
+	};
+	deskkin_shared_copy_to(&AMP_SHARED->renderer, &heartbeat, sizeof(heartbeat));
+	deskkin_shared_store(&AMP_SHARED->renderer_publication, heartbeat.generation);
+}
 
 static inline atomic_val_t renderer_counter_get(const atomic_t *counter)
 {
@@ -63,6 +76,8 @@ enum renderer_stage {
 	RENDERER_TRANSFERRING = 3,
 	RENDERER_PRESENTED = 4,
 	RENDERER_FAILED = 5,
+	RENDERER_ENTERED = 6,
+	RENDERER_APPCPU_STARTED = 7,
 	RENDERER_INITIALIZING_HEAP = 8,
 	RENDERER_INITIALIZING_DISPLAY = 9,
 	RENDERER_STARTING_THREADS = 10,
@@ -107,6 +122,8 @@ static k_thread_stack_t *display_stack;
 static struct k_thread display_thread;
 static k_thread_stack_t *renderer_stack;
 static struct k_thread renderer_thread;
+extern struct k_thread z_main_thread;
+K_THREAD_STACK_DECLARE(z_main_stack, CONFIG_MAIN_STACK_SIZE);
 
 static const struct device *const display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 static const struct device *const display_dma = DEVICE_DT_GET(DT_NODELABEL(dma));
@@ -130,6 +147,10 @@ static atomic_t dirty_rect_count;
 static atomic_t pixel_dma_batches;
 static atomic_t dirty_pixels;
 static atomic_t transferred_bytes;
+static atomic_t pixel_transfer_count;
+static atomic_t pixel_transfer_last_us;
+static atomic_t frame_difference_last;
+static atomic_t frame_difference_max;
 static atomic_t view_generation;
 static atomic_t pose_generation;
 static atomic_t input_generation;
@@ -140,6 +161,8 @@ static atomic_t atlas_cache_misses;
 static atomic_t atlas_cache_failures;
 static atomic_t visible_billboards;
 static atomic_t culled_billboards;
+static atomic_t observed_shell;
+static atomic_t shell_property_matches;
 static atomic_t nearest_samples;
 static atomic_t bilinear_samples;
 static atomic_t projection_last_us;
@@ -193,6 +216,12 @@ void deskkin_world_observe(uint32_t generation, uint32_t input, uint32_t drops,
 	observe_max(&world_raster_max_us, raster_us);
 }
 
+void deskkin_shell_observe(uint8_t shell, uint8_t property_matches)
+{
+	atomic_set(&observed_shell, shell);
+	atomic_set(&shell_property_matches, property_matches);
+}
+
 void *malloc(size_t size)
 {
 	if (!renderer_heap_ready) {
@@ -218,6 +247,8 @@ static int initialize_renderer_heap(void)
 {
 	const uint32_t address = AMP_SHARED->display.renderer_heap;
 	const uint32_t size = AMP_SHARED->display.renderer_heap_size;
+	deskkin_shared_store(&AMP_SHARED->renderer.render_us, address);
+	deskkin_shared_store(&AMP_SHARED->renderer.transfer_us, size);
 	if (address == 0U || size == 0U || (address & 31U) != 0U) {
 		return -ENOMEM;
 	}
@@ -295,10 +326,19 @@ void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 	heartbeat->atlas_cache_failures = (uint16_t)atomic_get(&atlas_cache_failures);
 	heartbeat->visible_billboards = (uint8_t)atomic_get(&visible_billboards);
 	heartbeat->culled_billboards = (uint8_t)atomic_get(&culled_billboards);
-	heartbeat->nearest_samples = (uint32_t)atomic_get(&nearest_samples);
-	heartbeat->bilinear_samples = (uint32_t)atomic_get(&bilinear_samples);
-	heartbeat->projection_us = (uint32_t)atomic_get(&projection_last_us);
-	heartbeat->projection_max_us = (uint32_t)atomic_get(&projection_max_us);
+	heartbeat->observed_shell = (uint8_t)atomic_get(&observed_shell);
+	heartbeat->shell_property_matches = (uint8_t)atomic_get(&shell_property_matches);
+	if ((uint8_t)atomic_get(&observed_shell) == DESKKIN_SHELL_PAIRED) {
+		heartbeat->nearest_samples = (uint32_t)atomic_get(&nearest_samples);
+		heartbeat->bilinear_samples = (uint32_t)atomic_get(&bilinear_samples);
+		heartbeat->projection_us = (uint32_t)atomic_get(&projection_last_us);
+		heartbeat->projection_max_us = (uint32_t)atomic_get(&projection_max_us);
+	} else {
+		heartbeat->nearest_samples = (uint32_t)atomic_get(&pixel_transfer_count);
+		heartbeat->bilinear_samples = (uint32_t)atomic_get(&pixel_transfer_last_us);
+		heartbeat->projection_us = (uint32_t)atomic_get(&frame_difference_last);
+		heartbeat->projection_max_us = (uint32_t)atomic_get(&frame_difference_max);
+	}
 	heartbeat->sort_us = (uint32_t)atomic_get(&sort_last_us);
 	heartbeat->sort_max_us = (uint32_t)atomic_get(&sort_max_us);
 	heartbeat->texture_us = (uint32_t)atomic_get(&texture_last_us);
@@ -518,6 +558,8 @@ static void display_entry(void *first, void *second, void *third)
 	ARG_UNUSED(first);
 	ARG_UNUSED(second);
 	ARG_UNUSED(third);
+	uint8_t previous_buffer_index = 0U;
+	bool have_previous_buffer = false;
 	for (;;) {
 		struct display_request request;
 		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
@@ -548,6 +590,23 @@ static void display_entry(void *first, void *second, void *third)
 			result = display_write(display, 0, 0, &descriptor, pixels);
 		}
 		const uint64_t elapsed = deskkin_uptime_us() - started;
+		if (request.dirty_rect_count != 0U && result == 0) {
+			uint32_t difference = 0U;
+			if (have_previous_buffer) {
+				const uint16_t *previous = framebuffer +
+					(size_t)previous_buffer_index * FRAME_PIXELS;
+				for (size_t index = 0; index < FRAME_PIXELS; ++index) {
+					difference += pixels[index] != previous[index] ? 1U : 0U;
+				}
+			}
+			previous_buffer_index = request.buffer_index;
+			have_previous_buffer = true;
+			atomic_set(&frame_difference_last, (atomic_val_t)difference);
+			observe_max(&frame_difference_max, difference);
+			atomic_inc(&pixel_transfer_count);
+			atomic_set(&pixel_transfer_last_us,
+				   (atomic_val_t)MIN(elapsed, UINT32_MAX));
+		}
 		const struct display_completion completion = {
 			.buffer_index = request.buffer_index,
 			.result = result == 0 ? 0 : -1,
@@ -562,11 +621,33 @@ static void renderer_entry(void *first, void *second, void *third)
 	ARG_UNUSED(first);
 	ARG_UNUSED(second);
 	ARG_UNUSED(third);
+	const int64_t deadline = k_uptime_get() + 5000;
+	while ((z_main_thread.base.thread_state & _THREAD_DEAD) == 0U) {
+		if (k_uptime_get() >= deadline) {
+			deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_INIT, 0, 0);
+			return;
+		}
+		k_msleep(1);
+	}
+	const uintptr_t main_stack = (uintptr_t)K_KERNEL_STACK_BUFFER(z_main_stack);
+	const size_t main_stack_size = K_KERNEL_STACK_SIZEOF(z_main_stack);
+	memset((void *)main_stack, 0, main_stack_size);
+	const struct deskkin_runtime_sram_handoff handoff = {
+		.magic = DESKKIN_RUNTIME_SRAM_MAGIC,
+		.generation = 1U,
+		.address = (uint32_t)main_stack,
+		.size = (uint32_t)main_stack_size,
+		.used = 0U,
+	};
+	deskkin_shared_store(&AMP_SHARED->runtime_sram_publication, 0U);
+	deskkin_shared_copy_to(&AMP_SHARED->runtime_sram, &handoff, sizeof(handoff));
+	deskkin_shared_store(&AMP_SHARED->runtime_sram_publication, handoff.generation);
 	rust_main();
 }
 
 int main(void)
 {
+	deskkin_renderer_observe(RENDERER_APPCPU_STARTED, RENDERER_FAULT_NONE, 0, 0);
 	deskkin_renderer_observe(RENDERER_WAITING_FOR_DISPLAY, RENDERER_FAULT_NONE, 0, 0);
 	while (deskkin_shared_load(&AMP_SHARED->display_publication) == 0U ||
 	       AMP_SHARED->display.magic != DESKKIN_DISPLAY_MAGIC || AMP_SHARED->display.ready != 1U) {

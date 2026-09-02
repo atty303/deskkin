@@ -130,16 +130,32 @@ Slint/world allocations, and the display and renderer thread stacks. Two
 completed frame directly through APPCPU-owned GDMA channel pair 0. They are the
 only large render buffers that require internal SRAM.
 
-PROCPU and APPCPU static DRAM are separated by a link-time boundary assertion.
-The 24 KiB service stack and 8 KiB Wi-Fi stack occupy the separate 32 KiB SRAM2
-bank because those paths can execute while the shared instruction cache is
-disabled. PROCPU prepares shared state and loads APPCPU synchronously on its
-internal main stack before starting control or service threads. The independent
-APPCPU entry normalizes the windowed ABI state and initially uses the first
-Zephyr interrupt stack; normal kernel startup then moves to the internal main
-stack. APPCPU keeps only this cache-independent boot/device-initialization state
-and driver state in its internal window. It creates the long-lived display and
-Slint/world renderer stacks from its PSRAM allocator before starting them.
+PROCPU and APPCPU static DRAM meet at `0x3fce4c00`; both linkers derive that
+physical boundary from the AMP reservation and enforce it at link time. The
+separate 32 KiB SRAM2 bank contains the 21 KiB service stack, 3 KiB control
+stack, and 8 KiB Wi-Fi stack because those paths can execute while the shared
+instruction cache is disabled. PROCPU starts the bounded USB control worker so
+boot status remains observable, then prepares shared state and loads APPCPU
+synchronously on its internal main stack before starting the application
+service. The independent APPCPU entry normalizes the windowed ABI state and
+initially uses the exact end of the first Zephyr interrupt-stack allocation;
+normal kernel startup then moves to the internal main stack. APPCPU does not
+enable Zephyr's whole-stack initialization because it would overwrite that
+active pre-kernel boot stack. Its main stack is therefore reclaimed only after
+thread termination and full zeroization; its boot high-water mark is reported
+as unavailable rather than inferred from an unsafe fill pattern.
+
+Boot completion is an explicit SRAM ownership boundary. After the terminated
+PROCPU and APPCPU main threads are joined, their 4 KiB stacks and the unused
+1 KiB shared-memory prefix are zeroized and combined into a 9 KiB internal
+runtime heap used by the Espressif components that require internal memory.
+During Wi-Fi initialization, its 1.5 KiB coordinator stack temporarily borrows
+the beginning of the not-yet-active service stack. The coordinator is joined
+and the borrowed bytes are zeroized before the service thread is created, so
+the boot and runtime owners cannot overlap. APPCPU keeps only
+cache-independent boot/device-initialization state and driver state in its
+internal window. It creates the long-lived display and Slint/world renderer
+stacks from its PSRAM allocator before starting them.
 
 The ESP32-S3 L1 cache and MMU table are shared across the CPUs. APPCPU startup
 adds its IROM and DROM mappings to unused entries without disabling the live

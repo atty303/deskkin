@@ -132,12 +132,17 @@ expected_rust_status = [
 ]
 expected_zephyr_status = [
     " M drivers/spi/spi_esp32_spim.c",
+    " M drivers/wifi/esp32/src/esp_wifi_drv.c",
+    " M soc/espressif/common/esp_psram.c",
     " M soc/espressif/common/loader.c",
     " M soc/espressif/esp32s3/default.ld",
+    " M soc/espressif/esp32s3/default_appcpu.ld",
     " M soc/espressif/esp32s3/esp32s3-mp.c",
+    " M soc/espressif/esp32s3/memory.h",
     " M soc/espressif/esp32s3/soc_appcpu.c",
 ]
 expected_espressif_status = [
+    " M components/esp_coex/esp32s3/esp_coex_adapter.c",
     " M components/esp_timer/src/esp_timer.c",
     " M components/esp_wifi/esp32s3/esp_adapter.c",
 ]
@@ -181,7 +186,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "471fba02590a34868388df8992388e4937eadc82a420987b1db57c41b47d6a12":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 espressif_patch_diff = subprocess.run(
@@ -189,7 +194,7 @@ espressif_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(espressif_patch_diff).hexdigest() != "b6b13682702702a916c128101a4d87c96a71d0dc3124b4eda11e5f9e79bac863":
+if hashlib.sha256(espressif_patch_diff).hexdigest() != "c89390b05dc714673494b8c6b3527dc3b70dc3376aff1e4b72cd12501ebdb0b3":
     raise SystemExit("CoreS3 Espressif HAL patch series mismatch")
 
 toolchain = state / "rustup/toolchains/deskkin-esp"
@@ -297,6 +302,9 @@ done
 module="$state_dir/west/zephyr"
 zephyr_patch_digest=$(git -C "$module" diff --binary HEAD | sha256sum | cut -d ' ' -f 1)
 case "$zephyr_patch_digest" in
+  e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871)
+    zephyr_patches_current=1
+    ;;
   2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab|84b30f982fb801c945c84f9bd0aec4f91879268cf887924956dbb657d2fa3aec)
     for relative in drivers/spi/spi_esp32_spim.c drivers/display/display_ili9xxx.c drivers/mipi_dbi/mipi_dbi_esp32.c include/zephyr/drivers/mipi_dbi.h; do
       git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
@@ -314,21 +322,41 @@ case "$zephyr_patch_digest" in
     git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
     mv "$module/$relative.migrating" "$module/$relative"
     ;;
+  9a2d87fff34e6017b9e25e1e1a21b3c0d29898b185eae68a20e8e2f3e8e570a7)
+    relative=arch/xtensa/core/window_vectors.S
+    git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
+    mv "$module/$relative.migrating" "$module/$relative"
+    ;;
 esac
-for patch_file in "$repo_root"/patches/zephyr-core-s3/*.patch; do
-  if ! git -C "$module" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
-    git -C "$module" apply --check "$patch_file"
-    git -C "$module" apply "$patch_file"
-  fi
-done
+if [[ ${zephyr_patches_current:-0} != 1 ]]; then
+  for patch_file in "$repo_root"/patches/zephyr-core-s3/*.patch; do
+    if ! git -C "$module" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+      git -C "$module" apply --check "$patch_file"
+      git -C "$module" apply "$patch_file"
+    fi
+  done
+fi
 
 module="$state_dir/west/modules/hal/espressif"
-for patch_file in "$repo_root"/patches/hal-espressif-core-s3/*.patch; do
-  if ! git -C "$module" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
-    git -C "$module" apply --check "$patch_file"
-    git -C "$module" apply "$patch_file"
-  fi
-done
+espressif_patch_digest=$(git -C "$module" diff --binary HEAD | sha256sum | cut -d ' ' -f 1)
+if [[ "$espressif_patch_digest" == d6fd76888b7bb78e21d10ad4cae24f5fe9e6437f113fbb6a0fc187be4eb62836 ||
+      "$espressif_patch_digest" == 8f8ef95c8e3f66ea869ae409d939b3ebd6e649f18e9d108473666bf36b1a4926 ||
+      "$espressif_patch_digest" == 014e8cf2d647998279d90dc20d20910be0f8f38435643d63c015dab214336f3e ||
+      "$espressif_patch_digest" == e40fd7bef86deb194ba5a6783b4f60cbada49bea547b5a66e7f3724c40012d79 ]]; then
+  for relative in components/esp_coex/esp32s3/esp_coex_adapter.c components/esp_timer/src/esp_timer.c components/esp_wifi/esp32s3/esp_adapter.c; do
+    git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
+    mv "$module/$relative.migrating" "$module/$relative"
+  done
+  espressif_patch_digest=migrating
+fi
+if [[ "$espressif_patch_digest" != c89390b05dc714673494b8c6b3527dc3b70dc3376aff1e4b72cd12501ebdb0b3 ]]; then
+  for patch_file in "$repo_root"/patches/hal-espressif-core-s3/*.patch; do
+    if ! git -C "$module" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+      git -C "$module" apply --check "$patch_file"
+      git -C "$module" apply "$patch_file"
+    fi
+  done
+fi
 
 (
   cd -- "$state_dir"

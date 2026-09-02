@@ -1,0 +1,101 @@
+From: Deskkin contributors
+Subject: [PATCH] esp32s3: use the phase-owned internal runtime heap
+
+Deskkin makes boot-only internal SRAM available only after its explicit
+boot-to-runtime handoff. Route the timer objects and Wi-Fi/coexistence
+allocations that require internal memory through an overridable allocator.
+Other images retain the Zephyr heap fallback.
+
+---
+ components/esp_coex/esp32s3/esp_coex_adapter.c |  3 ++-
+ components/esp_timer/src/esp_timer.c           | 16 +++++++++++++---
+ components/esp_wifi/esp32s3/esp_adapter.c      |  6 ++++--
+ 3 files changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/components/esp_coex/esp32s3/esp_coex_adapter.c b/components/esp_coex/esp32s3/esp_coex_adapter.c
+--- a/components/esp_coex/esp32s3/esp_coex_adapter.c
++++ b/components/esp_coex/esp32s3/esp_coex_adapter.c
+@@ -146,7 +146,8 @@ void IRAM_ATTR esp_coex_common_timer_arm_us_wrapper(void *ptimer, uint32_t us, b
+ 
+ void * IRAM_ATTR esp_coex_common_malloc_internal_wrapper(size_t size)
+ {
+-    return k_malloc(size);
++    extern void *deskkin_runtime_internal_calloc(size_t count, size_t size);
++    return deskkin_runtime_internal_calloc(1, size);
+ }
+ 
+ uint32_t esp_coex_common_clk_slowclk_cal_get_wrapper(void)
+diff --git a/components/esp_timer/src/esp_timer.c b/components/esp_timer/src/esp_timer.c
+--- a/components/esp_timer/src/esp_timer.c
++++ b/components/esp_timer/src/esp_timer.c
+@@ -99,6 +99,15 @@ static bool s_timer_task_created = false;
+ /* lock key for critical sections */
+ static unsigned int s_timer_lock_key[ESP_TIMER_MAX];
+ 
++__weak void *deskkin_runtime_internal_calloc(size_t count, size_t size)
++{
++    return k_calloc(count, size);
++}
++__weak void deskkin_runtime_internal_free(void *block)
++{
++    k_free(block);
++}
++
+ #ifdef CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+ // For ISR dispatch method, a callback function of the timer may require a context switch
+ static volatile bool s_isr_dispatch_need_yield = false;
+@@ -114,7 +123,8 @@ esp_err_t esp_timer_create(const esp_timer_create_args_t* args,
+             args->dispatch_method < 0 || args->dispatch_method >= ESP_TIMER_MAX) {
+         return ESP_ERR_INVALID_ARG;
+     }
+-    esp_timer_handle_t result = (esp_timer_handle_t) k_calloc(1, sizeof(*result));
++    esp_timer_handle_t result =
++        (esp_timer_handle_t) deskkin_runtime_internal_calloc(1, sizeof(*result));
+     if (result == NULL) {
+         return ESP_ERR_NO_MEM;
+     }
+@@ -510,7 +520,7 @@ static bool timer_process_alarm(esp_timer_dispatch_t dispatch_method)
+             // It is handled only by ESP_TIMER_TASK (see esp_timer_delete()).
+             // All the ESP_TIMER_ISR timers which should be deleted are moved by esp_timer_delete() to the ESP_TIMER_TASK list.
+             // We want to free memory of the timer in a task context instead of an isr context.
+-            k_free(it);
++            deskkin_runtime_internal_free(it);
+             it = NULL;
+         } else {
+             it->flags |= FL_CALLBACK_IS_RUNNING;
+diff --git a/components/esp_wifi/esp32s3/esp_adapter.c b/components/esp_wifi/esp32s3/esp_adapter.c
+--- a/components/esp_wifi/esp32s3/esp_adapter.c
++++ b/components/esp_wifi/esp32s3/esp_adapter.c
+@@ -56,7 +56,13 @@ extern void wifi_apb80m_release(void);
+ #endif
+ 
+ static void wifi_free(void *mem)
+ {
++	extern bool deskkin_runtime_internal_owns(const void *block);
++	extern void deskkin_runtime_internal_free(void *block);
++	if (deskkin_runtime_internal_owns(mem)) {
++		deskkin_runtime_internal_free(mem);
++		return;
++	}
+ 	esp_wifi_free_func(mem);
+ }
+ 
+@@ -416,12 +422,14 @@ static void *IRAM_ATTR realloc_internal_wrapper(void *ptr, size_t size)
+ 
+ static void *IRAM_ATTR calloc_internal_wrapper(size_t n, size_t size)
+ {
+-	return k_calloc(n, size);
++	extern void *deskkin_runtime_internal_calloc(size_t count, size_t size);
++	return deskkin_runtime_internal_calloc(n, size);
+ }
+ 
+ static void *IRAM_ATTR zalloc_internal_wrapper(size_t size)
+ {
+-	return k_calloc(1, size);
++	extern void *deskkin_runtime_internal_calloc(size_t count, size_t size);
++	return deskkin_runtime_internal_calloc(1, size);
+ }
+ 
+ uint32_t uxQueueMessagesWaiting(void *queue)
+-- 
+2.51.0

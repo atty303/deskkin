@@ -1,20 +1,29 @@
 From: Deskkin contributors
-Subject: [PATCH] esp32s3: place Wi-Fi network state in SPIRAM
-
-CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM already moves Wi-Fi and network no-init
-allocations to external RAM. Apply the same policy to their BSS and the
-ESP32-S3 Wi-Fi blobs, reserving internal DMA SRAM for cache-disable-safe state
-and display buffers.
-
----
- soc/espressif/esp32s3/default.ld | 28 ++++++++++++++++++++++++++++
- 1 file changed, 28 insertions(+)
+Subject: [PATCH] esp32s3: place Wi-Fi and application state in SPIRAM
 
 diff --git a/soc/espressif/esp32s3/default.ld b/soc/espressif/esp32s3/default.ld
-index 04388054a49..0b13532d0e7 100644
+index 04388054a49..9f00fc80950 100644
 --- a/soc/espressif/esp32s3/default.ld
 +++ b/soc/espressif/esp32s3/default.ld
-@@ -848,8 +848,27 @@ SECTIONS
+@@ -806,13 +806,15 @@ SECTIONS
+       *libsubsys__net__l2__ethernet.a:*
+       *libsubsys__net__lib__config.a:*
+       *libsubsys__net__ip.a:*
+-      *libsubsys__net.a:* ) .noinit)
++      *libsubsys__net.a:*
++      *libapp.a:adapter.c.obj ) .noinit)
+     *(EXCLUDE_FILE(
+       *libdrivers__wifi.a:*
+       *libsubsys__net__l2__ethernet.a:*
+       *libsubsys__net__lib__config.a:*
+       *libsubsys__net__ip.a:*
+-      *libsubsys__net.a:* ) .noinit.*)
++      *libsubsys__net.a:*
++      *libapp.a:adapter.c.obj ) .noinit.*)
+ #else
+     *(.noinit)
+     *(.noinit.*)
+@@ -848,8 +850,45 @@ SECTIONS
      *(.sbss2.*)
      *(.gnu.linkonce.sb2.*)
      *(.dynbss)
@@ -26,7 +35,16 @@ index 04388054a49..0b13532d0e7 100644
 +      *libsubsys__net__ip.a:*
 +      *libsubsys__net.a:*
 +      *libnet80211.a:*
-+      *libpp.a:* ) .bss)
++      *libpp.a:*
++      *liblib__posix__options.a:*
++      *libtfpsacrypto.a:*
++      *libzephyr.a:esp_common.c.obj
++      *libzephyr.a:eloop.c.obj
++      *libzephyr.a:wpa_auth.c.obj
++      *libzephyr.a:wpa.c.obj
++      *libzephyr.a:esp_wpa_main.c.obj
++      *libzephyr.a:esp_wps.c.obj
++      *libzephyr.a:esp_hostap.c.obj ) .bss)
 +    *(EXCLUDE_FILE(
 +      *libdrivers__wifi.a:*
 +      *libsubsys__net__l2__ethernet.a:*
@@ -34,7 +52,16 @@ index 04388054a49..0b13532d0e7 100644
 +      *libsubsys__net__ip.a:*
 +      *libsubsys__net.a:*
 +      *libnet80211.a:*
-+      *libpp.a:* ) .bss.*)
++      *libpp.a:*
++      *liblib__posix__options.a:*
++      *libtfpsacrypto.a:*
++      *libzephyr.a:esp_common.c.obj
++      *libzephyr.a:eloop.c.obj
++      *libzephyr.a:wpa_auth.c.obj
++      *libzephyr.a:wpa.c.obj
++      *libzephyr.a:esp_wpa_main.c.obj
++      *libzephyr.a:esp_wps.c.obj
++      *libzephyr.a:esp_hostap.c.obj ) .bss.*)
 +#else
      *(.bss)
      *(.bss.*)
@@ -42,7 +69,15 @@ index 04388054a49..0b13532d0e7 100644
      *(.share.mem)
      *(.gnu.linkonce.b.*)
      *(COMMON)
-@@ -1041,6 +1060,15 @@ SECTIONS
+@@ -1034,6 +1073,7 @@ SECTIONS
+     *libsubsys__net__lib__config.a:(.noinit .noinit.*)
+     *libsubsys__net__ip.a:(.noinit .noinit.*)
+     *libsubsys__net.a:(.noinit .noinit.*)
++    *libapp.a:adapter.c.obj(.noinit .noinit.*)
+ #endif
+     . = ALIGN(16);
+     *(.ext_ram_noinit.*)
+@@ -1041,6 +1081,24 @@ SECTIONS
      _ext_ram_noinit_end = ABSOLUTE(.);
  
      _ext_ram_bss_start = ABSOLUTE(.);
@@ -54,9 +89,19 @@ index 04388054a49..0b13532d0e7 100644
 +    *libsubsys__net.a:(.bss .bss.*)
 +    *libnet80211.a:(.bss .bss.*)
 +    *libpp.a:(.bss .bss.*)
++    *liblib__posix__options.a:(.bss .bss.*)
++    *libtfpsacrypto.a:(.bss .bss.*)
++    *libzephyr.a:esp_common.c.obj(.bss .bss.*)
++    *libzephyr.a:eloop.c.obj(.bss .bss.*)
++    *libzephyr.a:wpa_auth.c.obj(.bss .bss.*)
++    *libzephyr.a:wpa.c.obj(.bss .bss.*)
++    *libzephyr.a:esp_wpa_main.c.obj(.bss .bss.*)
++    *libzephyr.a:esp_wps.c.obj(.bss .bss.*)
++    *libzephyr.a:esp_hostap.c.obj(.bss .bss.*)
 +#endif
      *(.ext_ram.bss*)
      . = ALIGN(16);
  
 -- 
 2.51.0
+

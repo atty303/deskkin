@@ -2,9 +2,11 @@
 
 /*
  * Keep the 416 KiB SRAM1 bank contiguous for the two Zephyr images and the
- * DMA-capable full-screen framebuffers. The shared AMP control block needs
- * only one KiB;
- * place it, the IPM payload, and the software doorbells at the top of SRAM1.
+ * DMA-capable full-screen framebuffers. The AMP protocol is polled directly;
+ * it needs neither the inherited IPM payload nor software doorbells. Pack its
+ * bounded control block into shm0 at the baseline address and offset. After
+ * boot, only the unused shm0 prefix becomes runtime SRAM; the live channel and
+ * following ROM-owned data range remain untouched.
  */
 / {
 	soc {

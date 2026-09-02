@@ -36,6 +36,7 @@ COMMANDS = {
     "status": 8,
     "shutdown": 9,
     "world-benchmark-start": 10,
+    "diagnostic-subscribe": 11,
 }
 
 WORLD_BENCHMARK_DURATION_SECONDS = 60.0
@@ -398,6 +399,72 @@ def exchange_once(
         os.close(descriptor)
 
 
+def watch_diagnostics(device_arg: str | None, duration_seconds: float, auto_pair: bool) -> None:
+    duration = max(1, min(300, int(duration_seconds or 60)))
+    device = discover_device(device_arg)
+    payload = duration.to_bytes(2, "big") + (b"\x01" if auto_pair else b"")
+    frame = control_frame("diagnostic-subscribe", 0, payload)
+    descriptor = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        attributes = termios.tcgetattr(descriptor)
+        attributes[0] = attributes[1] = attributes[3] = 0
+        attributes[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        attributes[4] = attributes[5] = termios.B115200
+        attributes[6][termios.VMIN] = attributes[6][termios.VTIME] = 0
+        termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
+        termios.tcflush(descriptor, termios.TCIOFLUSH)
+        write_all(descriptor, frame, 2.0)
+        response = read_control_response(descriptor, frame, 2.0)
+        if len(response) != 18 or response[1] != 0:
+            raise DeviceError("control_invalid")
+        names = {
+            1: "boot",
+            2: "renderer",
+            3: "shell",
+            4: "touch",
+            5: "ui_command",
+            6: "service",
+            7: "memory",
+        }
+        deadline = time.monotonic() + duration + 1
+        while time.monotonic() < deadline:
+            try:
+                prefix = read_exact(descriptor, 2, max(0.1, deadline - time.monotonic()))
+            except DeviceError as error:
+                if str(error) == "control_timeout":
+                    break
+                raise
+            length = int.from_bytes(prefix, "big")
+            payload = read_exact(descriptor, length, max(0.1, deadline - time.monotonic()))
+            if length != 24 or payload[0] != SCHEMA or payload[1] != 0x80:
+                continue
+            sequence = int.from_bytes(payload[4:8], "big")
+            x = int.from_bytes(payload[12:14], "big", signed=True)
+            y = int.from_bytes(payload[14:16], "big", signed=True)
+            event = {
+                "sequence": sequence,
+                "uptime_ms": int.from_bytes(payload[8:12], "big"),
+                "event": names.get(payload[2], "unknown"),
+                "flags": payload[3],
+                "value": int.from_bytes(payload[16:20], "big"),
+                "dropped_before": int.from_bytes(payload[20:24], "big"),
+            }
+            if payload[2] == 4:
+                event["x"] = x
+                event["y"] = y
+                event["pressed"] = bool(payload[3] & 1)
+            elif payload[2] == 6 and payload[3] & 0x80:
+                event["stage"] = payload[3] & 0x7F
+                event["result_code"] = int.from_bytes(payload[16:20], "big", signed=True)
+            print(json.dumps(event, separators=(",", ":")), flush=True)
+    finally:
+        try:
+            termios.tcflush(descriptor, termios.TCIOFLUSH)
+        except termios.error:
+            pass
+        os.close(descriptor)
+
+
 def exchange(
     device: Path,
     frame: bytearray,
@@ -441,6 +508,29 @@ def report_status(status: bytes) -> None:
                 "heartbeat_freshness": decoded["heartbeat_freshness"],
                 "renderer_stage": decoded["stage"],
                 "renderer_fault": decoded["fault"],
+                "completed_frames": decoded["completed_frames"],
+                "render_us": decoded["render_us"],
+                "transfer_us": decoded["transfer_us"],
+                "render_max_us": decoded["render_max_us"],
+                "transfer_max_us": decoded["transfer_max_us"],
+                "display_ready": decoded["display_ready"],
+                "display_spi_hz": decoded["display_spi_hz"],
+                "pixel_dma_batches": decoded["pixel_dma_batches"],
+                "allocation_failures": decoded["allocation_failures"],
+                "transfer_failures": decoded["transfer_failures"],
+                "nvs_failure_stage": decoded["nvs_failure_stage"],
+                "nvs_failure_code": decoded["nvs_failure_code"],
+                "view_generation": decoded["view_generation"],
+                "renderer_shell": decoded["visible_billboards"] if status[26] != 4 else None,
+                "shell_property_matches": decoded["culled_billboards"] if status[26] != 4 else None,
+                "pixel_transfer_count": decoded["nearest_samples"] if status[26] != 4 else None,
+                "pixel_transfer_last_us": decoded["bilinear_samples"] if status[26] != 4 else None,
+                "frame_difference_last": decoded["projection_us"] if status[26] != 4 else None,
+                "frame_difference_max": decoded["projection_max_us"] if status[26] != 4 else None,
+                "pose_generation": decoded["pose_generation"],
+                "input_generation": decoded["input_generation"],
+                "stale_snapshots": decoded["stale_snapshots"],
+                "touch_drops": decoded["touch_drops"],
                 "boot_stage": decoded["procpu_boot_stage"],
                 "boot_error": status_boot_error(status),
             },
@@ -637,6 +727,8 @@ def decode_world_status(status: bytes) -> dict[str, int]:
         "display_ready": status[56],
         "render_max_us": unsigned(57, 61),
         "transfer_max_us": unsigned(61, 65),
+        "nvs_failure_stage": status[65],
+        "nvs_failure_code": status[66],
         "heartbeat_memory_side": status[67],
         "procpu_boot_stage": status[68],
         "procpu_boot_error": status[69],
@@ -1139,6 +1231,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
         "status": "device_ui",
         "run": "device_ui",
         "benchmark": "world_benchmark",
+        "watch": "diagnostic_stream",
         "recover": "nvs_publication",
     }[action]
     return {
@@ -1159,7 +1252,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "run", "benchmark", "recover"))
+    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "watch", "run", "benchmark", "recover"))
     parser.add_argument("identity_action", nargs="?")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--age-identity", type=Path)
@@ -1167,6 +1260,7 @@ def main() -> int:
     parser.add_argument("--peer-id")
     parser.add_argument("--erase-storage", action="store_true")
     parser.add_argument("--duration-seconds", type=float, default=0)
+    parser.add_argument("--auto-pair", action="store_true")
     parser.add_argument("--recording", choices=("on", "off"), default="on")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -1224,6 +1318,9 @@ def main() -> int:
             report_status(status)
             if error := status_boot_error(status):
                 raise DeviceError(error)
+        elif args.action == "watch":
+            diagnostic_allowed = False
+            watch_diagnostics(args.device, args.duration_seconds, args.auto_pair)
         elif args.action == "run":
             accepted = run_control("run", args.device)
             if len(accepted) < 30:

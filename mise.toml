@@ -157,6 +157,10 @@ run = "python scripts/phase3_device.py provision"
 description = "Read the CoreS3 boot and application status without mutation"
 run = "python scripts/phase3_device.py status"
 
+[tasks."core-s3:watch"]
+description = "Stream typed live CoreS3 diagnostic events over one USB session"
+run = "python scripts/phase3_device.py watch --auto-pair"
+
 [tasks."core-s3:run"]
 description = "Start the already configured CoreS3 application"
 run = "python scripts/phase3_device.py run"
