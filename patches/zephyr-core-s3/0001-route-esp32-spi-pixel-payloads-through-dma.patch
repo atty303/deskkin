@@ -2,7 +2,7 @@ From: Deskkin contributors
 Subject: [PATCH] spi: esp32: route pixel payloads through bounded DMA
 
 diff --git a/drivers/spi/spi_esp32_spim.c b/drivers/spi/spi_esp32_spim.c
-index 4b1e549ea3b..0d74fe43e1c 100644
+index 4b1e549ea3b..3ae813fd122 100644
 --- a/drivers/spi/spi_esp32_spim.c
 +++ b/drivers/spi/spi_esp32_spim.c
 @@ -36,7 +36,13 @@ LOG_MODULE_REGISTER(esp32_spi, CONFIG_SPI_LOG_LEVEL);
@@ -119,7 +119,7 @@ index 4b1e549ea3b..0d74fe43e1c 100644
  #endif /* SOC_GDMA_SUPPORTED */
  
  	if (prepare_data) {
-@@ -332,15 +340,23 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+@@ -332,15 +340,20 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
  	}
  
  	/* send data */
@@ -142,7 +142,7 @@ index 4b1e549ea3b..0d74fe43e1c 100644
  		if (hal_trans->rcv_buffer) {
  			dma_stop(cfg->dma_dev, cfg->dma_rx_ch);
  #if defined(CONFIG_SOC_SERIES_ESP32S3) || defined(CONFIG_SOC_SERIES_ESP32S2)
-@@ -357,16 +373,18 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
+@@ -357,16 +370,18 @@ static int IRAM_ATTR spi_esp32_transfer(const struct device *dev)
  	}
  #endif
  
@@ -164,7 +164,7 @@ index 4b1e549ea3b..0d74fe43e1c 100644
  
  free:
  	k_free(tx_temp);
-@@ -381,12 +399,13 @@ static void IRAM_ATTR spi_esp32_isr(void *arg)
+@@ -381,12 +396,13 @@ static void IRAM_ATTR spi_esp32_isr(void *arg)
  	const struct device *dev = (const struct device *)arg;
  	const struct spi_esp32_config *cfg = dev->config;
  	struct spi_esp32_data *data = dev->data;
@@ -181,7 +181,7 @@ index 4b1e549ea3b..0d74fe43e1c 100644
  }
  #endif
  
-@@ -683,10 +702,10 @@ static int transceive(const struct device *dev,
+@@ -683,10 +699,10 @@ static int transceive(const struct device *dev,
  #else
  
  	do {

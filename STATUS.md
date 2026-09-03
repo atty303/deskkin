@@ -2,7 +2,14 @@
 
 Updated: 2026-09-04
 
-## Active work
+## Current acceptance
+
+The user has completed visual acceptance of the world scene. All 16 dependency
+patches pass the host unified-diff parser regression, and isolated replay from
+their pinned pristine source files matches the installed patched trees byte for
+byte. SPI patch hunk metadata now matches the source after sleep removal.
+Fresh review and the final repository-wide `mise run test` pass (build record
+`f753d95c-fca6-407b-992c-4d9ae4a03bd9`).
 
 The intermittent APPCPU display stop is fixed and qualified by a physical
 60-second benchmark. JTAG captured both frozen runs in Xtensa's permanent
@@ -190,10 +197,12 @@ from the inferred interrupt sequence.
 Replace the pinned APPCPU entry patch only when an equivalent
 upstream-compatible startup path is verified.
 
-Physical acceptance still requires the user's visual confirmation of no
-cylinder primitive, camera-facing boards, Availability plus Notice coexistence,
-Character/object parallax, continuous 320 px turns without a seam jump, 180
-degrees/s observed following, and intact pairing UI.
+The user confirmed visual acceptance: no cylinder primitive, camera-facing
+boards, Character/object
+parallax, continuous 320 px turns without a seam jump, 180 degrees/s observed
+following, and intact pairing UI. Normal operation has three billboards when
+Notice is absent; simultaneous Availability and Notice was qualified by the
+physical benchmark.
 
 Physical servo power, neck actuation, and a neck pose sensor remain intentionally
 out of scope; observed yaw is virtual.

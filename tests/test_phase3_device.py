@@ -16,6 +16,18 @@ SPEC.loader.exec_module(device)
 
 
 class Phase3DeviceTests(unittest.TestCase):
+    def test_dependency_patches_have_valid_unified_diff_structure(self):
+        for patch in sorted((ROOT / "patches").glob("*/*.patch")):
+            with self.subTest(patch=patch.relative_to(ROOT)):
+                result = subprocess.run(
+                    ["git", "apply", "--numstat", str(patch)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def profile(self):
         return {"schema_version": 1, "ssid": "fixture", "password": "fake-password", "host_ipv4": "192.168.10.2"}
 
