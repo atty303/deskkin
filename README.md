@@ -112,7 +112,9 @@ mise run protocol:host -- pairing-window-open
 mise run protocol:simulator -- pair-start 127.0.0.1:39032
 ```
 
-Confirm the matching locally derived authentication string at both ends.
+Opening the host pairing window authorizes one attempt. Compare its locally
+derived authentication string with the device and confirm on the device; no
+second host-side `yes` is required.
 Pairing and runtime commands reject non-loopback scope. Identity mutation is
 serialized through the live owner; exact unpair requires the peer public-key
 ID reported by `identity-list`. For a genuinely fresh pairing trial, use new

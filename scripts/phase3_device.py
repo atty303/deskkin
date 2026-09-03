@@ -784,6 +784,7 @@ def world_benchmark(
     last_observed_at: float | None = None
     maximum_observation_gap_ms = 0
     last_sample: dict[str, int] | None = None
+    benchmark_scene_sample: dict[str, int] | None = None
     while time.monotonic() < deadline:
         started = time.monotonic()
         try:
@@ -797,6 +798,13 @@ def world_benchmark(
         responses += 1
         sample = decode_world_status(raw_status)
         last_sample = sample
+        if (
+            benchmark_scene_sample is None
+            or sample["visible_billboards"] + sample["culled_billboards"]
+            > benchmark_scene_sample["visible_billboards"]
+            + benchmark_scene_sample["culled_billboards"]
+        ):
+            benchmark_scene_sample = sample
         if sample["heartbeat_freshness"] == 1 and sample["generation"] > 0:
             observed_at = time.monotonic()
             if first is None:
@@ -902,7 +910,10 @@ def world_benchmark(
         and last["atlas_cache_failures"] == 0
         and last["view_generation"] > first["view_generation"]
         and last["pose_generation"] > first["pose_generation"]
-        and last["visible_billboards"] + last["culled_billboards"] == 4
+        and benchmark_scene_sample is not None
+        and benchmark_scene_sample["visible_billboards"]
+        + benchmark_scene_sample["culled_billboards"]
+        == 4
     )
     summary: dict[str, object] = {
         "operation": "world_benchmark",
@@ -954,8 +965,16 @@ def world_benchmark(
         "atlas_cache_hits": last["atlas_cache_hits"],
         "atlas_cache_misses": last["atlas_cache_misses"],
         "atlas_cache_failures": last["atlas_cache_failures"],
-        "visible_billboards": last["visible_billboards"],
-        "culled_billboards": last["culled_billboards"],
+        "visible_billboards": (
+            benchmark_scene_sample["visible_billboards"]
+            if benchmark_scene_sample is not None
+            else 0
+        ),
+        "culled_billboards": (
+            benchmark_scene_sample["culled_billboards"]
+            if benchmark_scene_sample is not None
+            else 0
+        ),
         "nearest_samples": last["nearest_samples"],
         "bilinear_samples": last["bilinear_samples"],
         "projection_last_us": last["projection_us"],

@@ -1557,6 +1557,9 @@ where
             SessionError::PairingTimeout,
         ));
     }
+    stream
+        .set_read_timeout(deadline.checked_duration_since(std::time::Instant::now()))
+        .map_err(|_| SessionError::Io)?;
     match read_message(&mut stream, &mut transport)? {
         Message::PairingDecision {
             transaction: t,
@@ -1568,6 +1571,7 @@ where
         } if t == transaction => return Err(SessionError::PairingRejected),
         _ => return Err(SessionError::PairingIncomplete),
     }
+    configure(&stream)?;
     match read_message(&mut stream, &mut transport)? {
         Message::PairingPrepared { transaction: t } if t == transaction => {}
         _ => return Err(SessionError::Protocol),

@@ -53,6 +53,15 @@ stale/drop counters, cache hit/miss/failure, visible/cull counts, sample counts,
 last/max stage timings, and typed faults without recording semantic text, SAS,
 pixels, paths, digests, touch coordinate sequences, or screenshots.
 
+Pairing has one human confirmation boundary: the host opens a bounded pairing
+window and displays its SAS, while the CoreS3 displays the peer SAS and commits
+only after the device Confirm command. The host does not require a second
+stdin confirmation. Its socket read timeout expands to the remaining pairing
+deadline while it waits for the device decision and returns to the normal
+request timeout afterward. A paired identity retains the world shell across
+ordinary session disconnects and reconnects; reconnecting invalidates stale
+application data but does not temporarily expose the setup shell.
+
 The 60-second world benchmark uses the normal paired renderer path, requests a
 one-turn unwrapped camera target, forces Availability and Notice present, and
 keeps Character and generic-object motion active for 1,200 nominal 20 Hz
@@ -94,25 +103,34 @@ checkout around each invocation. Touch-ring loss is accumulated from the
 generations actually skipped by the APPCPU consumer and remains visible in
 later heartbeat publications.
 
-The current AMP product was flashed to every domain through `/dev/ttyACM0`;
-every write passed hash verification and reset (flash record
-`5a90aa6f-783a-4646-8886-302185ed3c53`). USB status record
-`e8ffd69e-2e76-4daf-8605-0436e3a3d15a` reports `heartbeat_freshness=1`,
-`renderer_stage=4`, `renderer_fault=0`, `boot_stage=9`, 40 MHz display SPI,
-and no allocation, transfer, stale-state, touch-drop, or boot fault. GDMA is
-active; follow-up status record `ae201ac8-58ac-4e14-9190-dc53ef25f707`
-observed completed frames increase from 147 to 4,696 with the same zero-fault
-state. Push-stream record
-`ac0a0682-78d2-4869-b309-3f5925d3d8cf` directly observed AP startup, the
-9,216-byte runtime-SRAM handoff, Wi-Fi boot completion, service start, and the
-debug auto-pair command without dropped events. The setup shell remains because
-there is no configured host peer.
+The encrypted Wi-Fi profile was provisioned through the authorized local
+profile path, and device-only confirmation completed pairing with the configured
+desktop host. The current AMP product was flashed to every domain through
+`/dev/ttyACM0`; every write passed hash verification and reset (flash record
+`627a2418-5009-47af-bd5f-c04d5dffbb92`). USB status record
+`34782f1f-5f3f-4d40-844f-ad878ae2c922` reports paired shell 4,
+`heartbeat_freshness=1`, `renderer_stage=3`, `renderer_fault=0`,
+`boot_stage=9`, 40 MHz display SPI, progressing frames, and no allocation,
+transfer, stale-state, touch-drop, or boot fault.
 
-No new identity, Wi-Fi profile, host profile, or pairing state was created. The
-paired world path and fixed 60-second physical benchmark remain unmeasured.
-`mise run fix`, the host and portable suite, the clean CoreS3 conformance build,
-the inert recovery build, and the repository-wide `mise run test` all pass.
-Fresh review found no remaining blocking issue.
+A 60-second USB push-stream observation crossed two real service disconnect and
+reconnect sequences. Shell publication remained 4 throughout; the former
+paired `4 -> 2 -> 4` transition that briefly rendered Setup required was not
+observed, and no diagnostic event was dropped. Physical world benchmark record
+`173a08cc-3283-4207-82d2-1b1df574b258` completed all 1,200 requested updates
+with 1,161 frames at 19.394 measured FPS, 466 measured deadline misses, four
+simultaneous billboards, and zero allocation, transfer, stale-snapshot, and
+atlas-cache failures. The benchmark runner now retains the benchmark-scene
+sample separately from the terminal post-benchmark sample, so removal of the
+synthetic Notice after completion cannot incorrectly fail the four-billboard
+integrity check.
+
+Final `mise run fix` and repository-wide `mise run test` pass for the current
+source. The latter includes the host and portable suite, clean MCUboot plus
+PROCPU plus APPCPU sysbuild, memory/linker conformance, and inert recovery build
+(build record `373fcc8d-f19a-4807-a09f-63c6b655fa1c`). Earlier fresh review
+found no blocking issue in the world, AMP boot, phase-SRAM, and observability
+changes.
 
 The stable target is the Espressif USB JTAG/serial device selected through its
 by-id path and currently exposed as `/dev/ttyACM0`.
@@ -122,10 +140,9 @@ by-id path and currently exposed as `/dev/ttyACM0`.
 Replace the pinned APPCPU entry patch only when an equivalent
 upstream-compatible startup path is verified.
 
-Identity creation, Wi-Fi provisioning, host-profile selection, and pairing each
-remain separate live authority boundaries. Once those prerequisites exist, run
-the normal paired application and fixed 60-second world benchmark. Physical
-acceptance still requires the user's visual confirmation of no cylinder
+The normal paired application and fixed 60-second physical benchmark are now
+operational. Physical acceptance still requires the user's visual confirmation
+of no cylinder
 primitive, camera-facing boards, Availability plus Notice coexistence,
 Character/object parallax, continuous 320 px turns without a seam jump, 180
 degrees/s observed following, and intact pairing UI.

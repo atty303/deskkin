@@ -89,7 +89,8 @@ class Phase3DeviceTests(unittest.TestCase):
             response[61:65] = (44_000).to_bytes(4, "big")
             response[74:78] = (3_000).to_bytes(4, "big")
             response[80] = 1
-            response[81] = 2
+            benchmark_complete = clock.now >= device.WORLD_BENCHMARK_DURATION_SECONDS
+            response[81] = 2 if benchmark_complete else 1
             response[82:84] = (10).to_bytes(2, "big")
             response[84:88] = (1_200).to_bytes(4, "big")
             response[92:96] = generation.to_bytes(4, "big")
@@ -98,7 +99,7 @@ class Phase3DeviceTests(unittest.TestCase):
             response[112:114] = (20).to_bytes(2, "big")
             response[114:116] = (6).to_bytes(2, "big")
             response[118] = 3
-            response[119] = 1
+            response[119] = 0 if benchmark_complete else 1
             response[120:124] = (2_000).to_bytes(4, "big")
             response[124:128] = (4_000).to_bytes(4, "big")
             response[128:132] = (100).to_bytes(4, "big")
@@ -128,6 +129,8 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertEqual(summary["copy_last_us"], 3_000)
         self.assertEqual(summary["wire_last_us"], 39_000)
         self.assertEqual(summary["requested_updates"], 1_200)
+        self.assertEqual(summary["visible_billboards"], 3)
+        self.assertEqual(summary["culled_billboards"], 1)
         self.assertEqual(summary["pixel_dma_batches"], 10)
         self.assertEqual(run_control.call_args_list[0].args[0], "world-benchmark-start")
         self.assertTrue(run_control.call_args_list[1].kwargs["recover_status_transport"])

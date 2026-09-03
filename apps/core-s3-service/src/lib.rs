@@ -72,6 +72,7 @@ const IDENTITY_INTENT: u16 = 0x102;
 const CONFIG_A: u16 = 0x200;
 const CONFIG_B: u16 = 0x201;
 const CONFIG_INTENT: u16 = 0x202;
+const PAIRING_DECISION_TIMEOUT_MS: u64 = 60_000;
 
 #[derive(Clone, Copy)]
 enum ServiceStatus {
@@ -580,6 +581,10 @@ fn set_last_error(error: u8) {
     if LAST_ERROR.swap(error, Ordering::AcqRel) != error {
         unsafe { deskkin_service_trace(LAST_STAGE.load(Ordering::Acquire), error) };
     }
+}
+
+fn trace_pairing(stage: u8) {
+    unsafe { deskkin_service_trace(0x20 | stage, 0) };
 }
 
 fn load_identity() -> Result<StoredIdentity, SessionFailure> {
@@ -1167,8 +1172,10 @@ fn pair_session(
         deadline,
         &mut control_frame,
     )?;
+    trace_pairing(1);
     let local = wait_pairing_decision(sas)?;
-    deadline = deadline_after(5_000);
+    trace_pairing(2);
+    deadline = deadline_after(PAIRING_DECISION_TIMEOUT_MS);
     let remote = matches!(
         read_message(descriptor, &mut transport, deadline, &mut control_frame)?,
         deskkin_protocol::Message::PairingDecision {
@@ -1176,6 +1183,7 @@ fn pair_session(
             decision: deskkin_protocol::PairingDecision::Confirmed,
         } if received == transaction
     );
+    trace_pairing(3);
     deadline = deadline_after(5_000);
     write_message(
         descriptor,
@@ -1191,10 +1199,12 @@ fn pair_session(
         deadline,
         &mut control_frame,
     )?;
+    trace_pairing(4);
     if !local || !remote {
         return Err(SessionFailure::Rejected);
     }
     publish_peer(&mut identity, deskkin_core_s3::PeerState::Pending)?;
+    trace_pairing(5);
     deadline = deadline_after(5_000);
     write_message(
         descriptor,
@@ -1203,11 +1213,13 @@ fn pair_session(
         deadline,
         &mut control_frame,
     )?;
+    trace_pairing(6);
     deadline = deadline_after(5_000);
     if !matches!(read_message(descriptor, &mut transport, deadline, &mut control_frame)?, deskkin_protocol::Message::PairingPrepared { transaction: received } if received == transaction)
     {
         return Err(SessionFailure::Protocol);
     }
+    trace_pairing(7);
     deadline = deadline_after(5_000);
     write_message(
         descriptor,
@@ -1216,12 +1228,15 @@ fn pair_session(
         deadline,
         &mut control_frame,
     )?;
+    trace_pairing(8);
     deadline = deadline_after(5_000);
     if !matches!(read_message(descriptor, &mut transport, deadline, &mut control_frame)?, deskkin_protocol::Message::PairingCommitted { transaction: received } if received == transaction)
     {
         return Err(SessionFailure::Protocol);
     }
+    trace_pairing(9);
     publish_peer(&mut identity, deskkin_core_s3::PeerState::Committing)?;
+    trace_pairing(10);
     deadline = deadline_after(5_000);
     write_message(
         descriptor,
@@ -1230,12 +1245,15 @@ fn pair_session(
         deadline,
         &mut control_frame,
     )?;
+    trace_pairing(11);
     deadline = deadline_after(5_000);
     if !matches!(read_message(descriptor, &mut transport, deadline, &mut control_frame)?, deskkin_protocol::Message::PairingComplete { transaction: received } if received == transaction)
     {
         return Err(SessionFailure::Protocol);
     }
+    trace_pairing(12);
     publish_peer(&mut identity, deskkin_core_s3::PeerState::Paired)?;
+    trace_pairing(13);
     let session = hello(descriptor, &mut transport)?;
     UI_SHELL.store(4, Ordering::Release);
     availability_loop(descriptor, &mut transport, session)
@@ -1266,7 +1284,7 @@ fn connect_once(pair_requested: bool) -> Result<(), SessionFailure> {
             let fallback = if identity.state == deskkin_core_s3::PeerState::Unpaired {
                 1
             } else {
-                2
+                4
             };
             (identity, config, fallback)
         }
@@ -1276,7 +1294,14 @@ fn connect_once(pair_requested: bool) -> Result<(), SessionFailure> {
         }
     };
     let (identity, mut config, fallback_shell) = fallback;
-    UI_SHELL.store(2, Ordering::Release);
+    UI_SHELL.store(
+        if identity.state == deskkin_core_s3::PeerState::Unpaired {
+            2
+        } else {
+            4
+        },
+        Ordering::Release,
+    );
     set_last_stage(1);
     set_last_error(0);
     let wifi_result = unsafe {
@@ -1468,7 +1493,7 @@ fn handle_control(frame: deskkin_core_s3::ControlFrame<'_>) -> ServiceStatus {
 fn refresh_setup_shell() {
     let shell = match (load_identity(), load_config()) {
         (Ok(identity), Ok(_)) if identity.state == deskkin_core_s3::PeerState::Unpaired => 1,
-        (Ok(identity), Ok(_)) if identity.state == deskkin_core_s3::PeerState::Paired => 2,
+        (Ok(identity), Ok(_)) if identity.state == deskkin_core_s3::PeerState::Paired => 4,
         _ => 0,
     };
     UI_SHELL.store(shell, Ordering::Release);

@@ -1,4 +1,3 @@
-use std::io;
 use std::path::PathBuf;
 
 use deskkin_desktop_host::profile::{
@@ -375,16 +374,13 @@ fn await_owner_result(
             && !decision_sent
         {
             println!("authentication {authentication_string}");
-            println!("confirm? type yes");
-            let mut input = String::new();
-            let confirmed = io::stdin().read_line(&mut input).is_ok() && input.trim() == "yes";
             let decision_id = new_control_id().map_err(debug)?;
             let decision = OwnerCommand::PairingDecide {
                 command_id: decision_id.clone(),
                 owner_generation: owner_generation.to_owned(),
                 parent_command_id: command_id.to_owned(),
                 pairing_transaction_id: pairing_transaction_id.clone(),
-                confirmed,
+                confirmed: true,
             };
             if submit_pairing_decision(control, &decision_id, owner_generation, &decision)?
                 != OwnerResponse::PairingDecisionAccepted
@@ -449,6 +445,7 @@ fn debug(error: impl std::fmt::Debug) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::time::{Duration, Instant};
 
     use super::*;

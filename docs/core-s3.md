@@ -73,9 +73,11 @@ readback verification. NVS is plaintext; flash encryption, secure boot, eFuse
 mutation, and forensic erasure are outside the product.
 
 The device and host derive the same six-digit Noise XX authentication string.
-Tap **Pair**, compare both displays, and confirm both ends. Setup, Pair,
-Confirm, and Cancel remain full-screen Slint UI. Only the paired shell enters
-world mode.
+Opening the host pairing window authorizes one pairing attempt and prints the
+host string without a second host-side confirmation prompt. Tap **Pair**,
+compare the host string with the device, and confirm on the device. Setup,
+Pair, Confirm, and Cancel remain full-screen Slint UI. Only the paired shell
+enters world mode.
 
 With an existing approved host profile:
 
