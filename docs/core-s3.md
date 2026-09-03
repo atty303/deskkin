@@ -132,6 +132,14 @@ Slint/world allocations, and the display and renderer thread stacks. Two
 completed frame directly through APPCPU-owned GDMA channel pair 0. They are the
 only large render buffers that require internal SRAM.
 
+The display and renderer threads have the same priority so rendering can run
+while a five-chunk full-frame DMA transfer is active. Only the renderer has a
+one-tick time slice: when the display thread is ready during DMA polling, it
+therefore resumes within one millisecond to retire a completed chunk and start
+the next one. When the display thread is blocked waiting for a frame, slice
+expiry immediately returns to the renderer and does not impose a periodic
+one-millisecond rendering pause.
+
 PROCPU and APPCPU static DRAM meet at `0x3fce4c00`; both linkers derive that
 physical boundary from the AMP reservation and enforce it at link time. The
 separate 32 KiB SRAM2 bank contains the 21 KiB service stack, 3 KiB control

@@ -43,6 +43,12 @@ prefix become a zeroized 9 KiB internal runtime heap. The Wi-Fi boot
 coordinator temporarily borrows 1.5 KiB from the inactive service stack and is
 joined and zeroized before service ownership begins.
 
+The APPCPU display and renderer threads remain at the same priority so world
+rasterization overlaps the five-chunk full-frame DMA transfer. A one-tick
+per-thread slice applies only to the renderer: it bounds display-thread recovery
+at chunk boundaries to one millisecond without changing the global scheduler
+slice or serializing rendering behind transfer.
+
 AMP shared memory has schema-checked, generation-published world snapshots, a
 bounded touch ring with per-slot publication and drop count, UI command slot,
 target-yaw mailbox, and aggregate heartbeat. Readers use before/copy/after
@@ -107,9 +113,9 @@ The encrypted Wi-Fi profile was provisioned through the authorized local
 profile path, and device-only confirmation completed pairing with the configured
 desktop host. The current AMP product was flashed to every domain through
 `/dev/ttyACM0`; every write passed hash verification and reset (flash record
-`627a2418-5009-47af-bd5f-c04d5dffbb92`). USB status record
-`34782f1f-5f3f-4d40-844f-ad878ae2c922` reports paired shell 4,
-`heartbeat_freshness=1`, `renderer_stage=3`, `renderer_fault=0`,
+`b65187a8-c44a-4d89-a945-0e5a077f613d`). USB status record
+`bee223e9-79dc-4cc7-aab3-636a1d0ec91e` reports paired shell 4,
+`heartbeat_freshness=1`, `renderer_stage=4`, `renderer_fault=0`,
 `boot_stage=9`, 40 MHz display SPI, progressing frames, and no allocation,
 transfer, stale-state, touch-drop, or boot fault.
 
@@ -117,20 +123,32 @@ A 60-second USB push-stream observation crossed two real service disconnect and
 reconnect sequences. Shell publication remained 4 throughout; the former
 paired `4 -> 2 -> 4` transition that briefly rendered Setup required was not
 observed, and no diagnostic event was dropped. Physical world benchmark record
-`173a08cc-3283-4207-82d2-1b1df574b258` completed all 1,200 requested updates
-with 1,161 frames at 19.394 measured FPS, 466 measured deadline misses, four
-simultaneous billboards, and zero allocation, transfer, stale-snapshot, and
-atlas-cache failures. The benchmark runner now retains the benchmark-scene
+`01ed62d0-5736-4210-a125-3943b71c0a96` completed all 1,200 requested updates
+with 1,205 frames at 20.132 measured FPS, zero deadline misses, four simultaneous
+billboards, and zero allocation, transfer, stale-snapshot, and atlas-cache
+failures. The five-batch 40 MHz full-frame transfer measured 31.780 ms last and
+33.789 ms maximum, restored from the prior 46--61 ms range while rendering
+continued concurrently. The benchmark runner retains the benchmark-scene
 sample separately from the terminal post-benchmark sample, so removal of the
 synthetic Notice after completion cannot incorrectly fail the four-billboard
 integrity check.
 
+An APPCPU-only 2 kHz trial used a two-millisecond global slice and a one-tick
+(0.5 ms) renderer slice. It did not reach the renderer or publish an APPCPU
+heartbeat: PROCPU stopped at `boot_stage=3` with
+`boot_error=boot_display_transfer`. Because no frame or transfer began, this is
+an AMP startup/timer incompatibility rather than a transfer-performance result.
+The product therefore retains the verified 1 kHz clock and renderer-only
+one-tick slice; the healthy image above was rebuilt and reflashed after the
+rejected trial.
+
 Final `mise run fix` and repository-wide `mise run test` pass for the current
 source. The latter includes the host and portable suite, clean MCUboot plus
 PROCPU plus APPCPU sysbuild, memory/linker conformance, and inert recovery build
-(build record `373fcc8d-f19a-4807-a09f-63c6b655fa1c`). Earlier fresh review
+(build record `61db3f7c-1963-4788-8c1e-2c6f0380d8ae`). Earlier fresh review
 found no blocking issue in the world, AMP boot, phase-SRAM, and observability
-changes.
+changes. A fresh review of the renderer-only time-slice change likewise found
+no actionable issue.
 
 The stable target is the Espressif USB JTAG/serial device selected through its
 by-id path and currently exposed as `/dev/ttyACM0`.

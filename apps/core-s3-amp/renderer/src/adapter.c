@@ -22,6 +22,7 @@
 #define FULL_FRAME_DMA_BATCHES DIV_ROUND_UP(FRAME_PIXELS * sizeof(uint16_t), PIXEL_DMA_CHUNK_BYTES)
 #define FRAMEBUFFER_COUNT 2U
 #define MAX_DIRTY_RECTS 3U
+#define RENDERER_TIME_SLICE_TICKS 1
 #define AMP_SHARED                                                                                 \
 	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
 					       DESKKIN_CHANNEL_OFFSET))
@@ -700,7 +701,9 @@ int main(void)
 	deskkin_renderer_observe(RENDERER_STARTING_THREADS, RENDERER_FAULT_NONE, 0, 0);
 	k_thread_create(&display_thread, display_stack, 4096,
 			display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
-	k_thread_create(&renderer_thread, renderer_stack, 12288,
-			renderer_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
+	k_tid_t renderer_tid = k_thread_create(&renderer_thread, renderer_stack, 12288,
+					     renderer_entry, NULL, NULL, NULL, 0, 0, K_FOREVER);
+	k_thread_time_slice_set(renderer_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL);
+	k_thread_start(renderer_tid);
 	return 0;
 }

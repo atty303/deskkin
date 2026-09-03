@@ -506,6 +506,8 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("sys_heap_init(&renderer_heap", adapter)
         self.assertIn("sys_heap_alloc(&renderer_heap", adapter)
         self.assertIn("sys_heap_aligned_alloc(&renderer_heap", adapter)
+        self.assertIn("CONFIG_TIMESLICE_PER_THREAD=y", config)
+        self.assertIn("#define RENDERER_TIME_SLICE_TICKS 1", adapter)
         self.assertIn("k_thread_create(&display_thread, display_stack, 4096", adapter)
         self.assertIn("k_thread_create(&renderer_thread, renderer_stack, 12288", adapter)
         self.assertNotIn("K_THREAD_STACK_DEFINE(display_stack", adapter)
@@ -513,6 +515,12 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("atomic_inc(&allocation_failures)", adapter)
         self.assertIn("K_MSGQ_DEFINE(display_requests", adapter)
         self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
+        self.assertIn("renderer_entry, NULL, NULL, NULL, 0, 0, K_FOREVER", adapter)
+        self.assertIn(
+            "k_thread_time_slice_set(renderer_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL)",
+            adapter,
+        )
+        self.assertIn("k_thread_start(renderer_tid)", adapter)
         self.assertIn("k_yield();", adapter)
         self.assertNotIn("DMA_STAGING_LINES", adapter)
         self.assertNotIn("dma_staging", adapter)
