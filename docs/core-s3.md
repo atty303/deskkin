@@ -133,12 +133,18 @@ completed frame directly through APPCPU-owned GDMA channel pair 0. They are the
 only large render buffers that require internal SRAM.
 
 The display and renderer threads have the same priority so rendering can run
-while a five-chunk full-frame DMA transfer is active. Only the renderer has a
-one-tick time slice: when the display thread is ready during DMA polling, it
-therefore resumes within one millisecond to retire a completed chunk and start
-the next one. When the display thread is blocked waiting for a frame, slice
-expiry immediately returns to the renderer and does not impose a periodic
-one-millisecond rendering pause.
+while a five-chunk full-frame DMA transfer is active. The renderer retains a
+one-tick per-thread slice at 1 kHz, and the display worker has the same one-tick
+slice, without changing the global scheduler. The SPI completion loop polls the
+hardware with its cycle-based timeout and does not sleep for an extra tick.
+
+SPI uses GDMA without a completion callback because the SPI HAL polls transfer
+completion. The pinned GDMA patch therefore leaves RX/TX EOF interrupts disabled
+for callback-free peripheral channels; callback-backed and memory-to-memory DMA
+retain their completion interrupts. This removes the otherwise unused level-1
+GDMA source implicated in the APPCPU interrupt-return failure beside the 1 kHz
+level-3 timer. DMA descriptors, five-batch transfer, and direct internal-SRAM
+framebuffers remain unchanged.
 
 PROCPU and APPCPU static DRAM meet at `0x3fce4c00`; both linkers derive that
 physical boundary from the AMP reservation and enforce it at link time. The
@@ -193,7 +199,11 @@ No per-frame log is emitted. The bounded status/heartbeat contains only closed
 aggregate fields: view/pose/input generations, stale/drop counts, atlas
 hit/miss/failure counts, visible/cull counts, nearest/bilinear sample counts,
 last/max projection, sort, texture, world-raster and transfer times, and typed
-allocation/decode/shared/render/transfer faults.
+allocation/decode/shared/render/transfer faults. Renderer and display each
+publish one packed latest-progress value containing a bounded stage and
+monotonic sequence independently of the frame heartbeat. A fresh-to-stale
+heartbeat transition emits one diagnostic event with both stages; it does not
+emit per-frame events.
 
 It never records billboard text, SAS, pixels, image digest, asset path, touch
 coordinate sequences, or screen snapshots. There is no remote exporter.

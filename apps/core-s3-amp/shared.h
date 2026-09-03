@@ -125,6 +125,24 @@ enum deskkin_shell_state {
 	DESKKIN_SHELL_PAIRED = 4,
 };
 
+enum deskkin_renderer_progress_stage {
+	DESKKIN_RENDER_PROGRESS_LOOP = 1,
+	DESKKIN_RENDER_PROGRESS_SNAPSHOT = 2,
+	DESKKIN_RENDER_PROGRESS_TOUCH = 3,
+	DESKKIN_RENDER_PROGRESS_TEXTURE = 4,
+	DESKKIN_RENDER_PROGRESS_BUFFER = 5,
+	DESKKIN_RENDER_PROGRESS_RASTER = 6,
+	DESKKIN_RENDER_PROGRESS_SUBMIT = 7,
+	DESKKIN_RENDER_PROGRESS_PACING = 8,
+};
+
+enum deskkin_display_progress_stage {
+	DESKKIN_DISPLAY_PROGRESS_WAITING = 1,
+	DESKKIN_DISPLAY_PROGRESS_REQUEST = 2,
+	DESKKIN_DISPLAY_PROGRESS_TRANSFER = 3,
+	DESKKIN_DISPLAY_PROGRESS_COMPLETION = 4,
+};
+
 struct deskkin_world_snapshot {
 	uint32_t magic;
 	uint32_t generation;
@@ -181,6 +199,8 @@ struct deskkin_amp_shared {
 	uint32_t command_publication;
 	struct deskkin_target_yaw target_yaw;
 	uint32_t target_yaw_publication;
+	uint32_t renderer_progress;
+	uint32_t display_progress;
 };
 
 _Static_assert(sizeof(struct deskkin_amp_shared) <= DESKKIN_SHARED_SIZE - DESKKIN_CHANNEL_OFFSET,

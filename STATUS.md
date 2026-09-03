@@ -1,6 +1,28 @@
 # Current status
 
-Updated: 2026-09-03
+Updated: 2026-09-04
+
+## Active work
+
+The intermittent APPCPU display stop is fixed and qualified by a physical
+60-second benchmark. JTAG captured both frozen runs in Xtensa's permanent
+`_DoubleExceptionVector`: the exception handler tried to restore a context
+through a null base pointer in a state consistent with an interrupt-return
+collision.
+APPCPU had only the 1 kHz level-3 timer and one level-1 shared interrupt enabled;
+the latter contained only GDMA RX0/TX0 EOF sources. Zephyr enabled those EOF
+interrupts on every DMA start even though SPI supplied no completion callback
+and polled the SPI HAL instead. Removing that implicated but unused level-1
+interrupt eliminated the observed failure in two consecutive physical
+qualification runs; no interrupt-history trace was available to establish the
+exact collision sequence.
+
+The pinned GDMA patch now enables peripheral completion interrupts only when a
+callback exists. Memory-to-memory DMA and callback-backed DMA retain their
+interrupt behavior. The SPI completion loop uses timeout-aware busy polling
+without an extra tick sleep. Display and renderer stay equal priority and each
+has a one-tick, 1 ms per-thread slice. Direct GDMA from the two internal-SRAM
+framebuffers and all PSRAM ownership remain unchanged.
 
 ## Current baseline
 
@@ -44,10 +66,10 @@ coordinator temporarily borrows 1.5 KiB from the inactive service stack and is
 joined and zeroized before service ownership begins.
 
 The APPCPU display and renderer threads remain at the same priority so world
-rasterization overlaps the five-chunk full-frame DMA transfer. A one-tick
-per-thread slice applies only to the renderer: it bounds display-thread recovery
-at chunk boundaries to one millisecond without changing the global scheduler
-slice or serializing rendering behind transfer.
+rasterization can run while the five-batch full-frame transfer is active. Both
+threads have a one-tick per-thread slice at 1 kHz. Callback-free SPI GDMA does
+not enable its unused EOF interrupt, while SPI retains timeout-aware completion
+polling.
 
 AMP shared memory has schema-checked, generation-published world snapshots, a
 bounded touch ring with per-slot publication and drop count, UI command slot,
@@ -56,8 +78,10 @@ validation; the renderer retains its last stable world snapshot while a writer
 publishes and fails closed on invalid schema or semantics. Status exposes the
 identity owner generation and shell together with view/pose/input generations,
 stale/drop counters, cache hit/miss/failure, visible/cull counts, sample counts,
-last/max stage timings, and typed faults without recording semantic text, SAS,
-pixels, paths, digests, touch coordinate sequences, or screenshots.
+last/max stage timings, independent renderer/display progress, and typed faults
+without recording semantic text, SAS, pixels, paths, digests, touch coordinate
+sequences, or screenshots. A heartbeat fresh-to-stale transition produces one
+bounded progress event rather than a per-frame log.
 
 Pairing has one human confirmation boundary: the host opens a bounded pairing
 window and displays its SAS, while the CoreS3 displays the peer SAS and commits
@@ -111,7 +135,7 @@ later heartbeat publications.
 
 The encrypted Wi-Fi profile was provisioned through the authorized local
 profile path, and device-only confirmation completed pairing with the configured
-desktop host. The current AMP product was flashed to every domain through
+desktop host. The previously qualified AMP product was flashed to every domain through
 `/dev/ttyACM0`; every write passed hash verification and reset (flash record
 `b65187a8-c44a-4d89-a945-0e5a077f613d`). USB status record
 `bee223e9-79dc-4cc7-aab3-636a1d0ec91e` reports paired shell 4,
@@ -133,35 +157,41 @@ sample separately from the terminal post-benchmark sample, so removal of the
 synthetic Notice after completion cannot incorrectly fail the four-billboard
 integrity check.
 
-An APPCPU-only 2 kHz trial used a two-millisecond global slice and a one-tick
-(0.5 ms) renderer slice. It did not reach the renderer or publish an APPCPU
-heartbeat: PROCPU stopped at `boot_stage=3` with
-`boot_error=boot_display_transfer`. Because no frame or transfer began, this is
-an AMP startup/timer incompatibility rather than a transfer-performance result.
-The product therefore retains the verified 1 kHz clock and renderer-only
-one-tick slice; the healthy image above was rebuilt and reflashed after the
-rejected trial.
+An APPCPU-only 2 kHz trial did not complete AMP startup, so the product retains
+the verified 1 kHz system tick. Display and renderer each use a one-tick slice,
+meeting the 1 ms worker-interleaving contract without changing the global tick.
 
-Final `mise run fix` and repository-wide `mise run test` pass for the current
-source. The latter includes the host and portable suite, clean MCUboot plus
-PROCPU plus APPCPU sysbuild, memory/linker conformance, and inert recovery build
-(build record `61db3f7c-1963-4788-8c1e-2c6f0380d8ae`). Earlier fresh review
-found no blocking issue in the world, AMP boot, phase-SRAM, and observability
-changes. A fresh review of the renderer-only time-slice change likewise found
-no actionable issue.
-
-The stable target is the Espressif USB JTAG/serial device selected through its
-by-id path and currently exposed as `/dev/ttyACM0`.
+For the current source, `mise run fix`, the device-tool suite, patch provenance
+verification, and a clean MCUboot plus PROCPU plus APPCPU sysbuild pass (build
+record `57ac7a0a-90d9-4518-84f6-23bcf342f896`). Flash record
+`08b847cb-a10a-4a43-863c-aac64cc35e6d` verified all three domains and reset.
+Physical benchmark `165bbc51-900e-4a4b-8972-f34ff8d45409` completed all 1,200
+updates over 59.94 measured seconds with 1,165 frames at 19.436 FPS. It reported
+456 measured deadline misses, four visible billboards, a 32.102 ms last and
+38.934 ms maximum five-batch transfer, and zero renderer, stale-snapshot,
+allocation, transfer, touch-drop, or atlas-cache fault. A later status record
+`8f6b50e3-e0cd-4348-bf66-8de43c9c8891` observed 1,686 completed frames with a
+fresh heartbeat and both renderer/display progress sequences still advancing.
+A consecutive second benchmark
+`dd9eaf51-9558-43a0-a265-ad264e5057d6` again completed all 1,200 updates and
+1,165 frames over 59.913 seconds at 19.444 FPS with all integrity-fault counts
+zero. Its last transfer was 31.689 ms; the boot-lifetime maximum remained
+38.934 ms. Post-benchmark status
+`ea74da0a-f154-4955-a3d4-fa348d10210f` observed 4,230 completed frames, a fresh
+heartbeat, and advancing renderer/display progress. The repository-wide final
+test passed, including host/portable suites, patch provenance, and clean
+MCUboot, PROCPU, APPCPU, and inert-recovery builds (build record
+`97a0a03c-9e76-4d1e-869c-45fefb98e7ea`). Fresh review found no code issue; its
+one documentation finding was resolved by separating direct JTAG observations
+from the inferred interrupt sequence.
 
 ## Next work
 
 Replace the pinned APPCPU entry patch only when an equivalent
 upstream-compatible startup path is verified.
 
-The normal paired application and fixed 60-second physical benchmark are now
-operational. Physical acceptance still requires the user's visual confirmation
-of no cylinder
-primitive, camera-facing boards, Availability plus Notice coexistence,
+Physical acceptance still requires the user's visual confirmation of no
+cylinder primitive, camera-facing boards, Availability plus Notice coexistence,
 Character/object parallax, continuous 320 px turns without a seam jump, 180
 degrees/s observed following, and intact pairing UI.
 

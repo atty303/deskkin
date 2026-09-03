@@ -14,6 +14,7 @@ use snow::types::{Cipher, Dh, Hash, Random};
 use zeroize::Zeroize;
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
+const STATUS_RESPONSE_SIZE: usize = 168;
 static UI_ACTION: AtomicU8 = AtomicU8::new(0);
 static UI_SAS: AtomicU32 = AtomicU32::new(u32::MAX);
 static UI_VIEW: AtomicU8 = AtomicU8::new(0);
@@ -1391,7 +1392,7 @@ unsafe extern "C" fn deskkin_rust_control_snapshot(
     {
         return 0;
     }
-    let output = unsafe { core::slice::from_raw_parts_mut(output, 160) };
+    let output = unsafe { core::slice::from_raw_parts_mut(output, STATUS_RESPONSE_SIZE) };
     output.fill(0);
     output[0] = 1;
     output[1] = ServiceStatus::Success as u8;
@@ -1503,7 +1504,7 @@ fn publish_control_completion(
     control: Option<deskkin_core_s3::ControlFrame<'_>>,
     status: ServiceStatus,
 ) {
-    let mut completion = zeroize::Zeroizing::new([0_u8; 160]);
+    let mut completion = zeroize::Zeroizing::new([0_u8; STATUS_RESPONSE_SIZE]);
     completion[0] = 1;
     completion[1] = status as u8;
     let mut completion_length = 2;

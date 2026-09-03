@@ -23,7 +23,7 @@
 #include "../shared.h"
 
 #define CONTROL_FRAME_MAX 188
-#define STATUS_RESPONSE_SIZE 160
+#define STATUS_RESPONSE_SIZE 168
 #define HEARTBEAT_STALE_MS 500
 #define DIAGNOSTIC_EVENT_CAPACITY 64U
 #define DIAGNOSTIC_EVENT_SIZE 24U
@@ -661,6 +661,29 @@ static void receive_heartbeat(void)
 	atomic_set(&deadline_misses, (atomic_val_t)heartbeat.deadline_misses);
 }
 
+static void observe_renderer_stale(bool *reported)
+{
+	const uint32_t heartbeat = (uint32_t)atomic_get(&heartbeat_generation);
+	const uint32_t received_ms = (uint32_t)atomic_get(&heartbeat_received_ms);
+	const uint32_t now = k_uptime_get_32();
+	const bool fresh = heartbeat != 0U && now - received_ms <= HEARTBEAT_STALE_MS;
+	if (fresh) {
+		*reported = false;
+		return;
+	}
+	if (heartbeat == 0U || *reported) {
+		return;
+	}
+	const uint32_t renderer = deskkin_shared_load(&AMP_SHARED->renderer_progress);
+	const uint32_t display = deskkin_shared_load(&AMP_SHARED->display_progress);
+	const uint32_t sequences = (((renderer >> 8U) & 0xffffU) << 16U) |
+				   ((display >> 8U) & 0xffffU);
+	diagnostic_record(DESKKIN_DIAGNOSTIC_RENDERER, 0x80U,
+			  (int16_t)(renderer & 0xffU), (int16_t)(display & 0xffU),
+			  sequences);
+	*reported = true;
+}
+
 static int initialize_display_power(void)
 {
 	if (!device_is_ready(lcd_reset_gpio) || !device_is_ready(lcd_supply)) {
@@ -719,8 +742,10 @@ static void supervisor_entry(void *first, void *second, void *third)
 	}
 	set_boot_stage(8);
 	uint32_t next_world_ms = k_uptime_get_32();
+	bool renderer_stale_reported = false;
 	for (;;) {
 		receive_heartbeat();
+		observe_renderer_stale(&renderer_stale_reported);
 		receive_ui_command();
 		update_observed_yaw();
 		const uint32_t now = k_uptime_get_32();
@@ -866,6 +891,8 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 	sys_put_be32((uint32_t)atomic_get(&texture_max_us), &response[148]);
 	sys_put_be32((uint32_t)atomic_get(&world_raster_us), &response[152]);
 	sys_put_be32((uint32_t)atomic_get(&world_raster_max_us), &response[156]);
+	sys_put_be32(deskkin_shared_load(&AMP_SHARED->renderer_progress), &response[160]);
+	sys_put_be32(deskkin_shared_load(&AMP_SHARED->display_progress), &response[164]);
 	return STATUS_RESPONSE_SIZE;
 }
 

@@ -134,9 +134,6 @@ index 4b1e549ea3b..0d74fe43e1c 100644
 +			err = -ETIMEDOUT;
 +			break;
 +		}
-+		if (!k_is_pre_kernel()) {
-+			k_yield();
-+		}
  	}
  
  #if defined(SOC_GDMA_SUPPORTED)
@@ -200,4 +197,3 @@ index 4b1e549ea3b..0d74fe43e1c 100644
  
 -- 
 2.51.0
-

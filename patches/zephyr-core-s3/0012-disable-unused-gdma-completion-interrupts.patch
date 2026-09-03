@@ -1,0 +1,25 @@
+From: Deskkin contributors
+Subject: [PATCH] dma: esp32: disable unused peripheral completion interrupts
+
+diff --git a/drivers/dma/dma_esp32_gdma.c b/drivers/dma/dma_esp32_gdma.c
+index 1507c73b6c..67bd558b73 100644
+--- a/drivers/dma/dma_esp32_gdma.c
++++ b/drivers/dma/dma_esp32_gdma.c
+@@ -444,13 +444,15 @@ static int dma_esp32_start(const struct device *dev, uint32_t channel)
+ 		if (dma_channel->dir == DMA_RX) {
+ 			gdma_ll_rx_enable_interrupt(data->hal.dev, dma_channel->channel_id,
+ 						    GDMA_LL_EVENT_RX_SUC_EOF |
+-						    GDMA_LL_EVENT_RX_DONE, true);
++						    GDMA_LL_EVENT_RX_DONE,
++						    dma_channel->cb != NULL);
+ 			gdma_ll_rx_set_desc_addr(data->hal.dev, dma_channel->channel_id,
+ 						 (int32_t)dma_channel->desc_list);
+ 			gdma_ll_rx_start(data->hal.dev, dma_channel->channel_id);
+ 		} else if (dma_channel->dir == DMA_TX) {
+ 			gdma_ll_tx_enable_interrupt(data->hal.dev, dma_channel->channel_id,
+-						    GDMA_LL_EVENT_TX_EOF, true);
++						    GDMA_LL_EVENT_TX_EOF,
++						    dma_channel->cb != NULL);
+ 			gdma_ll_tx_set_desc_addr(data->hal.dev, dma_channel->channel_id,
+ 						 (int32_t)dma_channel->desc_list);
+ 			gdma_ll_tx_start(data->hal.dev, dma_channel->channel_id);

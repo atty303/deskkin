@@ -108,6 +108,7 @@ unsafe extern "C" {
     fn deskkin_display_take_completion(buffer_index: *mut u8, duration_us: *mut u32) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_renderer_observe(stage: u8, fault: u8, render_us: u32, transfer_us: u32);
+    fn deskkin_renderer_progress(stage: u8);
     fn deskkin_uptime_us() -> u64;
     fn deskkin_yield();
     fn deskkin_world_snapshot(output: *mut WorldSnapshot) -> c_int;
@@ -136,6 +137,18 @@ unsafe extern "C" {
     );
     fn deskkin_deadline_missed();
     fn deskkin_shell_observe(shell: u8, property_matches: u8);
+}
+
+#[repr(u8)]
+enum RendererProgress {
+    Loop = 1,
+    Snapshot = 2,
+    Touch = 3,
+    Texture = 4,
+    Buffer = 5,
+    Raster = 6,
+    Submit = 7,
+    Pacing = 8,
 }
 
 struct DevicePlatform {
@@ -408,6 +421,7 @@ fn render_frame(
     force_full_transfer: bool,
 ) -> Result<(), RendererFault> {
     slint::platform::update_timers_and_animations();
+    unsafe { deskkin_renderer_progress(RendererProgress::Buffer as u8) };
     framebuffer.publish_completions()?;
     framebuffer.wait_for_back_buffer()?;
     unsafe {
@@ -419,6 +433,7 @@ fn render_frame(
         )
     };
     let started = unsafe { deskkin_uptime_us() };
+    unsafe { deskkin_renderer_progress(RendererProgress::Raster as u8) };
     let index = framebuffer.back;
     let mut dirty_rects = [DirtyRect::default(); MAX_DIRTY_RECTS];
     let mut dirty_rect_count = 0_usize;
@@ -460,6 +475,7 @@ fn render_frame(
         };
         dirty_rect_count = 1;
     }
+    unsafe { deskkin_renderer_progress(RendererProgress::Submit as u8) };
     framebuffer.submit(
         elapsed_us(started, unsafe { deskkin_uptime_us() }),
         &dirty_rects[..dirty_rect_count],
@@ -633,6 +649,7 @@ fn render_world(
     input_generation: u32,
     telemetry: &mut WorldTelemetry,
 ) -> Result<(), RendererFault> {
+    unsafe { deskkin_renderer_progress(RendererProgress::Buffer as u8) };
     framebuffer.publish_completions()?;
     framebuffer.wait_for_back_buffer()?;
     let index = framebuffer.back;
@@ -641,6 +658,7 @@ fn render_world(
         .begin_render(index)
         .map_err(|_| RendererFault::Ownership)?;
     let started = unsafe { deskkin_uptime_us() };
+    unsafe { deskkin_renderer_progress(RendererProgress::Raster as u8) };
     motion.advance(started);
     let pixels = framebuffer.words_mut(index);
     pixels.fill(0x10c3_u16.to_be());
@@ -843,6 +861,7 @@ fn render_world(
         width: WIDTH as u16,
         height: HEIGHT as u16,
     }];
+    unsafe { deskkin_renderer_progress(RendererProgress::Submit as u8) };
     framebuffer.submit(elapsed_us(started, unsafe { deskkin_uptime_us() }), &rect)
 }
 
@@ -974,6 +993,8 @@ extern "C" fn rust_main() {
     let mut world_motion = WorldMotion::new(unsafe { deskkin_uptime_us() });
 
     loop {
+        unsafe { deskkin_renderer_progress(RendererProgress::Loop as u8) };
+        unsafe { deskkin_renderer_progress(RendererProgress::Snapshot as u8) };
         let snapshot_result = unsafe { deskkin_world_snapshot(&mut world_snapshot) };
         if snapshot_result > 0 {
             if !have_world_snapshot {
@@ -992,6 +1013,7 @@ extern "C" fn rust_main() {
             };
             return;
         }
+        unsafe { deskkin_renderer_progress(RendererProgress::Touch as u8) };
         loop {
             let mut sample = TouchSample::default();
             let mut drop_count = 0_u32;
@@ -1055,6 +1077,7 @@ extern "C" fn rust_main() {
         }
         let shell_changed = have_world_snapshot && rendered_shell != Some(world_snapshot.shell);
         let render_result = if have_world_snapshot && world_snapshot.shell == 4 {
+            unsafe { deskkin_renderer_progress(RendererProgress::Texture as u8) };
             if let Err(fault) = ensure_world_textures(
                 &mut world_textures,
                 &component,
@@ -1150,6 +1173,7 @@ extern "C" fn rust_main() {
         }
         let frame_deadline_us = next_frame_at_us;
         let work_completed_us = unsafe { deskkin_uptime_us() };
+        unsafe { deskkin_renderer_progress(RendererProgress::Pacing as u8) };
         while unsafe { deskkin_uptime_us() } < frame_deadline_us {
             if let Err(fault) = framebuffer.publish_completions() {
                 unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };

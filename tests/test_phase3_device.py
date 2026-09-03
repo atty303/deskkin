@@ -75,7 +75,7 @@ class Phase3DeviceTests(unittest.TestCase):
         def status(*_args, **_kwargs):
             nonlocal generation
             generation += 3
-            response = bytearray(160)
+            response = bytearray(device.STATUS_RESPONSE_SIZE)
             response[0] = 1
             response[27] = 1
             response[28:32] = generation.to_bytes(4, "big")
@@ -137,7 +137,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertFalse(run_control.call_args_list[2].kwargs["recover_status_transport"])
 
     def test_world_status_rejects_allocation_failure(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         status[0] = 1
         status[27] = 1
         status[28:32] = (3).to_bytes(4, "big")
@@ -163,7 +163,7 @@ class Phase3DeviceTests(unittest.TestCase):
         def status(*_args, **_kwargs):
             nonlocal generation
             generation += 1
-            response = bytearray(160)
+            response = bytearray(device.STATUS_RESPONSE_SIZE)
             response[0] = 1
             response[27] = 1
             response[28:32] = generation.to_bytes(4, "big")
@@ -203,7 +203,7 @@ class Phase3DeviceTests(unittest.TestCase):
 
         def status(*_args, **_kwargs):
             nonlocal generation
-            response = bytearray(160)
+            response = bytearray(device.STATUS_RESPONSE_SIZE)
             response[0] = 1
             if clock.now < device.WORLD_BENCHMARK_DURATION_SECONDS / 2:
                 generation += 5
@@ -236,7 +236,7 @@ class Phase3DeviceTests(unittest.TestCase):
         def status(*_args, **_kwargs):
             nonlocal generation
             generation += 1
-            response = bytearray(160)
+            response = bytearray(device.STATUS_RESPONSE_SIZE)
             response[0] = 1
             response[27] = 1
             response[28:32] = generation.to_bytes(4, "big")
@@ -485,6 +485,10 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("const uint16_t nvs_failure = deskkin_nvs_last_failure();", supervisor)
         self.assertIn("response[65] = (uint8_t)(nvs_failure >> 8);", supervisor)
         self.assertIn("response[66] = (uint8_t)nvs_failure;", supervisor)
+        self.assertIn("#define STATUS_RESPONSE_SIZE 168", supervisor)
+        self.assertIn("observe_renderer_stale(&renderer_stale_reported);", supervisor)
+        self.assertIn("&AMP_SHARED->renderer_progress), &response[160]", supervisor)
+        self.assertIn("&AMP_SHARED->display_progress), &response[164]", supervisor)
 
     def test_amp_renderer_swaps_full_frames_without_reuse_overlap(self):
         config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(encoding="utf-8")
@@ -517,6 +521,10 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
         self.assertIn("renderer_entry, NULL, NULL, NULL, 0, 0, K_FOREVER", adapter)
         self.assertIn(
+            "k_thread_time_slice_set(display_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL)",
+            adapter,
+        )
+        self.assertIn(
             "k_thread_time_slice_set(renderer_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL)",
             adapter,
         )
@@ -527,15 +535,29 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("display_write(display, 0, 0, &descriptor, pixels)", adapter)
         self.assertIn("FULL_FRAME_DMA_BATCHES", adapter)
         self.assertIn("atomic_set(&pixel_dma_batches, FULL_FRAME_DMA_BATCHES)", adapter)
+        self.assertIn("deskkin_renderer_progress(RendererProgress::Buffer as u8)", renderer)
+        self.assertIn("display_progress(DESKKIN_DISPLAY_PROGRESS_TRANSFER)", adapter)
+        self.assertIn("&AMP_SHARED->renderer_progress", adapter)
+        self.assertIn("&AMP_SHARED->display_progress", adapter)
         spi_patch = (ROOT / "patches/zephyr-core-s3/0001-route-esp32-spi-pixel-payloads-through-dma.patch").read_text(
             encoding="utf-8"
         )
         self.assertIn("while (!spi_hal_usr_is_done(hal))", spi_patch)
-        self.assertIn("+\t\t\tk_yield();", spi_patch)
+        self.assertNotIn("k_sleep(K_TICKS(1))", spi_patch)
         self.assertIn("SPI_DMA_MAX_BUFFER_SIZE (4092 * 8)", spi_patch)
         self.assertIn("SPI_TRANSFER_TIMEOUT_MS 100", spi_patch)
         self.assertNotIn("esp_ptr_dma_ext_capable", spi_patch)
-        self.assertIn("e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871", bootstrap)
+        gdma_patch = (
+            ROOT
+            / "patches/zephyr-core-s3/0012-disable-unused-gdma-completion-interrupts.patch"
+        ).read_text(encoding="utf-8")
+        self.assertIn("dma_channel->cb != NULL", gdma_patch)
+        self.assertIn('" M drivers/dma/dma_esp32_gdma.c"', bootstrap)
+        self.assertIn("69df8e02eee5caf343859f0bfad651ac1f3d0605c5b8c735bb1985cbc543bd6d", bootstrap)
+        sleep_poll_migration = bootstrap.split(
+            "ade32e58926d12ea981d512c6d4adb92812f55fda603d98a174fd146b6e4adf8", 1
+        )[1].split(";;", 1)[0]
+        self.assertIn("drivers/spi/spi_esp32_spim.c", sleep_poll_migration)
         legacy_migration = bootstrap.split(
             "2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab", 1
         )[1].split(";;", 1)[0]
@@ -742,7 +764,7 @@ int main(void) {
 
     def test_control_response_accepts_extended_amp_status(self):
         frame = device.control_frame("status", 0)
-        response = bytearray(92)
+        response = bytearray(device.STATUS_RESPONSE_SIZE)
         response[0] = 1
         response[2:18] = frame[4:20]
         stream = bytearray(len(response).to_bytes(2, "big"))
@@ -798,7 +820,7 @@ int main(void) {
             self.assertEqual(write.call_count, 1)
 
     def test_monitor_status_does_not_wait_for_transport_recovery(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         attributes = [0, 0, 0, 0, 0, 0, [0] * 32]
         with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
             device.os, "open", return_value=7
@@ -813,7 +835,7 @@ int main(void) {
         sleep.assert_called_once_with(0.0)
 
     def test_mutation_stops_at_closed_boot_failure(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         status[0] = 1
         status[69] = 2
         with mock.patch.object(device, "discover_device", return_value=Path("/dev/fake")), mock.patch.object(
@@ -833,12 +855,12 @@ int main(void) {
         self.assertEqual(exchange.call_count, 1)
 
     def test_unknown_boot_failure_remains_closed(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         status[69] = 255
         self.assertEqual(device.status_boot_error(bytes(status)), "boot_unknown")
 
     def test_status_waits_until_boot_is_complete(self):
-        starting = bytearray(160)
+        starting = bytearray(device.STATUS_RESPONSE_SIZE)
         starting[68] = 8
         complete = bytearray(starting)
         complete[68] = device.BOOT_COMPLETE_STAGE
@@ -851,20 +873,20 @@ int main(void) {
         run_control.assert_called_once_with("status", "/dev/fake", recover_status_transport=False)
 
     def test_status_boot_wait_is_bounded(self):
-        starting = bytearray(160)
+        starting = bytearray(device.STATUS_RESPONSE_SIZE)
         starting[68] = 8
         with mock.patch.object(device.time, "monotonic", side_effect=[0.0, 15.0]):
             with self.assertRaisesRegex(device.DeviceError, "boot_not_ready"):
                 device.await_boot_complete(bytes(starting), "/dev/fake")
 
     def test_status_rejects_unknown_completed_boot_stage(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         status[68] = 255
         with self.assertRaisesRegex(device.DeviceError, "boot_unknown"):
             device.await_boot_complete(bytes(status), "/dev/fake")
 
     def test_boot_failure_is_not_persisted_as_a_complete_diagnostic(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         status[69] = 2
         with mock.patch.object(device.sys, "argv", ["phase3_device.py", "status"]), mock.patch.object(
             device, "run_control", return_value=bytes(status)
@@ -888,7 +910,7 @@ int main(void) {
         publish_diagnostic.assert_not_called()
 
     def test_successful_status_publishes_diagnostic(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         status[0] = 1
         status[68] = 9
         with mock.patch.object(device.sys, "argv", ["phase3_device.py", "status"]), mock.patch.object(
@@ -902,7 +924,7 @@ int main(void) {
         publish_diagnostic.assert_called_once()
 
     def test_status_report_is_bounded_and_contains_no_payload(self):
-        status = bytearray(160)
+        status = bytearray(device.STATUS_RESPONSE_SIZE)
         status[0] = 1
         status[26] = 4
         status[27] = 1
@@ -913,6 +935,8 @@ int main(void) {
         status[100:104] = (7).to_bytes(4, "big")
         status[104:108] = (1).to_bytes(4, "big")
         status[108:112] = (2).to_bytes(4, "big")
+        status[160:164] = ((11 << 8) | 6).to_bytes(4, "big")
+        status[164:168] = ((9 << 8) | 3).to_bytes(4, "big")
         with mock.patch.object(device.sys, "stderr") as stderr:
             device.report_status(bytes(status))
         reported = json.loads("".join(call.args[0] for call in stderr.write.call_args_list))
@@ -947,6 +971,10 @@ int main(void) {
                 "input_generation": 7,
                 "stale_snapshots": 1,
                 "touch_drops": 2,
+                "renderer_progress_sequence": 11,
+                "renderer_progress_stage": 6,
+                "display_progress_sequence": 9,
+                "display_progress_stage": 3,
                 "boot_stage": 7,
                 "boot_error": None,
             },

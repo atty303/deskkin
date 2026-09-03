@@ -112,6 +112,11 @@ control, power/reset, and status supervision. APPCPU exclusively owns Slint
 texture generation, the custom world renderer, SPI2, and display transfer.
 SPI2 pixel payloads use APPCPU-owned GDMA channel pair 0. The display thread
 submits a completed full-screen RGB565 framebuffer directly from internal SRAM.
+Because SPI polls completion without a DMA callback, callback-free peripheral
+GDMA channels keep completion interrupts disabled; callback-backed and
+memory-to-memory DMA behavior is unchanged. Display and renderer workers each
+retain a one-tick slice at the 1 kHz system tick so either worker can run while
+the other owns its current buffer.
 PROCPU owns the low 4 MiB Quad-PSRAM region for service allocation,
 Wi-Fi/network state, input/message queues, and non-cache-critical stacks. It
 publishes the explicitly reserved high 4 MiB as the APPCPU caller-owned heap

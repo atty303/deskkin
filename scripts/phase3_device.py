@@ -44,7 +44,7 @@ WORLD_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS = 1.0
 WORLD_BENCHMARK_MIN_COVERAGE_MILLI = 800
 WORLD_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
 WORLD_BENCHMARK_MIN_STATUS_RESPONSES = 20
-STATUS_RESPONSE_SIZE = 160
+STATUS_RESPONSE_SIZE = 168
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -325,7 +325,7 @@ def read_control_response(descriptor: int, frame: bytearray, timeout: float) -> 
         candidate_start: int | None = None
         for start in range(max(0, len(buffered) - 1)):
             length = int.from_bytes(buffered[start : start + 2], "big")
-            if not 18 <= length <= 160 or start + 3 > len(buffered):
+            if not 18 <= length <= STATUS_RESPONSE_SIZE or start + 3 > len(buffered):
                 continue
             if buffered[start + 2] != SCHEMA:
                 continue
@@ -453,6 +453,11 @@ def watch_diagnostics(device_arg: str | None, duration_seconds: float, auto_pair
                 event["x"] = x
                 event["y"] = y
                 event["pressed"] = bool(payload[3] & 1)
+            elif payload[2] == 2 and payload[3] == 0x80:
+                event["renderer_progress_stage"] = x
+                event["display_progress_stage"] = y
+                event["renderer_progress_sequence"] = event["value"] >> 16
+                event["display_progress_sequence"] = event["value"] & 0xFFFF
             elif payload[2] == 6 and payload[3] & 0x80:
                 event["stage"] = payload[3] & 0x7F
                 event["result_code"] = int.from_bytes(payload[16:20], "big", signed=True)
@@ -531,6 +536,10 @@ def report_status(status: bytes) -> None:
                 "input_generation": decoded["input_generation"],
                 "stale_snapshots": decoded["stale_snapshots"],
                 "touch_drops": decoded["touch_drops"],
+                "renderer_progress_sequence": decoded["renderer_progress"] >> 8,
+                "renderer_progress_stage": decoded["renderer_progress"] & 0xFF,
+                "display_progress_sequence": decoded["display_progress"] >> 8,
+                "display_progress_stage": decoded["display_progress"] & 0xFF,
                 "boot_stage": decoded["procpu_boot_stage"],
                 "boot_error": status_boot_error(status),
             },
@@ -764,6 +773,8 @@ def decode_world_status(status: bytes) -> dict[str, int]:
             "texture_max_us": unsigned(148, 152) if len(status) >= 160 else 0,
             "world_raster_us": unsigned(152, 156) if len(status) >= 160 else 0,
             "world_raster_max_us": unsigned(156, 160) if len(status) >= 160 else 0,
+            "renderer_progress": unsigned(160, 164) if len(status) >= 168 else 0,
+            "display_progress": unsigned(164, 168) if len(status) >= 168 else 0,
         }
     )
     return decoded

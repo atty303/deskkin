@@ -136,6 +136,8 @@ static uint16_t *framebuffer;
 static struct sys_heap renderer_heap;
 static bool renderer_heap_ready;
 static uint32_t generation;
+static uint32_t renderer_progress_sequence;
+static uint32_t display_progress_sequence;
 static atomic_t completed_frames;
 static atomic_t allocation_failures;
 static atomic_t transfer_failures;
@@ -177,6 +179,26 @@ static atomic_t world_raster_max_us;
 static atomic_t deadline_misses;
 
 extern void rust_main(void);
+
+static void progress_store(volatile uint32_t *target, uint32_t *sequence, uint8_t stage)
+{
+	*sequence = (*sequence + 1U) & 0x00ffffffU;
+	if (*sequence == 0U) {
+		*sequence = 1U;
+	}
+	deskkin_shared_store(target, (*sequence << 8U) | stage);
+}
+
+void deskkin_renderer_progress(uint8_t stage)
+{
+	progress_store(&AMP_SHARED->renderer_progress, &renderer_progress_sequence, stage);
+}
+
+static void display_progress(uint8_t stage)
+{
+	progress_store(&AMP_SHARED->display_progress, &display_progress_sequence, stage);
+}
+
 void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 			      uint32_t transfer_us);
 uint64_t deskkin_uptime_us(void);
@@ -563,7 +585,9 @@ static void display_entry(void *first, void *second, void *third)
 	bool have_previous_buffer = false;
 	for (;;) {
 		struct display_request request;
+		display_progress(DESKKIN_DISPLAY_PROGRESS_WAITING);
 		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
+		display_progress(DESKKIN_DISPLAY_PROGRESS_REQUEST);
 		const uint64_t started = deskkin_uptime_us();
 		const uint16_t *pixels =
 			framebuffer + (size_t)request.buffer_index * FRAME_PIXELS;
@@ -588,8 +612,10 @@ static void display_entry(void *first, void *second, void *third)
 				.width = DISPLAY_WIDTH,
 				.height = DISPLAY_HEIGHT,
 			};
+			display_progress(DESKKIN_DISPLAY_PROGRESS_TRANSFER);
 			result = display_write(display, 0, 0, &descriptor, pixels);
 		}
+		display_progress(DESKKIN_DISPLAY_PROGRESS_COMPLETION);
 		const uint64_t elapsed = deskkin_uptime_us() - started;
 		if (request.dirty_rect_count != 0U && result == 0) {
 			uint32_t difference = 0U;
@@ -699,10 +725,11 @@ int main(void)
 	}
 	deskkin_shared_store(&AMP_SHARED->display_spi_hz, display_spi_frequency_hz());
 	deskkin_renderer_observe(RENDERER_STARTING_THREADS, RENDERER_FAULT_NONE, 0, 0);
-	k_thread_create(&display_thread, display_stack, 4096,
-			display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
+	k_tid_t display_tid = k_thread_create(&display_thread, display_stack, 4096,
+					    display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
 	k_tid_t renderer_tid = k_thread_create(&renderer_thread, renderer_stack, 12288,
 					     renderer_entry, NULL, NULL, NULL, 0, 0, K_FOREVER);
+	k_thread_time_slice_set(display_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL);
 	k_thread_time_slice_set(renderer_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL);
 	k_thread_start(renderer_tid);
 	return 0;

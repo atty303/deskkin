@@ -131,6 +131,7 @@ expected_rust_status = [
     " M zephyr-build/src/lib.rs",
 ]
 expected_zephyr_status = [
+    " M drivers/dma/dma_esp32_gdma.c",
     " M drivers/spi/spi_esp32_spim.c",
     " M drivers/wifi/esp32/src/esp_wifi_drv.c",
     " M soc/espressif/common/esp_psram.c",
@@ -186,7 +187,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "69df8e02eee5caf343859f0bfad651ac1f3d0605c5b8c735bb1985cbc543bd6d":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 espressif_patch_diff = subprocess.run(
@@ -302,10 +303,15 @@ done
 module="$state_dir/west/zephyr"
 zephyr_patch_digest=$(git -C "$module" diff --binary HEAD | sha256sum | cut -d ' ' -f 1)
 case "$zephyr_patch_digest" in
-  e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871)
+  69df8e02eee5caf343859f0bfad651ac1f3d0605c5b8c735bb1985cbc543bd6d)
     zephyr_patches_current=1
     ;;
-  2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab|84b30f982fb801c945c84f9bd0aec4f91879268cf887924956dbb657d2fa3aec)
+  ade32e58926d12ea981d512c6d4adb92812f55fda603d98a174fd146b6e4adf8)
+    relative=drivers/spi/spi_esp32_spim.c
+    git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
+    mv "$module/$relative.migrating" "$module/$relative"
+    ;;
+  e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871|2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab|84b30f982fb801c945c84f9bd0aec4f91879268cf887924956dbb657d2fa3aec)
     for relative in drivers/spi/spi_esp32_spim.c drivers/display/display_ili9xxx.c drivers/mipi_dbi/mipi_dbi_esp32.c include/zephyr/drivers/mipi_dbi.h; do
       git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
       mv "$module/$relative.migrating" "$module/$relative"
