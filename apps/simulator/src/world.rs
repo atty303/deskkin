@@ -1,8 +1,9 @@
 use deskkin_application::{ApplicationViews, availability, synthetic_notice};
 use deskkin_presentation::{
-    Billboard, BillboardId, CameraPose, CylindricalPose, PixelFormat, ProjectedBillboard,
-    RateLimitedObservedYaw, SourceSize, Texture, TextureFilter, TextureId, TouchYawAdapter,
-    UnwrappedAngle, WorldUnit, project_billboard, raster_billboard, sort_far_to_near,
+    BillboardId, CameraPose, PixelFormat, ProjectedBillboard, RateLimitedObservedYaw, SourceSize,
+    Texture, TextureFilter, TextureId, TouchYawAdapter, UnwrappedAngle, WorldUnit,
+    demo_world::{self, DemoMotion},
+    project_billboard, raster_billboard, sort_far_to_near,
 };
 use slint::{ComponentHandle, Image, Rgb8Pixel, SharedPixelBuffer};
 
@@ -10,7 +11,7 @@ use crate::StatusWindow;
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
-const BACKGROUND: u16 = 0x10c3;
+const BACKGROUND: u16 = demo_world::BACKGROUND;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct WorldMetrics {
@@ -36,15 +37,13 @@ struct OwnedTexture {
 pub(crate) struct WorldScene {
     touch: TouchYawAdapter,
     observed: RateLimitedObservedYaw,
-    character_azimuth: UnwrappedAngle,
-    object_radius: WorldUnit,
-    object_outward: bool,
+    motion: DemoMotion,
     availability_cache: [Option<OwnedTexture>; 3],
     notice_cache: Option<OwnedTexture>,
     character: Vec<OwnedTexture>,
     character_frame: usize,
     character_frame_elapsed_ms: u32,
-    object: OwnedTexture,
+    decorations: [OwnedTexture; 4],
     framebuffer: Vec<u16>,
     metrics: WorldMetrics,
 }
@@ -54,15 +53,13 @@ impl WorldScene {
         Self {
             touch: TouchYawAdapter::new(UnwrappedAngle::ZERO),
             observed: RateLimitedObservedYaw::new(UnwrappedAngle::ZERO),
-            character_azimuth: UnwrappedAngle::ZERO,
-            object_radius: WorldUnit::from_int(1),
-            object_outward: true,
+            motion: DemoMotion::default(),
             availability_cache: [None, None, None],
             notice_cache: None,
             character: character_texture(),
             character_frame: 0,
             character_frame_elapsed_ms: 0,
-            object: object_texture(),
+            decorations: decoration_textures(),
             framebuffer: vec![BACKGROUND; WIDTH * HEIGHT],
             metrics: WorldMetrics::default(),
         }
@@ -87,85 +84,23 @@ impl WorldScene {
         self.ensure_textures(ui, views)?;
         self.framebuffer.fill(BACKGROUND);
 
-        let mut entities = [None; 4];
-        entities[0] = Some((
-            Billboard {
-                id: BillboardId(1),
-                pose: CylindricalPose {
-                    radius: WorldUnit::ratio(22, 10),
-                    azimuth: self.character_azimuth,
-                    height: WorldUnit::ZERO,
-                },
-                world_height: WorldUnit::ratio(14, 10),
-                texture_id: TextureId(1),
-                filter: TextureFilter::Nearest,
-            },
-            self.character[self.character_frame].size,
-        ));
-        if let Some(surface) = views.availability {
-            entities[1] = Some((
-                Billboard {
-                    id: BillboardId(2),
-                    pose: CylindricalPose {
-                        radius: WorldUnit::ratio(12, 10),
-                        azimuth: UnwrappedAngle::from_degrees(-15),
-                        height: WorldUnit::ZERO,
-                    },
-                    world_height: WorldUnit::ratio(8, 10),
-                    texture_id: TextureId(
-                        10 + u16::try_from(availability_index(surface)).unwrap_or(0),
-                    ),
-                    filter: TextureFilter::Bilinear,
-                },
-                SourceSize {
-                    width: 272,
-                    height: 124,
-                },
-            ));
-        }
-        if views.synthetic_notice.is_some() {
-            entities[2] = Some((
-                Billboard {
-                    id: BillboardId(3),
-                    pose: CylindricalPose {
-                        radius: WorldUnit::ratio(18, 10),
-                        azimuth: UnwrappedAngle::from_degrees(18),
-                        height: WorldUnit::ratio(-7, 10),
-                    },
-                    world_height: WorldUnit::ratio(8, 10),
-                    texture_id: TextureId(20),
-                    filter: TextureFilter::Bilinear,
-                },
-                SourceSize {
-                    width: 272,
-                    height: 124,
-                },
-            ));
-        }
-        entities[3] = Some((
-            Billboard {
-                id: BillboardId(4),
-                pose: CylindricalPose {
-                    radius: self.object_radius,
-                    azimuth: UnwrappedAngle::from_degrees(30),
-                    height: WorldUnit::ratio(8, 10),
-                },
-                world_height: WorldUnit::ratio(5, 10),
-                texture_id: TextureId(2),
-                filter: TextureFilter::Nearest,
-            },
-            self.object.size,
-        ));
+        let entities = demo_world::entities(
+            self.motion,
+            views.availability.map(|surface| {
+                TextureId(10 + u16::try_from(availability_index(surface)).unwrap_or(0))
+            }),
+            views.synthetic_notice.is_some(),
+        );
 
         let camera = CameraPose {
             radius: WorldUnit::from_int(4),
             observed_azimuth: self.observed.observed(),
             height: WorldUnit::ZERO,
         };
-        let mut projected = [empty_projected(); 4];
+        let mut projected = [empty_projected(); demo_world::CAPACITY];
         let mut count = 0;
         self.metrics.culled = 0;
-        for (billboard, source) in entities.into_iter().flatten() {
+        for (billboard, source) in entities {
             match project_billboard(billboard, source, camera) {
                 Ok(value) => {
                     projected[count] = value;
@@ -222,34 +157,12 @@ impl WorldScene {
 
     fn advance(&mut self, elapsed_ms: u32) {
         self.observed.advance(self.touch.target(), elapsed_ms);
-        let character_step = i64::from(elapsed_ms) * 12 * 65_536 / 360_000;
-        self.character_azimuth = self
-            .character_azimuth
-            .wrapping_add(UnwrappedAngle::from_units(character_step));
+        self.motion.advance(elapsed_ms);
         self.character_frame_elapsed_ms =
             self.character_frame_elapsed_ms.saturating_add(elapsed_ms);
         while self.character_frame_elapsed_ms >= 50 {
             self.character_frame_elapsed_ms -= 50;
             self.character_frame = (self.character_frame + 1) % self.character.len();
-        }
-        let elapsed_ms = i32::try_from(elapsed_ms).unwrap_or(i32::MAX);
-        let radial_step = WorldUnit::ratio(elapsed_ms, 4_000).bits();
-        let signed_step = if self.object_outward {
-            radial_step
-        } else {
-            -radial_step
-        };
-        let next = self.object_radius.bits().saturating_add(signed_step);
-        let minimum = WorldUnit::from_int(1).bits();
-        let maximum = WorldUnit::ratio(25, 10).bits();
-        if next >= maximum {
-            self.object_radius = WorldUnit::from_bits(maximum);
-            self.object_outward = false;
-        } else if next <= minimum {
-            self.object_radius = WorldUnit::from_bits(minimum);
-            self.object_outward = true;
-        } else {
-            self.object_radius = WorldUnit::from_bits(next);
         }
     }
 
@@ -288,7 +201,7 @@ impl WorldScene {
     fn texture(&self, id: TextureId, views: ApplicationViews) -> Result<&OwnedTexture, String> {
         match id.0 {
             1 => Ok(&self.character[self.character_frame]),
-            2 => Ok(&self.object),
+            30..=33 => Ok(&self.decorations[usize::from(id.0 - 30)]),
             10..=12 => self.availability_cache[(id.0 - 10) as usize]
                 .as_ref()
                 .ok_or_else(|| "availability texture cache missing".into()),
@@ -371,17 +284,26 @@ fn character_texture() -> Vec<OwnedTexture> {
         .collect()
 }
 
-fn object_texture() -> OwnedTexture {
-    generated_alpha_texture(
-        SourceSize {
-            width: 32,
-            height: 32,
-        },
-        |x, y| {
-            let edge = x < 3 || y < 3 || x > 28 || y > 28;
-            (if edge { 0x7d5f } else { 0x39ec }, 255)
-        },
-    )
+fn decoration_textures() -> [OwnedTexture; 4] {
+    core::array::from_fn(|index| {
+        if index == 3 {
+            return generated_alpha_texture(
+                SourceSize {
+                    width: 9,
+                    height: 9,
+                },
+                |x, y| demo_world::light_pixel(i32::from(x), i32::from(y)),
+            );
+        }
+        let rgba = demo_world::ARTWORK[index];
+        generated_alpha_texture(demo_world::SPRITE_SIZE, |x, y| {
+            let offset = (usize::from(y) * 96 + usize::from(x)) * 4;
+            (
+                rgb565(rgba[offset], rgba[offset + 1], rgba[offset + 2]),
+                rgba[offset + 3],
+            )
+        })
+    })
 }
 
 fn generated_alpha_texture(
@@ -408,9 +330,9 @@ fn generated_alpha_texture(
 fn rgb565_image(framebuffer: &[u16]) -> Image {
     let mut output = SharedPixelBuffer::<Rgb8Pixel>::new(320, 240);
     for (destination, source) in output.make_mut_slice().iter_mut().zip(framebuffer) {
-        destination.r = (((source >> 11) & 0x1f) as u8) * 255 / 31;
-        destination.g = (((source >> 5) & 0x3f) as u8) * 255 / 63;
-        destination.b = ((source & 0x1f) as u8) * 255 / 31;
+        destination.r = u8::try_from(((source >> 11) & 0x1f) * 255 / 31).unwrap_or(255);
+        destination.g = u8::try_from(((source >> 5) & 0x3f) * 255 / 63).unwrap_or(255);
+        destination.b = u8::try_from((source & 0x1f) * 255 / 31).unwrap_or(255);
     }
     Image::from_rgb8(output)
 }
@@ -439,17 +361,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rgb565_expansion_preserves_every_color() {
+        let colors: Vec<u16> = (0..=u16::MAX).collect();
+        let image = rgb565_image(&colors).to_rgba8().unwrap();
+        for (pixel, &color) in image.as_slice().iter().zip(&colors) {
+            assert_eq!(rgb565(pixel.r, pixel.g, pixel.b), color);
+        }
+    }
+
+    #[test]
+    fn headless_world_renders_views_and_reuses_textures_after_drag() {
+        use slint::platform::{
+            Platform, WindowAdapter,
+            software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+        };
+        use std::rc::Rc;
+        struct TestPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for TestPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(window.clone()))).unwrap();
+        let ui = StatusWindow::new().unwrap();
+        window.set_size(slint::PhysicalSize::new(320, 240));
+        ui.show().unwrap();
+        ui.set_notice_text("Deskkin notice".into());
+        let mut scene = WorldScene::new();
+        let mut views = ApplicationViews {
+            availability: Some(availability::Surface::Unknown),
+            synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
+        };
+        scene.tick(&ui, views, 0).unwrap();
+        assert_eq!(scene.metrics.cache_misses, 2);
+        assert_eq!(
+            usize::from(scene.metrics.visible + scene.metrics.culled),
+            demo_world::CAPACITY
+        );
+        assert!(scene.metrics.nearest_samples > 0 && scene.metrics.bilinear_samples > 0);
+        assert!(ui.get_world_mode() && !ui.get_capture_mode());
+        let initial = scene.framebuffer.clone();
+        scene.touch_sample(0, true);
+        scene.touch_sample(320, true);
+        scene.tick(&ui, views, 500).unwrap();
+        assert_ne!(initial, scene.framebuffer);
+        assert_eq!(scene.metrics.cache_misses, 2);
+        assert_eq!(scene.metrics.cache_hits, 2);
+        views.synthetic_notice = None;
+        scene.tick(&ui, views, 500).unwrap();
+        assert_eq!(
+            usize::from(scene.metrics.visible + scene.metrics.culled),
+            demo_world::CAPACITY - 1
+        );
+        assert!(scene.metrics.bilinear_samples > 0);
+        assert_eq!(scene.metrics.cache_misses, 2);
+    }
+
+    #[test]
     fn autonomous_motion_and_drag_are_continuous() {
         let mut scene = WorldScene::new();
-        let initial_character = scene.character_azimuth;
+        let initial_character = scene.motion.character_azimuth();
         scene.touch_sample(0, true);
         scene.touch_sample(320, true);
         scene.advance(1_000);
-        assert!(scene.character_azimuth > initial_character);
+        assert!(scene.motion.character_azimuth() > initial_character);
         assert_eq!(
             scene.observed.observed(),
             UnwrappedAngle::from_units(65_536 / 2)
         );
-        assert!(scene.object_radius > WorldUnit::from_int(1));
+        assert!(scene.motion.object_radius() > WorldUnit::from_int(1));
     }
 }

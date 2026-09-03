@@ -97,6 +97,10 @@ run = "cargo run --locked --bin deskkin-desktop"
 description = "Run a deterministic headless simulator scenario"
 run = "cargo run --locked --quiet --bin deskkin-scenario --"
 
+[tasks."simulator:world-preview"]
+description = "Export a fixture night-garden frame to a new PPM file without a display or identity"
+run = "cargo run --locked --quiet -p deskkin-simulator --example world_preview --"
+
 [tasks."simulator:diagnostics"]
 description = "Administer bounded local simulator diagnostic runs"
 run = "cargo run --locked --quiet --bin deskkin-diagnostics --"

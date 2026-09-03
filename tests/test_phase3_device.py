@@ -120,7 +120,7 @@ class Phase3DeviceTests(unittest.TestCase):
             response[100:104] = generation.to_bytes(4, "big")
             response[112:114] = (20).to_bytes(2, "big")
             response[114:116] = (6).to_bytes(2, "big")
-            response[118] = 3
+            response[118] = device.WORLD_DEMO_ENTITY_COUNT - 1
             response[119] = 0 if benchmark_complete else 1
             response[120:124] = (2_000).to_bytes(4, "big")
             response[124:128] = (4_000).to_bytes(4, "big")
@@ -151,7 +151,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertEqual(summary["copy_last_us"], 3_000)
         self.assertEqual(summary["wire_last_us"], 39_000)
         self.assertEqual(summary["requested_updates"], 1_200)
-        self.assertEqual(summary["visible_billboards"], 3)
+        self.assertEqual(summary["visible_billboards"], device.WORLD_DEMO_ENTITY_COUNT - 1)
         self.assertEqual(summary["culled_billboards"], 1)
         self.assertEqual(summary["pixel_dma_batches"], 10)
         self.assertEqual(run_control.call_args_list[0].args[0], "world-benchmark-start")
@@ -205,7 +205,7 @@ class Phase3DeviceTests(unittest.TestCase):
             response[96:100] = generation.to_bytes(4, "big")
             response[112:114] = (20).to_bytes(2, "big")
             response[114:116] = (6).to_bytes(2, "big")
-            response[118] = 4
+            response[118] = device.WORLD_DEMO_ENTITY_COUNT
             return bytes(response)
 
         with mock.patch.object(device, "time", clock), mock.patch.object(

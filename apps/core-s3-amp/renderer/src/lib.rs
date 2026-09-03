@@ -8,10 +8,11 @@ extern crate zephyr;
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
 use deskkin_presentation::{
-    Billboard, BillboardId, CameraPose, CylindricalPose, PetAnimationState, PetAnimator,
-    PixelFormat, ProjectedBillboard, ScreenRect, SourceSize, Texture, TextureFilter, TextureId,
-    TextureRegion, TouchYawAdapter, UnwrappedAngle, WorldUnit, project_billboard,
-    raster_billboard_be, raster_billboard_region_be, sort_far_to_near,
+    BillboardId, CameraPose, PetAnimationState, PetAnimator, PixelFormat, ProjectedBillboard,
+    ScreenRect, SourceSize, Texture, TextureFilter, TextureId, TextureRegion, TouchYawAdapter,
+    UnwrappedAngle, WorldUnit,
+    demo_world::{self, DemoMotion},
+    project_billboard, raster_billboard_be, raster_billboard_region_be, sort_far_to_near,
 };
 use qoi::{Channels, Decoder};
 use slint::platform::software_renderer::{
@@ -514,11 +515,16 @@ fn capture_billboard(
     })
 }
 
+struct DecorationTexture {
+    size: SourceSize,
+    pixels: Vec<u16>,
+    alpha: Vec<u8>,
+}
+
 struct WorldTextures {
     availability: [Option<BillboardTexture>; 3],
     notice: Option<BillboardTexture>,
-    object_pixels: Vec<u16>,
-    object_alpha: Vec<u8>,
+    decorations: [DecorationTexture; 4],
 }
 
 struct WorldTelemetry {
@@ -533,8 +539,43 @@ fn new_world_textures() -> WorldTextures {
     WorldTextures {
         availability: [None, None, None],
         notice: None,
-        object_pixels: vec![0x39ec; 32 * 32],
-        object_alpha: vec![255; 32 * 32],
+        decorations: core::array::from_fn(|index| {
+            let size = if index == 3 {
+                SourceSize {
+                    width: 9,
+                    height: 9,
+                }
+            } else {
+                demo_world::SPRITE_SIZE
+            };
+            let length = usize::from(size.width) * usize::from(size.height);
+            let mut pixels = Vec::with_capacity(length);
+            let mut alpha = Vec::with_capacity(length);
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    let (color, opacity) = if index == 3 {
+                        demo_world::light_pixel(i32::from(x), i32::from(y))
+                    } else {
+                        let rgba = demo_world::ARTWORK[index];
+                        let offset =
+                            (usize::from(y) * usize::from(size.width) + usize::from(x)) * 4;
+                        (
+                            (u16::from(rgba[offset] >> 3) << 11)
+                                | (u16::from(rgba[offset + 1] >> 2) << 5)
+                                | u16::from(rgba[offset + 2] >> 3),
+                            rgba[offset + 3],
+                        )
+                    };
+                    pixels.push(color);
+                    alpha.push(opacity);
+                }
+            }
+            DecorationTexture {
+                size,
+                pixels,
+                alpha,
+            }
+        }),
     }
 }
 
@@ -591,51 +632,23 @@ fn ensure_world_textures(
 }
 
 struct WorldMotion {
-    character_azimuth: UnwrappedAngle,
-    object_radius: WorldUnit,
-    object_outward: bool,
+    scene: DemoMotion,
     updated_at_us: u64,
 }
 
 impl WorldMotion {
     fn new(now_us: u64) -> Self {
         Self {
-            character_azimuth: UnwrappedAngle::ZERO,
-            object_radius: WorldUnit::from_int(1),
-            object_outward: true,
+            scene: DemoMotion::default(),
             updated_at_us: now_us,
         }
     }
 
     fn advance(&mut self, now_us: u64) {
         let elapsed_ms = now_us.saturating_sub(self.updated_at_us) / 1_000;
-        self.updated_at_us = now_us;
-        let elapsed_ms = elapsed_ms.min(u64::from(u32::MAX)) as u32;
-        self.character_azimuth = self
-            .character_azimuth
-            .wrapping_add(UnwrappedAngle::from_units(
-                i64::from(elapsed_ms) * 12 * 65_536 / 360_000,
-            ));
-        let radial_step = WorldUnit::ratio(elapsed_ms as i32, 4_000).bits();
-        let next = self
-            .object_radius
-            .bits()
-            .saturating_add(if self.object_outward {
-                radial_step
-            } else {
-                -radial_step
-            });
-        let minimum = WorldUnit::from_int(1).bits();
-        let maximum = WorldUnit::ratio(25, 10).bits();
-        if next >= maximum {
-            self.object_radius = WorldUnit::from_bits(maximum);
-            self.object_outward = false;
-        } else if next <= minimum {
-            self.object_radius = WorldUnit::from_bits(minimum);
-            self.object_outward = true;
-        } else {
-            self.object_radius = WorldUnit::from_bits(next);
-        }
+        // Preserve sub-millisecond remainder rather than losing it every frame.
+        self.updated_at_us = self.updated_at_us.saturating_add(elapsed_ms * 1_000);
+        self.scene.advance((elapsed_ms % 120_000) as u32);
     }
 }
 
@@ -661,87 +674,24 @@ fn render_world(
     unsafe { deskkin_renderer_progress(RendererProgress::Raster as u8) };
     motion.advance(started);
     let pixels = framebuffer.words_mut(index);
-    pixels.fill(0x10c3_u16.to_be());
+    pixels.fill(demo_world::BACKGROUND.to_be());
     let camera = CameraPose {
         radius: WorldUnit::from_int(4),
         observed_azimuth: UnwrappedAngle::from_units(snapshot.observed_yaw),
         height: WorldUnit::ZERO,
     };
-    let billboards = [
-        Some((
-            Billboard {
-                id: BillboardId(1),
-                pose: CylindricalPose {
-                    radius: WorldUnit::ratio(22, 10),
-                    azimuth: motion.character_azimuth,
-                    height: WorldUnit::ZERO,
-                },
-                world_height: WorldUnit::ratio(14, 10),
-                texture_id: TextureId(1),
-                filter: TextureFilter::Nearest,
-            },
-            SourceSize {
-                width: 144,
-                height: 156,
-            },
+    let billboards = demo_world::entities(
+        motion.scene,
+        (snapshot.availability != 0).then_some(TextureId(
+            10 + u16::from(snapshot.availability.saturating_sub(1)),
         )),
-        (snapshot.availability != 0).then_some((
-            Billboard {
-                id: BillboardId(2),
-                pose: CylindricalPose {
-                    radius: WorldUnit::ratio(12, 10),
-                    azimuth: UnwrappedAngle::from_degrees(-15),
-                    height: WorldUnit::ZERO,
-                },
-                world_height: WorldUnit::ratio(8, 10),
-                texture_id: TextureId(10 + u16::from(snapshot.availability.saturating_sub(1))),
-                filter: TextureFilter::Bilinear,
-            },
-            SourceSize {
-                width: 272,
-                height: 124,
-            },
-        )),
-        (snapshot.notice != 0).then_some((
-            Billboard {
-                id: BillboardId(3),
-                pose: CylindricalPose {
-                    radius: WorldUnit::ratio(18, 10),
-                    azimuth: UnwrappedAngle::from_degrees(18),
-                    height: WorldUnit::ratio(-7, 10),
-                },
-                world_height: WorldUnit::ratio(8, 10),
-                texture_id: TextureId(20),
-                filter: TextureFilter::Bilinear,
-            },
-            SourceSize {
-                width: 272,
-                height: 124,
-            },
-        )),
-        Some((
-            Billboard {
-                id: BillboardId(4),
-                pose: CylindricalPose {
-                    radius: motion.object_radius,
-                    azimuth: UnwrappedAngle::from_degrees(30),
-                    height: WorldUnit::ratio(8, 10),
-                },
-                world_height: WorldUnit::ratio(5, 10),
-                texture_id: TextureId(2),
-                filter: TextureFilter::Nearest,
-            },
-            SourceSize {
-                width: 32,
-                height: 32,
-            },
-        )),
-    ];
+        snapshot.notice != 0,
+    );
     let projection_started = unsafe { deskkin_uptime_us() };
-    let mut projected = [empty_projected(); 4];
+    let mut projected = [empty_projected(); demo_world::CAPACITY];
     let mut count = 0;
     let mut candidates = 0_u8;
-    for (billboard, source) in billboards.into_iter().flatten() {
+    for (billboard, source) in billboards {
         candidates = candidates.saturating_add(1);
         if let Ok(value) = project_billboard(billboard, source, camera) {
             projected[count] = value;
@@ -779,21 +729,21 @@ fn render_world(
                 },
             )
             .map_err(|_| RendererFault::RenderSkipped)?,
-            2 => raster_billboard_be(
-                pixels,
-                WIDTH,
-                value,
-                Texture {
-                    size: SourceSize {
-                        width: 32,
-                        height: 32,
+            30..=33 => {
+                let texture = &textures.decorations[usize::from(value.source.0 - 30)];
+                raster_billboard_be(
+                    pixels,
+                    WIDTH,
+                    value,
+                    Texture {
+                        size: texture.size,
+                        pixels: &texture.pixels,
+                        alpha: &texture.alpha,
+                        format: PixelFormat::Rgb565A8,
                     },
-                    pixels: &textures.object_pixels,
-                    alpha: &textures.object_alpha,
-                    format: PixelFormat::Rgb565A8,
-                },
-            )
-            .map_err(|_| RendererFault::RenderSkipped)?,
+                )
+                .map_err(|_| RendererFault::RenderSkipped)?
+            }
             10..=12 => raster_billboard_be(
                 pixels,
                 WIDTH,

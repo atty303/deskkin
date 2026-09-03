@@ -87,12 +87,17 @@ In paired mode, Availability and CompositionCheck are rendered from a reusable
 movement never redraws those templates. A custom renderer clears to `#16191d`,
 projects and sorts billboards, and writes clipped scaled pixels directly into
 the final 320×240 RGB565 framebuffer. Information textures use fixed-point
-bilinear sampling; Character and the fixed generic object use nearest sampling
+bilinear sampling; Character and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
 
-The initial paired scene contains a moving Character, Availability board,
-optional Notice board, and radially moving generic object. All are screen-axis
+The paired night-garden demo contains a moving Character, Availability board,
+optional Notice board, radially moving garden drone, three terrariums, three
+lanterns, and twelve drifting lights. Generated artwork is normalized to three
+96x96 straight-alpha sprites, converted once to RGB565+A8 in the renderer's
+owned heap, and reused by repeated entities. The shared `demo_world` module
+owns deterministic bounded periodic motion and placement; its capacity does
+not limit the generic renderer. All are screen-axis
 aligned camera-facing billboards. Camera radius is 4.0, entity radius is bounded
 to 0..=3.0, the near plane is 0.25, horizontal FOV is 90 degrees, and focal
 length is 160 px. Touch maps each positive 320 px horizontal drag to one

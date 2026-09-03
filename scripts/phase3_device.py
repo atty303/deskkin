@@ -44,6 +44,7 @@ WORLD_BENCHMARK_MAX_OBSERVATION_AGE_SECONDS = 1.0
 WORLD_BENCHMARK_MIN_COVERAGE_MILLI = 800
 WORLD_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
 WORLD_BENCHMARK_MIN_STATUS_RESPONSES = 20
+WORLD_DEMO_ENTITY_COUNT = 22
 STATUS_RESPONSE_SIZE = 168
 
 BOOT_ERRORS = {
@@ -923,7 +924,7 @@ def world_benchmark(
         and benchmark_scene_sample is not None
         and benchmark_scene_sample["visible_billboards"]
         + benchmark_scene_sample["culled_billboards"]
-        == 4
+        == WORLD_DEMO_ENTITY_COUNT
     )
     summary: dict[str, object] = {
         "operation": "world_benchmark",

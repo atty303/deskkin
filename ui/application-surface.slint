@@ -1,14 +1,35 @@
-import { StatusSurface } from "status-surface.slint";
-
 export component AvailabilityBillboard inherits Rectangle {
     in property <string> status-text: "Unknown";
     in property <color> status-color: #f3b33d;
 
-    StatusSurface {
-        width: 100%;
-        height: 100%;
-        status-text: root.status-text;
-        status-color: root.status-color;
+    background: #202c2e;
+    border-radius: 14px;
+    border-width: 2px;
+    border-color: #4d6660;
+
+    Rectangle {
+        x: 20px; y: 23px; width: 8px; height: 8px;
+        border-radius: 4px;
+        background: root.status-color;
+    }
+    Text {
+        x: 38px; y: 15px;
+        text: "AVAILABILITY";
+        color: #a6b9ad;
+        font-size: 18px;
+        font-weight: 600;
+    }
+    Text {
+        x: 20px; y: 46px; width: parent.width - 40px; height: 52px;
+        text: root.status-text;
+        color: root.status-color;
+        font-size: 36px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: 20px; y: parent.height - 15px; width: parent.width - 40px; height: 2px;
+        background: #3d514b;
     }
 }
 
@@ -18,14 +39,23 @@ export component NoticeBillboard inherits Rectangle {
     Rectangle {
         width: 100%;
         height: 100%;
-        border-radius: 18px;
-        background: #25334a;
-        border-width: 4px;
-        border-color: #7da6ff;
+        border-radius: 14px;
+        background: #302b26;
+        border-width: 2px;
+        border-color: #8c7751;
+
+        Text {
+            x: 20px; y: 14px;
+            text: "NOTICE";
+            color: #c8ac79;
+            font-size: 18px;
+            font-weight: 600;
+        }
 
         Text {
             text: root.notice-text;
-            color: #d7e3f4;
+            x: 20px; y: 40px; width: parent.width - 40px; height: parent.height - 48px;
+            color: #f1dfb9;
             font-size: 28px;
             font-weight: 700;
             horizontal-alignment: center;

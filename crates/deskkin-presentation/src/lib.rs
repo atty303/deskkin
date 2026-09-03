@@ -13,6 +13,8 @@ extern crate std;
 
 include!(concat!(env!("OUT_DIR"), "/trig_table.rs"));
 
+pub mod demo_world;
+
 pub const TURN_UNITS: i64 = 65_536;
 pub const VIEWPORT_WIDTH: i32 = 320;
 pub const VIEWPORT_HEIGHT: i32 = 240;

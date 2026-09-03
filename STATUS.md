@@ -4,6 +4,24 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
+The paired world demo is now a small nocturnal floating garden, using generated
+transparent botanical and companion sprites, warm lanterns, and drifting lights.
+The continuous cylindrical coordinate model remains invisible, all geometry is
+camera-facing, and the solid background, existing semantic views, and AMP DMA/memory
+ownership are unchanged. Scene placement and deterministic motion are shared
+between simulator and firmware; decoration textures are converted once into APPCPU PSRAM.
+No new dependencies, provider behavior, physical servo, or remote publication.
+Headless Slint/world previews at front, quarter-turn, and half-turn have been
+inspected. Sprite storage is 83,187 bytes in the renderer heap. Host lint and
+targeted scene/simulator/benchmark tests pass, including the simulator's RGB565
+expansion overflow regression. Fresh review found no findings. Final
+`mise run test` passed, including all CoreS3 domains and inert recovery (build
+record `1d5f3342-5e59-4548-a436-4d9455506e26`). APPCPU image size is 1,667,296
+bytes within the existing 3 MiB slot. The garden scene has not been flashed;
+live performance and user visual acceptance remain unqualified.
+
+## Previous qualified baseline
+
 CoreS3 builds inherit the caller's Cargo network policy instead of forcing an
 offline cache prerequisite. Both AMP manifests pass locked dependency fetching
 from an empty temporary Cargo cache; regression tests cover absent, enabled, and
@@ -50,9 +68,10 @@ unwrapped angles, generated Q1.15 trigonometry, fixed 320x240 projection,
 stable far-to-near painter sorting, direct RGB565 nearest/bilinear/A8 raster,
 horizontal touch mapping, and 0.5 turn/s observed-yaw limiting.
 
-The simulator renders an invisible cylindrical coordinate world with four
-camera-facing billboards over solid `#16191d`: moving Character, Availability,
-optional Notice, and a radially moving generic object. Availability and Notice
+The simulator and CoreS3 share an invisible cylindrical night-garden scene with
+up to 22 camera-facing billboards over solid `#16191d`: moving Character,
+Availability, optional Notice, a radially moving garden drone, three botanical
+terrariums, three lanterns, and twelve drifting lights. Availability and Notice
 use canonical 272x124 Slint captures; the custom renderer handles projection,
 scaling, clipping, sorting, and composition. Deterministic tests cover view
 coexistence/expiry, seam continuity, multi-turn drag, observed lag, autonomous
@@ -202,12 +221,11 @@ from the inferred interrupt sequence.
 Replace the pinned APPCPU entry patch only when an equivalent
 upstream-compatible startup path is verified.
 
-The user confirmed visual acceptance: no cylinder primitive, camera-facing
-boards, Character/object
-parallax, continuous 320 px turns without a seam jump, 180 degrees/s observed
-following, and intact pairing UI. Normal operation has three billboards when
-Notice is absent; simultaneous Availability and Notice was qualified by the
-physical benchmark.
+The previous four-entity demo passed user visual acceptance. The new garden
+scene still needs live visual acceptance for composition, parallax, continuous
+320 px turns without a seam jump, 180 degrees/s observed following, and intact
+pairing UI. Normal operation has 21 entities with Availability and without
+Notice; benchmark operation includes all 22.
 
 Physical servo power, neck actuation, and a neck pose sensor remain intentionally
 out of scope; observed yaw is virtual.

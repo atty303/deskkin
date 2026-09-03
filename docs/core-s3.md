@@ -93,13 +93,22 @@ configuration.
 
 The cylinder is an invisible coordinate model. No cylinder surface, ring,
 floor, track, tangent-facing board, mesh, lighting, or z-buffer is rendered.
-The paired scene uses four camera-facing screen-axis-aligned billboards:
+The paired night-garden demo uses up to 22 camera-facing screen-axis-aligned
+billboards, with shared scene placement and motion in `demo_world.rs`:
 
 - Character at radius 2.2, moving +12 degrees/s with the existing QOI loops.
-- Availability at radius 1.2 and -15 degrees.
+- Availability at radius 1.2 and -45 degrees, above the character.
 - CompositionCheck Notice at radius 1.8 and +18 degrees when present.
-- A fixed 32x32 generic object at +30 degrees, ping-ponging from radius 1.0 to
-  2.5 at 0.25 unit/s.
+- A generated garden drone at +42 degrees, ping-ponging from radius 1.0 to
+  2.5 at 0.25 unit/s while gently bobbing.
+- Three botanical terrariums and three warm lanterns distributed around the
+  circle at different heights and radii, with staggered slow vertical motion.
+- Twelve small drifting lights. Their glow is baked alpha, not lighting.
+
+All autonomous motion uses bounded periodic integer phases. The render API
+still accepts caller-owned slices; the 22-entity capacity belongs only to this
+demo, not to a global entity registry. The benchmark's expected entity count
+includes decorations and both semantic boards; normal operation omits Notice.
 
 World coordinates are signed Q16.16 and azimuth is an unwrapped signed integer
 with 65,536 units per turn. Camera radius is 4.0, near plane 0.25, viewport
@@ -116,9 +125,12 @@ actuation, and a neck pose sensor are not implemented.
 
 Availability states and CompositionCheck are 272x124 opaque Slint components
 captured to RGB565 and cached in PSRAM. Camera motion does not redraw them. The
-active Character QOI loop is converted once to RGB565+A8. The custom rasterizer
+active Character QOI loop is converted once to RGB565+A8. Three canonical
+96x96 RGBA8 generated sprites are converted once to shared RGB565+A8 textures
+in PSRAM (82,944 bytes total), plus a 243-byte light texture. Source provenance
+and prompts are in `assets/world/night-garden/README.md`. The custom rasterizer
 writes directly into the clipped final framebuffer: nearest+A8 for Character
-and object, fixed-point bilinear for opaque information boards. Background is
+and decoration sprites, fixed-point bilinear for opaque information boards. Background is
 solid `#16191d`.
 
 ## AMP memory and channels
