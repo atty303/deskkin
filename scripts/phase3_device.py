@@ -615,7 +615,6 @@ def device_environment(root: Path) -> tuple[Path, dict[str, str]]:
     environment["ZEPHYR_SDK_INSTALL_DIR"] = str(state / "sdk")
     environment["ZEPHYR_BASE"] = str(state / "west/zephyr")
     environment["LIBCLANG_PATH"] = str(clang / "lib")
-    environment["CARGO_NET_OFFLINE"] = "true"
     environment["SOURCE_DATE_EPOCH"] = "0"
     environment["PATH"] = os.pathsep.join(
         (

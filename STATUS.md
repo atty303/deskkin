@@ -4,12 +4,17 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
+CoreS3 builds inherit the caller's Cargo network policy instead of forcing an
+offline cache prerequisite. Both AMP manifests pass locked dependency fetching
+from an empty temporary Cargo cache; regression tests cover absent, enabled, and
+disabled caller offline settings. Fresh review and the final repository-wide
+`mise run test` pass (build record
+`383d0226-56eb-4a06-9d3f-45e55030e906`).
+
 The user has completed visual acceptance of the world scene. All 16 dependency
 patches pass the host unified-diff parser regression, and isolated replay from
 their pinned pristine source files matches the installed patched trees byte for
 byte. SPI patch hunk metadata now matches the source after sleep removal.
-Fresh review and the final repository-wide `mise run test` pass (build record
-`f753d95c-fca6-407b-992c-4d9ae4a03bd9`).
 
 The intermittent APPCPU display stop is fixed and qualified by a physical
 60-second benchmark. JTAG captured both frozen runs in Xtensa's permanent

@@ -16,6 +16,16 @@ SPEC.loader.exec_module(device)
 
 
 class Phase3DeviceTests(unittest.TestCase):
+    def test_device_build_inherits_cargo_network_policy(self):
+        for offline in (None, "true", "false"):
+            with self.subTest(offline=offline):
+                environment = {"PATH": "/usr/bin"}
+                if offline is not None:
+                    environment["CARGO_NET_OFFLINE"] = offline
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    _, actual = device.device_environment(ROOT)
+                self.assertEqual(actual.get("CARGO_NET_OFFLINE"), offline)
+
     def test_dependency_patches_have_valid_unified_diff_structure(self):
         for patch in sorted((ROOT / "patches").glob("*/*.patch")):
             with self.subTest(patch=patch.relative_to(ROOT)):
