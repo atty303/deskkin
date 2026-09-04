@@ -109,9 +109,9 @@ impl<'a> Coverage<'a> {
 
 #[derive(Clone, Copy)]
 pub struct SceneBillboard<'a> {
-    projected: ProjectedBillboard,
-    texture: Texture<'a>,
-    region: TextureRegion,
+    pub(super) projected: ProjectedBillboard,
+    pub(super) texture: Texture<'a>,
+    pub(super) region: TextureRegion,
 }
 
 impl<'a> SceneBillboard<'a> {
@@ -175,7 +175,7 @@ impl<'a> Occlusion<'a> {
         ((y / self.tile.pixels() + 1) * self.tile.pixels()).min(end)
     }
 
-    fn prepare(&mut self, boards: &[SceneBillboard<'_>], stats: &mut SceneStats) {
+    pub(super) fn prepare(&mut self, boards: &[SceneBillboard<'_>], stats: &mut SceneStats) {
         self.cutoffs.fill(0);
         let tile = self.tile.pixels();
         let columns = self.columns();
@@ -281,7 +281,7 @@ impl<'a> Occlusion<'a> {
         false
     }
 
-    fn hides(&self, r: ScreenRect, index: usize) -> bool {
+    pub(super) fn hides(&self, r: ScreenRect, index: usize) -> bool {
         let tile = self.tile.pixels();
         let left = r.x.clamp(0, VIEWPORT_WIDTH) as usize / tile;
         let top = r.y.clamp(0, VIEWPORT_HEIGHT) as usize / tile;
@@ -411,45 +411,13 @@ pub fn raster_scene_with_blitter(
     observer(RasterPhase::Coverage);
     occlusion.prepare(boards, &mut stats);
     observer(RasterPhase::Background);
-    let tile = occlusion.tile.pixels();
-    let columns = occlusion.columns();
-    // At most 20 alternating visible spans in the 40-column 8-pixel grid.
-    let mut spans = [[0_u16; 2]; VIEWPORT_WIDTH as usize / 16];
-    for band in (0..VIEWPORT_HEIGHT as usize).step_by(tile) {
-        let mut count = 0;
-        if stats.opaque_tiles == 0 {
-            spans[0] = [0, VIEWPORT_WIDTH as u16];
-            count = 1;
-        } else {
-            let cutoffs = &occlusion.cutoffs[band / tile * columns..][..columns];
-            let mut column = 0;
-            while column < columns {
-                if cutoffs[column] != 0 {
-                    column += 1;
-                    continue;
-                }
-                let start = column;
-                column += 1;
-                while column < columns && cutoffs[column] == 0 {
-                    column += 1;
-                }
-                spans[count] = [(start * tile) as u16, (column * tile) as u16];
-                count += 1;
-            }
-        }
-        for y in band..(band + tile).min(VIEWPORT_HEIGHT as usize) {
-            let colors = background_row
-                .row(y)
-                .map(|c| if wire { c.to_be() } else { c });
-            for &[start, end] in &spans[..count] {
-                background_row.fill(
-                    &mut framebuffer
-                        [y * stride + usize::from(start)..y * stride + usize::from(end)],
-                    colors,
-                );
-            }
-        }
-    }
+    paint_background(
+        &mut super::BandTarget::new(framebuffer, stride, 0, VIEWPORT_HEIGHT as usize)?,
+        occlusion,
+        stats.opaque_tiles,
+        &mut background_row,
+        wire,
+    );
     for (index, board) in boards.iter().enumerate() {
         observer(RasterPhase::Setup);
         let mask = (stats.opaque_tiles != 0 && occlusion.hides(board.projected.screen_rect, index))
@@ -496,4 +464,55 @@ fn source_span(
                 as usize
     };
     (map(pixel), map(pixel + tile - 1))
+}
+
+pub(super) fn paint_background(
+    target: &mut super::BandTarget<'_>,
+    occlusion: &Occlusion<'_>,
+    opaque_tiles: u32,
+    background_row: &mut impl Background,
+    wire: bool,
+) {
+    let tile = occlusion.tile.pixels();
+    let columns = occlusion.columns();
+    // At most 20 alternating visible spans in the 40-column 8-pixel grid.
+    let mut spans = [[0_u16; 2]; VIEWPORT_WIDTH as usize / 16];
+    let mut band = target.y;
+    while band < target.y + target.rows {
+        let end = occlusion.row_end(band, target.y + target.rows);
+        let mut count = 0;
+        if opaque_tiles == 0 {
+            spans[0] = [0, VIEWPORT_WIDTH as u16];
+            count = 1;
+        } else {
+            let cutoffs = &occlusion.cutoffs[band / tile * columns..][..columns];
+            let mut column = 0;
+            while column < columns {
+                if cutoffs[column] != 0 {
+                    column += 1;
+                    continue;
+                }
+                let start = column;
+                column += 1;
+                while column < columns && cutoffs[column] == 0 {
+                    column += 1;
+                }
+                spans[count] = [(start * tile) as u16, (column * tile) as u16];
+                count += 1;
+            }
+        }
+        for y in band..end {
+            let colors = background_row
+                .row(y)
+                .map(|c| if wire { c.to_be() } else { c });
+            for &[start, end] in &spans[..count] {
+                background_row.fill(
+                    &mut target.pixels[(y - target.y) * target.stride + usize::from(start)
+                        ..(y - target.y) * target.stride + usize::from(end)],
+                    colors,
+                );
+            }
+        }
+        band = end;
+    }
 }

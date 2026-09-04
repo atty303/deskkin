@@ -14,7 +14,7 @@ use snow::types::{Cipher, Dh, Hash, Random};
 use zeroize::Zeroize;
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
-const STATUS_RESPONSE_SIZE: usize = 224;
+const STATUS_RESPONSE_SIZE: usize = 236;
 static UI_ACTION: AtomicU8 = AtomicU8::new(0);
 static UI_SAS: AtomicU32 = AtomicU32::new(u32::MAX);
 static UI_VIEW: AtomicU8 = AtomicU8::new(0);

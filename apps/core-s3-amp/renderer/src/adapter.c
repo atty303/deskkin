@@ -19,9 +19,8 @@
 #define DISPLAY_HEIGHT 240U
 #define FRAME_PIXELS (DISPLAY_WIDTH * DISPLAY_HEIGHT)
 #define PIXEL_DMA_CHUNK_BYTES (4092U * 8U)
-#define FULL_FRAME_DMA_BATCHES DIV_ROUND_UP(FRAME_PIXELS * sizeof(uint16_t), PIXEL_DMA_CHUNK_BYTES)
+#define BAND_PIXELS (DISPLAY_WIDTH * DESKKIN_DISPLAY_BAND_ROWS)
 #define FRAMEBUFFER_COUNT 2U
-#define MAX_DIRTY_RECTS 3U
 #define RENDERER_TIME_SLICE_TICKS 1
 #define AMP_SHARED                                                                                 \
 	((volatile struct deskkin_amp_shared *)(DT_REG_ADDR(DT_NODELABEL(shm0)) +                  \
@@ -98,23 +97,18 @@ enum renderer_fault {
 	RENDERER_FAULT_MIPI_DBI_INIT = 16,
 };
 
-struct deskkin_dirty_rect {
-	uint16_t x;
-	uint16_t y;
-	uint16_t width;
-	uint16_t height;
-};
-
 struct display_request {
-	uint8_t buffer_index;
-	uint8_t dirty_rect_count;
-	struct deskkin_dirty_rect dirty_rects[MAX_DIRTY_RECTS];
+    uint8_t buffer_index;
+    uint16_t y;
+    uint16_t rows;
 };
 
 struct display_completion {
-	uint8_t buffer_index;
-	int8_t result;
-	uint32_t duration_us;
+    uint8_t buffer_index;
+    int8_t result;
+    uint16_t reserved;
+    uint32_t duration_us;
+    uint32_t wait_us;
 };
 
 K_MSGQ_DEFINE(display_requests, sizeof(struct display_request), 2, 4);
@@ -152,8 +146,6 @@ static atomic_t dirty_pixels;
 static atomic_t transferred_bytes;
 static atomic_t pixel_transfer_count;
 static atomic_t pixel_transfer_last_us;
-static atomic_t frame_difference_last;
-static atomic_t frame_difference_max;
 static atomic_t view_generation;
 static atomic_t pose_generation;
 static atomic_t input_generation;
@@ -369,8 +361,8 @@ void deskkin_renderer_observe(uint8_t stage, uint8_t fault, uint32_t render_us,
 	} else {
 		heartbeat->nearest_samples = (uint32_t)atomic_get(&pixel_transfer_count);
 		heartbeat->bilinear_samples = (uint32_t)atomic_get(&pixel_transfer_last_us);
-		heartbeat->projection_us = (uint32_t)atomic_get(&frame_difference_last);
-		heartbeat->projection_max_us = (uint32_t)atomic_get(&frame_difference_max);
+		heartbeat->projection_us = 0;
+		heartbeat->projection_max_us = 0;
 	}
 	heartbeat->sort_us = (uint32_t)atomic_get(&sort_last_us);
 	heartbeat->sort_max_us = (uint32_t)atomic_get(&sort_max_us);
@@ -411,51 +403,30 @@ uint16_t *deskkin_framebuffer_alloc(uint8_t index)
 			framebuffer = (uint16_t *)(uintptr_t)address;
 		}
 	}
-	return framebuffer == NULL ? NULL : framebuffer + (size_t)index * FRAME_PIXELS;
+	return framebuffer == NULL ? NULL : framebuffer + (size_t)index * BAND_PIXELS;
 }
 
-int deskkin_display_submit(uint8_t buffer_index,
-			   const struct deskkin_dirty_rect *dirty_rects,
-			   uint8_t dirty_rect_count)
+int deskkin_display_submit(uint8_t buffer_index, uint16_t y, uint16_t rows)
 {
-	if (framebuffer == NULL || buffer_index >= FRAMEBUFFER_COUNT ||
-	    dirty_rect_count > MAX_DIRTY_RECTS ||
-	    (dirty_rect_count != 0U && dirty_rects == NULL)) {
-		return -EINVAL;
-	}
-	struct display_request request = {
-		.buffer_index = buffer_index,
-		.dirty_rect_count = dirty_rect_count,
-	};
-	for (size_t index = 0; index < dirty_rect_count; ++index) {
-		const struct deskkin_dirty_rect rect = dirty_rects[index];
-		if (rect.width == 0U || rect.height == 0U || rect.x >= DISPLAY_WIDTH ||
-		    rect.y >= DISPLAY_HEIGHT || rect.width > DISPLAY_WIDTH - rect.x ||
-		    rect.height > DISPLAY_HEIGHT - rect.y) {
-			return -EINVAL;
-		}
-		request.dirty_rects[index] = rect;
-	}
-	const int result = k_msgq_put(&display_requests, &request, K_NO_WAIT);
-	if (result == 0) {
-		k_yield();
-	}
-	return result;
+    if (framebuffer == NULL || buffer_index >= FRAMEBUFFER_COUNT ||
+        y >= DISPLAY_HEIGHT || y % DESKKIN_DISPLAY_BAND_ROWS != 0U ||
+        rows != MIN(DESKKIN_DISPLAY_BAND_ROWS, DISPLAY_HEIGHT - y)) {
+        return -EINVAL;
+    }
+    const struct display_request request = { .buffer_index = buffer_index, .y = y, .rows = rows };
+    const int result = k_msgq_put(&display_requests, &request, K_NO_WAIT);
+    if (result == 0) { k_yield(); }
+    return result;
 }
 
-int deskkin_display_take_completion(uint8_t *buffer_index, uint32_t *duration_us)
+int deskkin_display_take_completion(struct display_completion *completion)
 {
-	struct display_completion completion;
-	if (k_msgq_get(&display_completions, &completion, K_NO_WAIT) != 0) {
-		return 0;
-	}
-	*buffer_index = completion.buffer_index;
-	*duration_us = completion.duration_us;
-	if (completion.result != 0) {
-		atomic_inc(&transfer_failures);
-		return -EIO;
-	}
-	return 1;
+    if (k_msgq_get(&display_completions, completion, K_NO_WAIT) != 0) { return 0; }
+    if (completion->result != 0) {
+        atomic_inc(&transfer_failures);
+        return -EIO;
+    }
+    return 1;
 }
 
 void deskkin_yield(void)
@@ -588,69 +559,60 @@ static uint32_t display_spi_frequency_hz(void)
 
 static void display_entry(void *first, void *second, void *third)
 {
-	ARG_UNUSED(first);
-	ARG_UNUSED(second);
-	ARG_UNUSED(third);
-	uint8_t previous_buffer_index = 0U;
-	bool have_previous_buffer = false;
-	for (;;) {
-		struct display_request request;
-		display_progress(DESKKIN_DISPLAY_PROGRESS_WAITING);
-		(void)k_msgq_get(&display_requests, &request, K_FOREVER);
-		display_progress(DESKKIN_DISPLAY_PROGRESS_REQUEST);
-		const uint64_t started = deskkin_uptime_us();
-		const uint16_t *pixels =
-			framebuffer + (size_t)request.buffer_index * FRAME_PIXELS;
-		uint32_t request_pixels = 0U;
-		for (size_t index = 0; index < request.dirty_rect_count; ++index) {
-			const struct deskkin_dirty_rect *rect = &request.dirty_rects[index];
-			request_pixels += (uint32_t)rect->width * rect->height;
-		}
-		atomic_set(&dirty_rect_count, request.dirty_rect_count);
-		if (request.dirty_rect_count != 0U) {
-			atomic_set(&pixel_dma_batches, FULL_FRAME_DMA_BATCHES);
-		}
-		atomic_set(&dirty_pixels, (atomic_val_t)request_pixels);
-		atomic_set(&transferred_bytes, request.dirty_rect_count == 0U
-						 ? 0
-						 : (atomic_val_t)(FRAME_PIXELS * sizeof(uint16_t)));
-		int result = 0;
-		if (request.dirty_rect_count != 0U) {
-			const struct display_buffer_descriptor descriptor = {
-				.buf_size = FRAME_PIXELS * sizeof(uint16_t),
-				.pitch = DISPLAY_WIDTH,
-				.width = DISPLAY_WIDTH,
-				.height = DISPLAY_HEIGHT,
-			};
-			display_progress(DESKKIN_DISPLAY_PROGRESS_TRANSFER);
-			result = display_write(display, 0, 0, &descriptor, pixels);
-		}
-		display_progress(DESKKIN_DISPLAY_PROGRESS_COMPLETION);
-		const uint64_t elapsed = deskkin_uptime_us() - started;
-		if (request.dirty_rect_count != 0U && result == 0) {
-			uint32_t difference = 0U;
-			if (have_previous_buffer) {
-				const uint16_t *previous = framebuffer +
-					(size_t)previous_buffer_index * FRAME_PIXELS;
-				for (size_t index = 0; index < FRAME_PIXELS; ++index) {
-					difference += pixels[index] != previous[index] ? 1U : 0U;
-				}
-			}
-			previous_buffer_index = request.buffer_index;
-			have_previous_buffer = true;
-			atomic_set(&frame_difference_last, (atomic_val_t)difference);
-			observe_max(&frame_difference_max, difference);
-			atomic_inc(&pixel_transfer_count);
-			atomic_set(&pixel_transfer_last_us,
-				   (atomic_val_t)MIN(elapsed, UINT32_MAX));
-		}
-		const struct display_completion completion = {
-			.buffer_index = request.buffer_index,
-			.result = result == 0 ? 0 : -1,
-			.duration_us = (uint32_t)MIN(elapsed, UINT32_MAX),
-		};
-		(void)k_msgq_put(&display_completions, &completion, K_FOREVER);
-	}
+    ARG_UNUSED(first);
+    ARG_UNUSED(second);
+    ARG_UNUSED(third);
+    uint16_t expected_y = 0U;
+    bool frame_failed = false;
+    uint32_t frame_transfer_us = 0U;
+    uint32_t frame_wait_us = 0U;
+    uint64_t previous_finished = 0U;
+    for (;;) {
+        struct display_request request;
+        display_progress(DESKKIN_DISPLAY_PROGRESS_WAITING);
+        (void)k_msgq_get(&display_requests, &request, K_FOREVER);
+        const uint64_t started = deskkin_uptime_us();
+        if (expected_y == 0U) {
+            frame_failed = false;
+            frame_transfer_us = 0U;
+            frame_wait_us = 0U;
+        } else {
+            frame_wait_us += (uint32_t)MIN(started - previous_finished, UINT32_MAX);
+        }
+        display_progress(DESKKIN_DISPLAY_PROGRESS_REQUEST);
+        const uint16_t *pixels = framebuffer + (size_t)request.buffer_index * BAND_PIXELS;
+        const struct display_buffer_descriptor descriptor = {
+            .buf_size = DISPLAY_WIDTH * request.rows * sizeof(uint16_t),
+            .pitch = DISPLAY_WIDTH,
+            .width = DISPLAY_WIDTH,
+            .height = request.rows,
+        };
+        display_progress(DESKKIN_DISPLAY_PROGRESS_TRANSFER);
+        int result = request.y == expected_y
+            ? display_write(display, 0, request.y, &descriptor, pixels) : -EINVAL;
+        frame_failed |= result != 0;
+        previous_finished = deskkin_uptime_us();
+        frame_transfer_us += (uint32_t)MIN(previous_finished - started, UINT32_MAX);
+        expected_y = request.y + request.rows;
+        const bool final = expected_y == DISPLAY_HEIGHT;
+        if (final && !frame_failed) {
+            atomic_set(&dirty_rect_count, 1);
+            atomic_set(&pixel_dma_batches, DIV_ROUND_UP(DISPLAY_HEIGHT, DESKKIN_DISPLAY_BAND_ROWS));
+            atomic_set(&dirty_pixels, FRAME_PIXELS);
+            atomic_set(&transferred_bytes, FRAME_PIXELS * sizeof(uint16_t));
+            atomic_inc(&pixel_transfer_count);
+            atomic_set(&pixel_transfer_last_us, frame_transfer_us);
+        }
+        if (final) { expected_y = 0U; }
+        display_progress(DESKKIN_DISPLAY_PROGRESS_COMPLETION);
+        const struct display_completion completion = {
+            .buffer_index = request.buffer_index,
+            .result = frame_failed ? -1 : 0,
+            .duration_us = final ? frame_transfer_us : 0U,
+            .wait_us = final ? frame_wait_us : 0U,
+        };
+        (void)k_msgq_put(&display_completions, &completion, K_FOREVER);
+    }
 }
 
 static void renderer_entry(void *first, void *second, void *third)

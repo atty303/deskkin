@@ -11,8 +11,8 @@ material stay below ignored `.deskkin/` state.
 PROCPU owns USB control, touch, Wi-Fi, DHCP/TCP, Noise, NVS, application
 service, virtual pose, APPCPU boot, display power/reset, and status. APPCPU owns
 the Slint instances, canonical billboard textures, custom world renderer,
-SPI2/GDMA, and LCD transfer. Framebuffers remain in internal SRAM; the display
-thread submits each completed framebuffer directly through GDMA. The
+SPI2/GDMA, and LCD transfer. Two 320x32 RGB565 bands occupy 40 KiB of internal
+SRAM; the display thread submits completed bands directly through GDMA. The
 allocated PSRAM is reserved for heaps, cached textures and assets, networking,
 and stacks that do not need cache-independent execution. There is no supported
 single-image firmware or `core-s3:amp-*` task alias.
@@ -155,22 +155,24 @@ active Character QOI loop is converted once to RGB565+A8. Three canonical
 96x96 RGBA8 generated sprites are converted once to shared RGB565+A8 textures
 in PSRAM (82,944 bytes total), plus a 243-byte light texture. Source provenance
 and prompts are in `assets/world/night-garden/README.md`. The custom rasterizer
-writes directly into the clipped final framebuffer: nearest+A8 for Character
+writes directly into the clipped internal-SRAM band: nearest+A8 for Character
 and decoration sprites, fixed-point bilinear for opaque information boards.
 The exploration guide is a 136x204 portrait card with its own Slint layout and
 captured dimensions; other information cards remain 272x124 landscape.
 Solid clear is replaced by sky and dark-ground RGB565 gradients joined through
 a soft fog band at the fixed center horizon. Character motion cannot shift it.
 With 4x4 ordered dithering, a 3,840-byte flash-resident row table is copied directly
-into the owned internal framebuffer in wire byte order; no extra framebuffer,
+into the owned band in wire byte order; no full-frame intermediate,
 heap allocation, floor geometry, or per-pixel gradient calculation is needed.
 Its time is included in world-raster and total render duration, not billboard
 sampling counters. Native-size nearest sprites use direct texel addressing;
 other sizes and information boards use the shared scaler.
 The shared scaler uses exact incremental Q16 coordinates and specialized
-nearest/bilinear, opaque/A8 and byte-order kernels. Its bounded 2,560-byte
-horizontal coordinate/weight scratch lives on the existing PSRAM renderer stack;
-no persistent allocation or internal-SRAM buffer is added. Per-pixel division
+nearest/bilinear, opaque/A8 and byte-order kernels. CoreS3 allocates horizontal
+coordinate/weight storage once in PSRAM, bounded by 320 columns for each of the
+23 scalable billboards (58,880 bytes); native particles use no column storage.
+Per-board preparation metadata is also reused from PSRAM. Coordinates are
+prepared once per frame and shared across bands. Per-pixel division
 and alpha-endpoint blending are avoided without changing RGB565 rounding or
 sample-counter semantics within each drawn span. Renderer/display priorities and DMA ownership are unchanged.
 
@@ -191,7 +193,7 @@ coordinates are reused per tile column/row, and wholly non-opaque masks bypass
 coverage testing. The portable API also supports 16x16 screen tiles with 600
 bytes of storage, independently of the unchanged 8x8 source masks. There is no
 depth buffer or per-entity screen mask. Scene/coordinate scratch uses the existing
-PSRAM renderer stack; no per-frame heap allocation is added. The existing world-raster duration includes coverage
+PSRAM stack and reusable heap storage; no per-frame heap allocation is added. The existing world-raster duration includes coverage
 testing and span setup; nearest/bilinear counters count only visited samples
 after occlusion (still including alpha-zero samples within visited spans).
 Portable scene stats expose coverage-test and scaler-preparation counts. An
@@ -201,10 +203,17 @@ from its 240 MHz cycle counter (including preemption and observer overhead),
 not CPU-exclusive time or PSRAM bus traffic. Setup
 includes validation, visibility selection and
 coordinate preparation; pixel raster includes span traversal and blending.
-Thirteen scalar values (phase/blit times and operation/sample counts) are
-published together through a separate generation-checked shared slot. Only
-successful world frames publish; zero generation means unavailable. The USB
-status response is 224 bytes; the final 56 bytes carry this coherent record.
+Sixteen scalar values (phase/blit times, operation/sample counts and pipeline
+wait/transfer times) are published together through a separate generation-checked
+shared slot. Only fully transferred world frames publish; zero generation means
+unavailable. The USB status response is 236 bytes; the final 68 bytes carry this
+coherent record. `render_buffer_wait_us` accumulates time acquiring reusable
+bands, `display_band_wait_us` measures gaps between transfers within the frame
+(excluding the wait for its first band), and `frame_transfer_us` sums its eight
+display writes. These are elapsed microseconds, including preemption; phase
+profiling is idle during buffer waits and submission. No pixels or per-band
+logs are recorded. Full-frame pixel-difference diagnostics are removed because
+previous full frames are not retained.
 Shell observation explicitly changes to Paired when entering world mode, so
 world sample/projection fields are not interpreted as setup-screen diagnostics.
 
@@ -224,15 +233,31 @@ portable service heap, Wi-Fi/network state, input/message queues, and other
 non-cache-critical system stacks. The explicitly reserved high 4 MiB is a
 caller-owned APPCPU allocator for canonical textures, decoded assets,
 Slint/world allocations, and the display and renderer thread stacks. Two
-320x240 RGB565 framebuffers remain in internal SRAM so SPI2 can submit each
-completed frame directly through APPCPU-owned GDMA channel pair 0. They are the
-only large render buffers that require internal SRAM.
+320x32 RGB565 buffers remain in internal SRAM so SPI2 can submit each completed
+band directly through APPCPU-owned GDMA channel pair 0. Their 40 KiB replaces
+300 KiB of full-screen buffers, releasing 260 KiB of static internal SRAM.
+World rendering writes directly into these buffers, without a PSRAM full-frame
+intermediate or pixel-copy stage. Frame projection, sort, coverage and horizontal
+sampling data are prepared once using one frozen camera/animation snapshot.
+`BandTarget` maps absolute screen rows to local rows; painter order and sampling
+remain portable. Bands are 32 rows except the last 16 rows. Slint shell screens
+use `NewBuffer` and `render_by_line` to fill the same bands directly.
+
+Each band is renderer-owned until submission, then display-owned until DMA
+completion is consumed. Queue order and Y-position checks prevent reordering;
+completion of the last band alone counts as a presented frame. Setup shells and
+world transitions use the same ownership path. There is no retained-frame dirty
+region assumption and no full-frame comparison loop.
 
 The display and renderer threads have the same priority so rendering can run
-while a five-chunk full-frame DMA transfer is active. The renderer retains a
+while the previous band is transferred. The renderer retains a
 one-tick per-thread slice at 1 kHz, and the display worker has the same one-tick
 slice, without changing the global scheduler. During DMA, the SPI completion
-loop yields to ready peers whenever the kernel permits yielding. This lets the
+loop yields to ready peers for payloads larger than the hardware FIFO whenever
+the kernel permits yielding. Transfers of at most 64 bytes complete by bounded
+polling without a task handoff; this includes the 1–4 byte panel-address
+commands repeated for each band. These commands still use the existing DMA
+configuration, and no FIFO/DMA mode switch is added. This lets the
 renderer use the CPU while hardware transfers the previous buffer. With no
 ready peer, polling resumes immediately; no tick sleep or completion ISR is
 added. Hardware completion and the cycle-based 100 ms timeout still bound each
@@ -243,8 +268,8 @@ completion. The pinned GDMA patch therefore leaves RX/TX EOF interrupts disabled
 for callback-free peripheral channels; callback-backed and memory-to-memory DMA
 retain their completion interrupts. This removes the otherwise unused level-1
 GDMA source implicated in the APPCPU interrupt-return failure beside the 1 kHz
-level-3 timer. DMA descriptors, five-batch transfer, and direct internal-SRAM
-framebuffers remain unchanged.
+level-3 timer. Each 32-row payload fits in one DMA batch; a complete screen uses
+eight batches. Existing DMA descriptors and completion polling are reused.
 
 PROCPU and APPCPU static DRAM meet at `0x3fce4c00`; both linkers derive that
 physical boundary from the AMP reservation and enforce it at link time. The
@@ -444,4 +469,4 @@ The shared raster profile adds sampling/span overhead, opaque/alpha blit time,
 and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle
 counter, including elapsed preemption; sampling/span time is the pixel-phase
 residual after blits. This differs from older approximate RTC-based phase times.
-The USB status response is 224 bytes across supervisor, service and host decoder.
+The USB status response is 236 bytes across supervisor, service and host decoder.

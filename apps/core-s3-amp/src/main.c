@@ -23,7 +23,7 @@
 #include "../shared.h"
 
 #define CONTROL_FRAME_MAX 188
-#define STATUS_RESPONSE_SIZE 224
+#define STATUS_RESPONSE_SIZE 236
 #define HEARTBEAT_STALE_MS 500
 #define DIAGNOSTIC_EVENT_CAPACITY 64U
 #define DIAGNOSTIC_EVENT_SIZE 24U
@@ -77,7 +77,7 @@ static atomic_t display_ready;
 
 static atomic_t boot_stage;
 static atomic_t boot_error;
-static __aligned(32) uint16_t internal_framebuffer[2U][320U * 240U];
+static __aligned(32) uint16_t internal_framebuffer[2U][320U * DESKKIN_DISPLAY_BAND_ROWS];
 #define RENDERER_HEAP_SIZE (4U * 1024U * 1024U)
 static uintptr_t renderer_heap;
 static size_t renderer_heap_size;
@@ -899,11 +899,11 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 	for (unsigned attempt = 0; attempt < 3U; ++attempt) {
 		uint32_t generation = deskkin_shared_load(&AMP_SHARED->raster_profile_publication);
 		if (generation == 0U) { continue; }
-		uint32_t values[13];
+		uint32_t values[DESKKIN_RASTER_PROFILE_FIELDS];
 		deskkin_shared_copy_from(values, AMP_SHARED->raster_profile, sizeof(values));
 		if (generation != deskkin_shared_load(&AMP_SHARED->raster_profile_publication)) { continue; }
 		sys_put_be32(generation, &response[168]);
-		for (unsigned index = 0; index < 13U; ++index) {
+		for (unsigned index = 0; index < DESKKIN_RASTER_PROFILE_FIELDS; ++index) {
 			sys_put_be32(values[index], &response[172 + 4U * index]);
 		}
 		break;

@@ -1,80 +1,84 @@
 # Current status
 
-Updated: 2026-09-04
+Updated: 2026-09-05
 
-## Active work
+## Completed work
 
-Native span and PIE call-path optimization is complete. Native raster reuses
-clipped occlusion spans across each tile band; the whole-hidden precheck also
-visits one row per band. Rust calls the alpha assembly kernel directly with the
-existing internal SRAM masks. Grass composition, pixels, alpha arithmetic,
-sampling and PIE ownership remain fixed. No source copies, pixel buffers or
-dependencies are added. The portable presentation layer keeps safe scalar
-defaults; FFI remains inside the CoreS3 adapter. All inputs/code/resources remain
-within one trusted personal-device control domain. No new product slice or
-remote publication is authorized.
+CoreS3 now renders directly into two 320x32 RGB565 internal-SRAM bands, with
+16 rows in the final band. Framebuffers shrink from **300 KiB to 40 KiB**,
+releasing **260 KiB** of static internal SRAM. World and Slint shell rendering
+share the completion-gated ownership path; only a successfully transferred
+whole frame counts as presented. Rendering overlaps the preceding band's DMA.
+
+Projection, sorting, coverage and horizontal sampling data are prepared once
+per frozen frame. The reusable horizontal sampling cache adds 58,880 bytes of
+PSRAM plus approximately 5,928 bytes of board metadata. There is no world
+PSRAM full-frame intermediate, pixel-copy stage or per-frame allocation.
+Grass density, size, LOD and assets are unchanged. No dependencies, portable
+application-core changes or persistent user-state changes were introduced.
 
 ## Performance findings
 
-| Implementation, both uncapped | Median FPS, 60 seconds x 3 | Mean alpha blit | Mean pixel phase | Mean sampling/span residual |
+| Implementation, both uncapped | Median FPS, 60 seconds x 3 | Mean pixel phase | Mean alpha blit | Internal framebuffer SRAM |
 | --- | ---: | ---: | ---: | ---: |
-| Preceding qualified baseline (`5b5acfc8`) | 20.308 | 13.943 ms | 39.635 ms | 25.387 ms |
-| Selected span/PIE call path | **20.995** | **13.766 ms** | **37.780 ms** | **23.726 ms** |
+| Fresh full-buffer baseline (`fd6a83c9`) | 21.178 | 37.860 ms | 13.835 ms | 300 KiB |
+| Selected 32-row bands | **19.972** | 37.373 ms | 11.834 ms | **40 KiB** |
 
-Baseline runs were 20.308 / 20.309 / 19.993 FPS; selected runs were
-21.205 / 20.995 / 20.811. The median improves **3.38%**, above the 2% selection
-threshold. Mean pixel-phase time falls **4.68%** and sampling/span residual
-falls **6.54%**. The median exceeds the 20 FPS guideline; it is not a per-frame
-minimum. The baseline measurements are the preceding qualification in this
-session, not a fresh interleaved control. Both use the same uncapped rendering
-and benchmark configuration.
+Baseline runs were 21.178 / 20.588 / 21.202 FPS; band runs were
+19.913 / 19.972 / 19.991. This change trades **5.69%** lower median FPS for
+260 KiB less internal framebuffer SRAM. It is near the 20 FPS guideline, not
+a guaranteed minimum or a speed improvement over the full-buffer baseline.
+Both implementations received a fresh flash, three 60-second benchmarks and
+a 120-second normal profile under the same configuration.
 
-Each implementation completed a 120-second normal profile with 258 samples.
-Mean opaque blit was 0.304 / 0.288 ms; alpha pixel counts were
-163,794 / 163,821 and opaque counts were 13,700 / 13,745
-(baseline / selected). These moving-scene profiles include elapsed preemption.
-Sampling/span time is a residual, not isolated texture sampling.
+The initial band candidate measured 15.511 FPS, with 65.992 ms mean transfer
+time and 16.761 ms renderer buffer wait. A one-factor follow-up keeps short
+SPI DMA transfers (at most 64 bytes, including 1–4 byte panel commands) polling
+without yielding, while pixel payloads still yield for concurrent rendering.
+This reduced mean transfer time to **38.206 ms** and renderer buffer wait to
+**1.653 ms**. The first candidate also completed its 60-second benchmark and
+120-second profile. The result identifies per-command task handoffs as a
+major avoidable overhead when splitting the screen into eight transfers.
 
-Two isolated candidates also received flash, a 60-second benchmark and a
-120-second normal profile. Sharing native tile-band spans measured 21.010 FPS,
-38.257 ms pixel phase and 23.770 ms sampling/span residual. Forced inlining of
-the native raster and adapter measured 20.687 FPS, below a 2% gain over the
-baseline, and was discarded. The selected implementation combines span sharing
-with removal of the C forwarding call; its incremental call-removal gain is not
-isolated by repeated measurement. Only the selected implementation remains in
-product code. Source variants, run IDs, profile summaries, disassembly and test
-logs are retained as diagnostic evidence in `.deskkin/experiments/span-bands/`.
+The selected 120-second profile has 259 samples. Mean display wait between
+bands is 8.955 ms, coverage 1.683 ms, background 1.559 ms, scaler setup 1.180 ms,
+opaque blit 0.329 ms and sampling/span residual 25.209 ms. Mean alpha/opaque
+pixel counts are 164,001 / 13,708. Timings include elapsed preemption;
+sampling/span residual is not isolated texture sampling. Band availability
+still leaves transfer gaps, so overlap is preserved but not continuous.
+PROCPU/APPCPU static DRAM are 111,928 / 34,096 bytes, compared with
+378,168 / 34,104 bytes in the baseline.
 
 ## Verification
 
 `mise run test` passed, including clean CoreS3 conformance build
-`e11d55e0-2053-40f1-a8b1-2da26bed5112`. The 26 portable presentation tests cover
-reference pixels, statistics, clipping, atlas offsets and 8/16-pixel occlusion
-tile boundaries. Fresh independent full-diff and follow-up review found no
-actionable issues at `289eae7b`; only this status summary changed afterward.
-Final flash `268cbac5-e1c1-4fd2-a96d-682b4cf0e455` passed 345,600 hardware
-blit/reference and guard cases: lengths 0–320, independent source/destination/A8
-alignment, padded and unpadded backings, byte order, alpha extremes and
-transparent-to-visible source-cache transitions. Three benchmarks and final
-120-second profile `3e409189-4d40-4d37-9748-9cf95aafa4a7` completed without
-integrity failure. Final status `a2429e92-dd1f-49a0-97a8-b32e9a39c557` confirmed
-11,924 frames, fresh heartbeat, renderer fault 0 and zero allocation, transfer
-and stale-snapshot failures.
+`a0d3f259-db7c-4330-92b0-d45e01753c33`. The 27 portable presentation tests
+include stitched bands against full-frame pixels, clipping, atlas offsets,
+stride guards and scratch bounds. A host harness using the actual Slint line
+renderer and band ownership adapter produced zero differing pixels across
+three shell states and 24 bands with delayed fake DMA completion. A display
+worker harness checked successful transfers and failures in every band across
+17 two-frame scenarios, including recovery without false full-frame success.
+Fresh independent full-diff review found no actionable issues at
+`a42a00514ab10442e72f7c7bfa04fd5dc71658e0`; only this status summary changed
+afterward.
 
-There are no new pixel buffers, source copies, mask storage, dependencies or
-portable-core changes. Internal static SRAM remains 34,104 bytes; executable
-text grows by 372 bytes relative to `5b5acfc8`. The existing 64-byte mask table
-remains 16-byte aligned in internal SRAM. Existing typed benchmark/profile and
-renderer/display status remain the observation surface. LCD motion has not
-been observed through a camera in this optimization pass.
+Final flash `29139e5b-e1f0-44fa-94c4-0b9f4c893da5` completed startup hardware
+blit/guard checks and continued drawing through all three benchmarks and
+120-second profile `dff50c07-1514-44cb-b40c-2c8e15b8e147`.
+Final status `a12907a9-1c8f-4b9a-8b45-fa0f2430fd36` confirmed 6,905 frames,
+fresh heartbeat, renderer fault 0 and zero allocation, transfer and stale
+snapshot failures. LCD motion has not been camera-observed: on this flashed
+build, check that dragging the world keeps the grass and image contours intact
+without horizontal seams or flicker. Pixel and ownership tests passed, but do
+not observe physical scanout artifacts.
 
-The yielding SPI DMA wait, renderer-exclusive PIE ownership and spillable
-`call4` APPCPU startup trampoline remain the baseline. Other APPCPU threads
-and ISRs do not use PIE; q/SAR_BYTE state is not live across kernel calls.
-Zephyr preserves SAR across preemption and leaves CP3 enabled. Earlier
-qualification evidence remains in `.deskkin/experiments/simd-kernel/`,
-`.deskkin/experiments/dma-yield/`, `.deskkin/experiments/pie-owner/` and
-`.deskkin/experiments/alpha-direct/`.
+Source harnesses, logs, diagnostic run IDs, ELF digests and comparisons are
+intentionally retained in `.deskkin/experiments/band-buffers/` as local evidence.
+The existing renderer-exclusive PIE ownership and spillable `call4` startup
+trampoline remain unchanged. Other APPCPU threads and ISRs do not use PIE;
+q/SAR_BYTE state is not live across kernel calls. Zephyr preserves SAR across
+preemption and leaves CP3 enabled.
 
 ## Current baseline
 
@@ -104,9 +108,9 @@ Wi-Fi, Noise, NVS, the migrated application service, USB control, power/reset,
 and virtual observed pose. APPCPU owns Slint shell/texture generation, world
 rendering, SPI2/GDMA, and display transfer. GDMA is enabled again as the active
 product baseline. The old product task aliases are removed. APPCPU primary and
-secondary slots are 3 MiB. Two RGB565 framebuffers remain in internal SRAM and
-the display thread transfers each completed frame directly through
-APPCPU-owned GDMA channel pair 0. PROCPU owns the low 4 MiB PSRAM region for
+secondary slots are 3 MiB. Two 320x32 RGB565 band buffers occupy 40 KiB of internal SRAM;
+the display thread transfers each completed band directly through
+APPCPU-owned GDMA channel pair 0. The final band contains 16 rows. PROCPU owns the low 4 MiB PSRAM region for
 service/network heaps, input/message queues, and non-cache-critical stacks;
 APPCPU owns the explicitly reserved high 4 MiB for textures, decoded assets,
 Slint/world allocations, and its long-lived renderer/display stacks. The
@@ -119,10 +123,11 @@ coordinator temporarily borrows 1.5 KiB from the inactive service stack and is
 joined and zeroized before service ownership begins.
 
 The APPCPU display and renderer threads remain at the same priority so world
-rasterization can run while the five-batch full-frame transfer is active. Both
+rasterization can run while the preceding band transfer is active. Both
 threads have a one-tick per-thread slice at 1 kHz. Callback-free SPI GDMA does
-not enable its unused EOF interrupt. SPI yields to ready peers during DMA waits
-and retains timeout-aware hardware completion polling.
+not enable its unused EOF interrupt. SPI yields to ready peers during pixel DMA waits; short transfers of at most
+64 bytes use bounded polling to avoid a task handoff for each panel command.
+The DMA configuration and timeout-aware completion checks are shared.
 
 AMP shared memory has schema-checked, generation-published world snapshots, a
 bounded touch ring with per-slot publication and drop count, UI command slot,

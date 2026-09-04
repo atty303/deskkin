@@ -87,7 +87,7 @@ In paired mode, Availability and CompositionCheck are rendered from a reusable
 movement never redraws those templates. A custom renderer replaces solid clear
 with a shared RGB565 night-sky/ground gradient,
 projects and sorts billboards, and writes clipped scaled pixels directly into
-the final 320×240 RGB565 framebuffer. Information textures use fixed-point
+the final RGB565 render target (full frame or screen band). Information textures use fixed-point
 bilinear sampling; Character and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor geometry, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
@@ -179,7 +179,7 @@ touch, Wi-Fi, Noise, NVS, the application service, virtual observed pose, USB
 control, power/reset, and status supervision. APPCPU exclusively owns Slint
 texture generation, the custom world renderer, SPI2, and display transfer.
 SPI2 pixel payloads use APPCPU-owned GDMA channel pair 0. The display thread
-submits a completed full-screen RGB565 framebuffer directly from internal SRAM.
+submits completed 320×32 RGB565 bands directly from two internal-SRAM buffers.
 Because SPI polls completion without a DMA callback, callback-free peripheral
 GDMA channels keep completion interrupts disabled; callback-backed and
 memory-to-memory DMA behavior is unchanged. Display and renderer workers each
@@ -190,14 +190,14 @@ Wi-Fi/network state, input/message queues, and non-cache-critical stacks. It
 publishes the explicitly reserved high 4 MiB as the APPCPU caller-owned heap
 for Character decode, canonical information and object textures, Slint/world
 allocation, and the long-lived renderer/display stacks. The two full-screen
-framebuffers remain in internal SRAM because GDMA requires them there; other
+band buffers remain in internal SRAM for direct GDMA transfer; other
 large storage defaults to PSRAM.
 
 The cache-independent SRAM2 bank contains the PROCPU service and Wi-Fi stacks
 that can run across flash cache-disable intervals. The PROCPU stack that loads
 the AP image is internal for the same cache-disable requirement. APPCPU internal
 SRAM contains only boot/device initialization, drivers, kernel state, and the
-framebuffers; its long-lived rendering work runs on stacks allocated from the
+band buffers; its long-lived rendering work runs on stacks allocated from the
 high PSRAM region.
 
 ESP32-S3 flash operations can temporarily disable the instruction cache shared

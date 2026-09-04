@@ -38,7 +38,7 @@ class Phase3DeviceTests(unittest.TestCase):
             raw[27] = 1
             raw[40:44] = generation[0].to_bytes(4, "big")
             raw[168:172] = generation[0].to_bytes(4, "big")
-            for index in range(8):
+            for index in range(16):
                 raw[172 + index * 4:176 + index * 4] = (100 + index).to_bytes(4, "big")
             return bytes(raw)
         with mock.patch.object(device, "run_control", side_effect=sample), mock.patch.object(
@@ -49,6 +49,9 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertEqual(result["coverage_us_mean"], 100)
         self.assertEqual(result["pixel_raster_us_max"], 103)
         self.assertEqual(result["profile_bilinear_samples_min"], 107)
+        self.assertEqual(result["render_buffer_wait_us_mean"], 113)
+        self.assertEqual(result["display_band_wait_us_mean"], 114)
+        self.assertEqual(result["frame_transfer_us_mean"], 115)
         self.assertTrue(set(result) <= device.DIAGNOSTIC_RECORD_KEYS)
         with self.assertRaises(device.DeviceError):
             device.measure_raster(None, 121)
@@ -387,7 +390,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("_ext_ram_heap_end", heap_patch)
         self.assertIn("CONFIG_SPIRAM_MODE_QUAD=y", config)
         self.assertIn("CONFIG_SPIRAM_SPEED_80M=y", config)
-        self.assertIn("static __aligned(32) uint16_t internal_framebuffer[2U][320U * 240U]", source)
+        self.assertIn("static __aligned(32) uint16_t internal_framebuffer[2U][320U * DESKKIN_DISPLAY_BAND_ROWS]", source)
         self.assertIn(".framebuffer = (uint32_t)(uintptr_t)internal_framebuffer", source)
         self.assertNotIn("renderer_framebuffer", source)
         self.assertIn("esp_psram_get_mapped_region", source)
@@ -556,26 +559,28 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("const uint16_t nvs_failure = deskkin_nvs_last_failure();", supervisor)
         self.assertIn("response[65] = (uint8_t)(nvs_failure >> 8);", supervisor)
         self.assertIn("response[66] = (uint8_t)nvs_failure;", supervisor)
-        self.assertIn("#define STATUS_RESPONSE_SIZE 224", supervisor)
+        self.assertIn("#define STATUS_RESPONSE_SIZE 236", supervisor)
         self.assertIn("observe_renderer_stale(&renderer_stale_reported);", supervisor)
         self.assertIn("&AMP_SHARED->renderer_progress), &response[160]", supervisor)
         self.assertIn("&AMP_SHARED->display_progress), &response[164]", supervisor)
 
-    def test_amp_renderer_swaps_full_frames_without_reuse_overlap(self):
+    def test_amp_renderer_streams_bands_without_reuse_overlap(self):
         config = (ROOT / "apps/core-s3-amp/renderer/prj.conf").read_text(encoding="utf-8")
         renderer = (ROOT / "apps/core-s3-amp/renderer/src/lib.rs").read_text(encoding="utf-8")
         adapter = (ROOT / "apps/core-s3-amp/renderer/src/adapter.c").read_text(encoding="utf-8")
+        bands = (ROOT / "apps/core-s3-amp/renderer/src/band_buffer.rs").read_text(encoding="utf-8")
+        shared = (ROOT / "apps/core-s3-amp/shared.h").read_text(encoding="utf-8")
         bootstrap = (ROOT / "scripts/bootstrap_core_s3.sh").read_text(encoding="utf-8")
         self.assertIn("const BUFFER_COUNT: usize = 2;", renderer)
-        self.assertIn("RepaintBufferType::SwappedBuffers", renderer)
-        self.assertIn("renderer.render(framebuffer.pixels_mut(index), WIDTH)", renderer)
-        self.assertNotIn("render_by_line", renderer)
+        self.assertIn("RepaintBufferType::NewBuffer", renderer)
+        self.assertIn("renderer.render_by_line(&mut bands)", renderer)
+        self.assertNotIn("RepaintBufferType::SwappedBuffers", renderer)
         self.assertIn("deskkin_display_submit", renderer)
         self.assertIn("deskkin_display_take_completion", renderer)
-        self.assertIn("framebuffer.wait_for_back_buffer()?", renderer)
-        self.assertIn(".begin_render(index)", renderer)
-        self.assertIn(".submit(index)", renderer)
-        self.assertIn("self.back ^= 1;", renderer)
+        self.assertIn("self.ownership.is_inflight(self.back)", bands)
+        self.assertIn(".begin_render(self.back)", bands)
+        self.assertIn(".submit(index)", bands)
+        self.assertIn("self.back ^= 1;", bands)
         self.assertIn("#define FRAME_PIXELS (DISPLAY_WIDTH * DISPLAY_HEIGHT)", adapter)
         self.assertNotIn("CONFIG_ESP_SPIRAM", config)
         self.assertIn("sys_heap_init(&renderer_heap", adapter)
@@ -603,10 +608,10 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("k_yield();", adapter)
         self.assertNotIn("DMA_STAGING_LINES", adapter)
         self.assertNotIn("dma_staging", adapter)
-        self.assertIn("display_write(display, 0, 0, &descriptor, pixels)", adapter)
-        self.assertIn("FULL_FRAME_DMA_BATCHES", adapter)
-        self.assertIn("atomic_set(&pixel_dma_batches, FULL_FRAME_DMA_BATCHES)", adapter)
-        self.assertIn("deskkin_renderer_progress(RendererProgress::Buffer as u8)", renderer)
+        self.assertIn("display_write(display, 0, request.y, &descriptor, pixels)", adapter)
+        self.assertIn("#define DESKKIN_DISPLAY_BAND_ROWS 32U", shared)
+        self.assertIn("const BAND_ROWS: usize = 32;", renderer)
+        self.assertIn("deskkin_renderer_progress(RendererProgress::Buffer as u8)", bands)
         self.assertIn("display_progress(DESKKIN_DISPLAY_PROGRESS_TRANSFER)", adapter)
         self.assertIn("&AMP_SHARED->renderer_progress", adapter)
         self.assertIn("&AMP_SHARED->display_progress", adapter)
@@ -1063,8 +1068,6 @@ int main(void) {
                 "shell_property_matches": None,
                 "pixel_transfer_count": None,
                 "pixel_transfer_last_us": None,
-                "frame_difference_last": None,
-                "frame_difference_max": None,
                 "pose_generation": 6,
                 "input_generation": 7,
                 "stale_snapshots": 1,

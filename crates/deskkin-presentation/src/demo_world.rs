@@ -94,7 +94,8 @@ pub fn background_row(y: usize, ground_y: usize) -> [u16; 4] {
 }
 
 pub const GRASS_COUNT: usize = 176;
-pub const CAPACITY: usize = 23 + 48 + GRASS_COUNT;
+pub const BILLBOARD_COUNT: usize = 23;
+pub const CAPACITY: usize = BILLBOARD_COUNT + 48 + GRASS_COUNT;
 pub const DECORATION_TEXTURE_COUNT: usize = 31;
 pub const SPRITE_SIZE: SourceSize = SourceSize {
     width: 96,

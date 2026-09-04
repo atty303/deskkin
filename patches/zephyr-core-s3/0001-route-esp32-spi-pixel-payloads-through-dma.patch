@@ -134,7 +134,7 @@ diff --git a/drivers/spi/spi_esp32_spim.c b/drivers/spi/spi_esp32_spim.c
 +			break;
 +		}
 +		/* DMA runs independently; let a ready peer use this CPU. */
-+		if (use_dma && k_can_yield()) {
++		if (use_dma && transfer_len_bytes > SOC_SPI_MAXIMUM_BUFFER_SIZE && k_can_yield()) {
 +			k_yield();
 +		}
  	}

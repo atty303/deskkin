@@ -12,6 +12,8 @@
 #define DESKKIN_RUNTIME_SRAM_MAGIC 0x4453524dU
 #define DESKKIN_WORLD_SCHEMA 1U
 #define DESKKIN_CHANNEL_SCHEMA 1U
+#define DESKKIN_DISPLAY_BAND_ROWS 32U
+#define DESKKIN_RASTER_PROFILE_FIELDS 16U
 #define DESKKIN_TOUCH_CAPACITY 16U
 #define DESKKIN_SHARED_SIZE 0x1000U
 #define DESKKIN_CHANNEL_OFFSET 0x400U
@@ -201,7 +203,7 @@ struct deskkin_amp_shared {
 	uint32_t target_yaw_publication;
 	uint32_t renderer_progress;
 	uint32_t display_progress;
-	uint32_t raster_profile[13];
+	uint32_t raster_profile[DESKKIN_RASTER_PROFILE_FIELDS];
 	uint32_t raster_profile_publication;
 };
 

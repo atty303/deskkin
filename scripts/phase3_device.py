@@ -45,7 +45,7 @@ WORLD_BENCHMARK_MIN_COVERAGE_MILLI = 800
 WORLD_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
 WORLD_BENCHMARK_MIN_STATUS_RESPONSES = 20
 WORLD_DEMO_ENTITY_COUNT = 247
-STATUS_RESPONSE_SIZE = 224
+STATUS_RESPONSE_SIZE = 236
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -531,8 +531,6 @@ def report_status(status: bytes) -> None:
                 "shell_property_matches": decoded["culled_billboards"] if status[26] != 4 else None,
                 "pixel_transfer_count": decoded["nearest_samples"] if status[26] != 4 else None,
                 "pixel_transfer_last_us": decoded["bilinear_samples"] if status[26] != 4 else None,
-                "frame_difference_last": decoded["projection_us"] if status[26] != 4 else None,
-                "frame_difference_max": decoded["projection_max_us"] if status[26] != 4 else None,
                 "pose_generation": decoded["pose_generation"],
                 "input_generation": decoded["input_generation"],
                 "stale_snapshots": decoded["stale_snapshots"],
@@ -789,13 +787,16 @@ def decode_world_status(status: bytes) -> dict[str, int]:
             "alpha_blit_us": unsigned(212, 216) if len(status) >= 224 else 0,
             "opaque_blit_pixels": unsigned(216, 220) if len(status) >= 224 else 0,
             "alpha_blit_pixels": unsigned(220, 224) if len(status) >= 224 else 0,
+            "render_buffer_wait_us": unsigned(224, 228) if len(status) >= 236 else 0,
+            "display_band_wait_us": unsigned(228, 232) if len(status) >= 236 else 0,
+            "frame_transfer_us": unsigned(232, 236) if len(status) >= 236 else 0,
         }
     )
     return decoded
 
 
 PROFILE_FIELDS = ("coverage_us", "background_us", "scaler_setup_us", "pixel_raster_us",
-                  "coverage_tests", "scaler_preparations", "profile_nearest_samples", "profile_bilinear_samples", "sampling_us", "opaque_blit_us", "alpha_blit_us", "opaque_blit_pixels", "alpha_blit_pixels")
+                  "coverage_tests", "scaler_preparations", "profile_nearest_samples", "profile_bilinear_samples", "sampling_us", "opaque_blit_us", "alpha_blit_us", "opaque_blit_pixels", "alpha_blit_pixels", "render_buffer_wait_us", "display_band_wait_us", "frame_transfer_us")
 
 
 def measure_raster(device_arg: str | None, duration: float) -> dict[str, object]:

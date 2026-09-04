@@ -361,6 +361,9 @@ impl RateLimitedObservedYaw {
     }
 }
 
+mod bands;
+pub use bands::{BandTarget, PreparedBoard, PreparedScene};
+
 mod occlusion;
 pub use occlusion::{
     Background, Coverage, Mask8, Occlusion, RasterPhase, SceneBillboard, SceneStats, ScreenTile,
@@ -395,6 +398,7 @@ pub enum RasterError {
     InvalidTexture,
     InvalidMask,
     InvalidOrder,
+    InsufficientScratch,
 }
 
 pub fn raster_billboard(
@@ -512,8 +516,7 @@ fn raster_billboard_masked(
     {
         observer(RasterPhase::Pixels);
         let nearest_samples = raster_native(
-            framebuffer,
-            stride,
+            &mut BandTarget::new(framebuffer, stride, 0, VIEWPORT_HEIGHT as usize)?,
             projected,
             texture,
             region,
@@ -548,6 +551,7 @@ fn raster_billboard_masked(
         i64::from(top) - i64::from(projected.screen_rect.y),
     );
     let rows = RasterRows {
+        origin: 0,
         stride,
         left: left as usize,
         top: top as usize,
@@ -578,8 +582,7 @@ fn raster_billboard_masked(
 }
 
 fn raster_native(
-    framebuffer: &mut [u16],
-    stride: usize,
+    target: &mut BandTarget<'_>,
     projected: ProjectedBillboard,
     texture: Texture<'_>,
     region: TextureRegion,
@@ -590,8 +593,9 @@ fn raster_native(
     let rect = projected.screen_rect;
     let left = rect.x.max(0) as usize;
     let right = rect.x.saturating_add(rect.width).min(VIEWPORT_WIDTH) as usize;
-    let top = rect.y.max(0) as usize;
-    let bottom = rect.y.saturating_add(rect.height).min(VIEWPORT_HEIGHT) as usize;
+    let top = (rect.y.max(0) as usize).max(target.y);
+    let bottom = (rect.y.saturating_add(rect.height).min(VIEWPORT_HEIGHT) as usize)
+        .min(target.y + target.rows);
     let alpha = texture
         .coverage
         .is_alpha()
@@ -612,7 +616,8 @@ fn raster_native(
                     * usize::from(region.stride)
                     + source_x;
                 blitter.blit_from(
-                    &mut framebuffer[y * stride + start..y * stride + end],
+                    &mut target.pixels[(y - target.y) * target.stride + start
+                        ..(y - target.y) * target.stride + end],
                     texture.pixels,
                     source,
                     alpha,
@@ -664,8 +669,9 @@ impl AxisStepper {
     }
 }
 
+/// Caller-owned reusable horizontal sampler storage. Fields are prepared by the renderer.
 #[derive(Clone, Copy, Default)]
-struct ColumnSample {
+pub struct ColumnSample {
     first: u16,
     second: u16,
     fraction: u32,
@@ -675,6 +681,7 @@ struct ColumnSample {
 struct SampleRow<T>(T);
 
 struct RasterRows<'a> {
+    origin: usize,
     stride: usize,
     left: usize,
     top: usize,
@@ -706,6 +713,7 @@ impl RasterRows<'_> {
                     map.visible_span(row, x, self.left + self.columns.len(), index)
                 {
                     RasterRows {
+                        origin: self.origin,
                         stride: self.stride,
                         left: start,
                         top: row,
@@ -789,7 +797,7 @@ impl RasterRows<'_> {
                 + (sy + 1).min(usize::from(self.region.height) - 1))
                 * usize::from(self.region.stride);
             let fraction_y = coordinate & 0xffff;
-            let start = destination_y * self.stride + self.left;
+            let start = (destination_y - self.origin) * self.stride + self.left;
             for (index, column) in self.columns.iter().enumerate() {
                 let source_index = first_row + usize::from(column.first);
                 // Bilinear+A8 retains the existing constant-alpha convention.

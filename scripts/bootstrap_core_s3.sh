@@ -187,7 +187,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "7220921d88fd6445dad14b6c9b63351e9c4d17237bf353f19e80474e269cbedb":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "fdc4223dd47adcd08b02aff07ea2e8a34e53db18dc1e3cf9476c14f75a43b1cc":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 espressif_patch_diff = subprocess.run(
@@ -303,10 +303,10 @@ done
 module="$state_dir/west/zephyr"
 zephyr_patch_digest=$(git -C "$module" diff --binary HEAD | sha256sum | cut -d ' ' -f 1)
 case "$zephyr_patch_digest" in
-  7220921d88fd6445dad14b6c9b63351e9c4d17237bf353f19e80474e269cbedb)
+  fdc4223dd47adcd08b02aff07ea2e8a34e53db18dc1e3cf9476c14f75a43b1cc)
     zephyr_patches_current=1
     ;;
-  50936b1ab6c554f7777a57f69bf92d5c922213736195f936dfdfd4a88a7440a3)
+  7220921d88fd6445dad14b6c9b63351e9c4d17237bf353f19e80474e269cbedb|50936b1ab6c554f7777a57f69bf92d5c922213736195f936dfdfd4a88a7440a3)
     relative=drivers/spi/spi_esp32_spim.c
     git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
     mv "$module/$relative.migrating" "$module/$relative"

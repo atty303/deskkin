@@ -6,13 +6,14 @@ extern crate alloc;
 extern crate zephyr;
 
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
-use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
+use core::{cell::RefCell, ffi::c_int, time::Duration};
 use deskkin_presentation::{
-    BillboardId, CameraPose, Coverage, Mask8, Occlusion, PetAnimationState, PetAnimator,
-    ProjectedBillboard, RasterPhase, SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture,
-    TextureFilter, TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
+    BandTarget, BillboardId, CameraPose, ColumnSample, Coverage, Mask8, Occlusion,
+    PetAnimationState, PetAnimator, PreparedBoard, PreparedScene, ProjectedBillboard, RasterPhase,
+    SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture, TextureFilter, TextureId,
+    TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoMotion},
-    raster_scene_with_blitter, sort_far_to_near,
+    sort_far_to_near,
 };
 use qoi::{Channels, Decoder};
 use slint::platform::software_renderer::{
@@ -24,18 +25,19 @@ use slint::{ComponentHandle, Image, LogicalPosition, PhysicalSize, Rgba8Pixel, S
 slint::include_modules!();
 
 mod background;
+mod band_buffer;
 mod blit;
 mod buffer_ownership;
 mod texture_storage;
 
-use buffer_ownership::BufferOwnership;
+use band_buffer::{BandCompletion, Framebuffer, ShellBands};
 use texture_storage::{Alpha, Colors, row_stride};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
 const BUFFER_COUNT: usize = 2;
-const FRAME_PIXELS: usize = WIDTH * HEIGHT;
-const MAX_DIRTY_RECTS: usize = 3;
+const BAND_ROWS: usize = 32;
+const BAND_PIXELS: usize = WIDTH * BAND_ROWS;
 const PET_FRAME_WIDTH: u32 = 144;
 const PET_FRAME_HEIGHT: u32 = 156;
 
@@ -70,15 +72,6 @@ impl LoopAsset {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct DirtyRect {
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
 struct WorldSnapshot {
     magic: u32,
     generation: u32,
@@ -105,12 +98,8 @@ struct TouchSample {
 unsafe extern "C" {
     fn deskkin_renderer_entry_probe();
     fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
-    fn deskkin_display_submit(
-        buffer_index: u8,
-        dirty_rects: *const DirtyRect,
-        dirty_rect_count: u8,
-    ) -> c_int;
-    fn deskkin_display_take_completion(buffer_index: *mut u8, duration_us: *mut u32) -> c_int;
+    fn deskkin_display_submit(buffer_index: u8, y: u16, rows: u16) -> c_int;
+    fn deskkin_display_take_completion(completion: *mut BandCompletion) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_renderer_observe(stage: u8, fault: u8, render_us: u32, transfer_us: u32);
     fn deskkin_renderer_progress(stage: u8);
@@ -164,12 +153,7 @@ struct DevicePlatform {
 
 impl Platform for DevicePlatform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        let repaint = if self.windows.borrow().is_empty() {
-            RepaintBufferType::SwappedBuffers
-        } else {
-            RepaintBufferType::NewBuffer
-        };
-        let window = MinimalSoftwareWindow::new(repaint);
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         self.windows.borrow_mut().push(window.clone());
         Ok(window)
     }
@@ -194,11 +178,6 @@ impl TargetPixel for Rgb565BePixel {
         let native = <Rgb565Pixel as TargetPixel>::from_rgb(red, green, blue);
         Self(native.0.to_be())
     }
-}
-
-struct CompletedFrame {
-    render_us: u32,
-    transfer_us: u32,
 }
 
 #[repr(u8)]
@@ -227,126 +206,10 @@ enum RendererFault {
 #[derive(Clone, Copy)]
 enum RendererStage {
     Rendering = 2,
-    Transferring = 3,
     Presented = 4,
     Failed = 5,
     AssetLoading = 6,
     AssetReady = 7,
-}
-
-struct Framebuffer {
-    pixels: [NonNull<u16>; BUFFER_COUNT],
-    render_us: [u32; BUFFER_COUNT],
-    back: usize,
-    ownership: BufferOwnership<BUFFER_COUNT>,
-    _single_threaded: PhantomData<Rc<()>>,
-}
-
-impl Framebuffer {
-    fn new() -> Option<Self> {
-        Some(Self {
-            pixels: [
-                NonNull::new(unsafe { deskkin_framebuffer_alloc(0) })?,
-                NonNull::new(unsafe { deskkin_framebuffer_alloc(1) })?,
-            ],
-            render_us: [0; BUFFER_COUNT],
-            back: 0,
-            ownership: BufferOwnership::new(),
-            _single_threaded: PhantomData,
-        })
-    }
-
-    fn pixels_mut(&mut self, index: usize) -> &mut [Rgb565BePixel] {
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.pixels[index].as_ptr().cast::<Rgb565BePixel>(),
-                FRAME_PIXELS,
-            )
-        }
-    }
-
-    fn words_mut(&mut self, index: usize) -> &mut [u16] {
-        unsafe { core::slice::from_raw_parts_mut(self.pixels[index].as_ptr(), FRAME_PIXELS) }
-    }
-
-    fn take_completion(&mut self) -> Result<Option<CompletedFrame>, RendererFault> {
-        let mut buffer_index = 0_u8;
-        let mut transfer_us = 0_u32;
-        let result =
-            unsafe { deskkin_display_take_completion(&mut buffer_index, &mut transfer_us) };
-        if result == 0 {
-            return Ok(None);
-        }
-        let index = usize::from(buffer_index);
-        if result < 0 || self.ownership.complete(index).is_err() {
-            return Err(RendererFault::Completion);
-        }
-        Ok(Some(CompletedFrame {
-            render_us: self.render_us[index],
-            transfer_us,
-        }))
-    }
-
-    fn publish_completions(&mut self) -> Result<(), RendererFault> {
-        while let Some(frame) = self.take_completion()? {
-            unsafe {
-                deskkin_renderer_observe(
-                    RendererStage::Presented as u8,
-                    RendererFault::None as u8,
-                    frame.render_us,
-                    frame.transfer_us,
-                )
-            };
-        }
-        Ok(())
-    }
-
-    fn wait_for_back_buffer(&mut self) -> Result<(), RendererFault> {
-        while self.ownership.is_inflight(self.back) {
-            if let Some(frame) = self.take_completion()? {
-                unsafe {
-                    deskkin_renderer_observe(
-                        RendererStage::Presented as u8,
-                        RendererFault::None as u8,
-                        frame.render_us,
-                        frame.transfer_us,
-                    )
-                };
-            } else {
-                unsafe { deskkin_yield() };
-            }
-        }
-        Ok(())
-    }
-
-    fn submit(&mut self, render_us: u32, dirty_rects: &[DirtyRect]) -> Result<(), RendererFault> {
-        let index = self.back;
-        self.render_us[index] = render_us;
-        self.ownership
-            .submit(index)
-            .map_err(|_| RendererFault::Ownership)?;
-        if unsafe {
-            deskkin_display_submit(
-                index as u8,
-                dirty_rects.as_ptr(),
-                dirty_rects.len().try_into().unwrap_or(u8::MAX),
-            )
-        } != 0
-        {
-            self.ownership.submission_failed(index);
-            return Err(RendererFault::Submit);
-        }
-        self.back ^= 1;
-        unsafe {
-            deskkin_renderer_observe(
-                RendererStage::Transferring as u8,
-                RendererFault::None as u8,
-                render_us,
-                0,
-            )
-        };
-        Ok(())
-    }
 }
 
 fn elapsed_us(start: u64, end: u64) -> u32 {
@@ -438,68 +301,24 @@ fn replace_loop(
 fn render_frame(
     window: &MinimalSoftwareWindow,
     framebuffer: &mut Framebuffer,
-    force_full_transfer: bool,
 ) -> Result<(), RendererFault> {
     slint::platform::update_timers_and_animations();
-    unsafe { deskkin_renderer_progress(RendererProgress::Buffer as u8) };
-    framebuffer.publish_completions()?;
-    framebuffer.wait_for_back_buffer()?;
-    unsafe {
-        deskkin_renderer_observe(
-            RendererStage::Rendering as u8,
-            RendererFault::None as u8,
-            0,
-            0,
-        )
+    framebuffer.begin_frame()?;
+    let mut bands = ShellBands {
+        framebuffer,
+        next_line: 0,
+        fault: None,
     };
-    let started = unsafe { deskkin_uptime_us() };
-    unsafe { deskkin_renderer_progress(RendererProgress::Raster as u8) };
-    let index = framebuffer.back;
-    let mut dirty_rects = [DirtyRect::default(); MAX_DIRTY_RECTS];
-    let mut dirty_rect_count = 0_usize;
-    framebuffer
-        .ownership
-        .begin_render(index)
-        .map_err(|_| RendererFault::Ownership)?;
     let rendered = window.draw_if_needed(|renderer| {
-        let dirty_region = renderer.render(framebuffer.pixels_mut(index), WIDTH);
-        let position = dirty_region.bounding_box_origin();
-        let size = dirty_region.bounding_box_size();
-        if size.width != 0 && size.height != 0 {
-            if let (Ok(x), Ok(y), Ok(width), Ok(height)) = (
-                position.x.try_into(),
-                position.y.try_into(),
-                size.width.try_into(),
-                size.height.try_into(),
-            ) {
-                dirty_rects[0] = DirtyRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                };
-                dirty_rect_count = 1;
-            }
-        }
+        renderer.render_by_line(&mut bands);
     });
-    if !rendered {
-        framebuffer.ownership.cancel_render(index);
+    if let Some(fault) = bands.fault {
+        return Err(fault);
+    }
+    if !rendered || bands.next_line != HEIGHT {
         return Err(RendererFault::RenderSkipped);
     }
-    if force_full_transfer {
-        dirty_rects[0] = DirtyRect {
-            x: 0,
-            y: 0,
-            width: WIDTH as u16,
-            height: HEIGHT as u16,
-        };
-        dirty_rect_count = 1;
-    }
-    unsafe { deskkin_renderer_progress(RendererProgress::Submit as u8) };
-    framebuffer.submit(
-        elapsed_us(started, unsafe { deskkin_uptime_us() }),
-        &dirty_rects[..dirty_rect_count],
-    )
+    Ok(())
 }
 
 struct BillboardTexture {
@@ -696,10 +515,16 @@ fn ensure_world_textures(
     Ok(())
 }
 
+struct WorldRasterScratch {
+    cutoffs: Vec<u16>,
+    prepared: Vec<PreparedBoard>,
+    columns: Vec<ColumnSample>,
+}
+
 struct WorldMotion {
     scene: DemoMotion,
     updated_at_us: u64,
-    cutoffs: Vec<u16>,
+    raster: WorldRasterScratch,
     projected: Vec<ProjectedBillboard>,
 }
 
@@ -708,7 +533,11 @@ impl WorldMotion {
         Self {
             scene: DemoMotion::default(),
             updated_at_us: now_us,
-            cutoffs: vec![0; ScreenTile::Eight.cells()],
+            raster: WorldRasterScratch {
+                cutoffs: vec![0; ScreenTile::Eight.cells()],
+                prepared: vec![PreparedBoard::default(); demo_world::CAPACITY],
+                columns: vec![ColumnSample::default(); WIDTH * demo_world::BILLBOARD_COUNT],
+            },
             projected: vec![empty_projected(); demo_world::CAPACITY],
         }
     }
@@ -829,42 +658,50 @@ fn world_billboard<'a>(
 // recurse, and its scratch must not overlap this renderer's large raster frame.
 #[inline(never)]
 fn draw_world_scene(
-    pixels: &mut [u16],
+    framebuffer: &mut Framebuffer,
     projected: &[ProjectedBillboard],
     decoded: &DecodedLoop,
     frame_index: u8,
     textures: &WorldTextures,
-    occlusion: &mut Occlusion<'_>,
+    scratch: &mut WorldRasterScratch,
     context: (&mut impl FnMut(RasterPhase), &mut blit::PieBlitter),
 ) -> Result<deskkin_presentation::SceneStats, RendererFault> {
     let (observer, blitter) = context;
-    if projected.is_empty() {
-        raster_scene_with_blitter(
-            pixels,
-            WIDTH,
-            &[],
-            (background::PieBackground, blitter),
-            true,
-            occlusion,
+    let mut render = |boards: &[SceneBillboard<'_>]| {
+        let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut scratch.cutoffs)
+            .map_err(|_| RendererFault::RenderSkipped)?;
+        let mut plan = PreparedScene::new(
+            boards,
+            &mut occlusion,
+            &mut scratch.prepared,
+            &mut scratch.columns,
             observer,
         )
+        .map_err(|_| RendererFault::RenderSkipped)?;
+        let mut background = background::PieBackground;
+        for y in (0..HEIGHT).step_by(BAND_ROWS) {
+            let rows = BAND_ROWS.min(HEIGHT - y);
+            framebuffer.begin_band()?;
+            let index = framebuffer.back;
+            let target = BandTarget::new(framebuffer.words_mut(index), WIDTH, y, rows)
+                .map_err(|_| RendererFault::RenderSkipped)?;
+            plan.raster_band(target, (&mut background, &mut *blitter), true, observer);
+            if y + rows < HEIGHT {
+                framebuffer.submit_band(y, rows, None)?;
+            }
+        }
+        Ok(plan.stats())
+    };
+    if projected.is_empty() {
+        render(&[])
     } else {
         let mut scene =
             [world_billboard(projected[0], decoded, frame_index, textures)?; demo_world::CAPACITY];
         for (slot, value) in scene.iter_mut().zip(projected) {
             *slot = world_billboard(*value, decoded, frame_index, textures)?;
         }
-        raster_scene_with_blitter(
-            pixels,
-            WIDTH,
-            &scene[..projected.len()],
-            (background::PieBackground, blitter),
-            true,
-            occlusion,
-            observer,
-        )
+        render(&scene[..projected.len()])
     }
-    .map_err(|_| RendererFault::RenderSkipped)
 }
 
 fn render_world(
@@ -877,18 +714,10 @@ fn render_world(
     input_generation: u32,
     telemetry: &mut WorldTelemetry,
 ) -> Result<(), RendererFault> {
-    unsafe { deskkin_renderer_progress(RendererProgress::Buffer as u8) };
-    framebuffer.publish_completions()?;
-    framebuffer.wait_for_back_buffer()?;
-    let index = framebuffer.back;
-    framebuffer
-        .ownership
-        .begin_render(index)
-        .map_err(|_| RendererFault::Ownership)?;
+    framebuffer.begin_frame()?;
     let started = unsafe { deskkin_uptime_us() };
     unsafe { deskkin_renderer_progress(RendererProgress::Raster as u8) };
     motion.advance(started);
-    let pixels = framebuffer.words_mut(index);
     let camera = CameraPose {
         radius: WorldUnit::from_int(4),
         observed_azimuth: UnwrappedAngle::from_units(snapshot.observed_yaw),
@@ -918,9 +747,7 @@ fn render_world(
     sort_far_to_near(&mut projected[..count]);
     let sort_us = elapsed_us(sort_started, unsafe { deskkin_uptime_us() });
     let raster_started = unsafe { deskkin_uptime_us() };
-    let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut motion.cutoffs)
-        .map_err(|_| RendererFault::RenderSkipped)?;
-    let mut profile = [0_u32; 13];
+    let mut profile = [0_u32; 16];
     let mut blitter = blit::PieBlitter::default();
     let mut phase = RasterPhase::Idle;
     let mut phase_started = unsafe { deskkin_blit_cycles() };
@@ -934,12 +761,12 @@ fn render_world(
         phase_started = now;
     };
     let stats = draw_world_scene(
-        pixels,
+        framebuffer,
         &projected[..count],
         decoded,
         frame_index,
         textures,
-        &mut occlusion,
+        &mut motion.raster,
         (&mut observer, &mut blitter),
     )?;
     profile[4] = stats.coverage_tests;
@@ -949,7 +776,6 @@ fn render_world(
     let blit_profile = blitter.profile();
     profile[8] = profile[3].saturating_sub(blit_profile[0] + blit_profile[1]);
     profile[9..13].copy_from_slice(&blit_profile);
-    unsafe { deskkin_raster_profile(profile.as_ptr()) };
     let nearest_samples = stats.raster.nearest_samples;
     let bilinear_samples = stats.raster.bilinear_samples;
     let raster_us = elapsed_us(raster_started, unsafe { deskkin_uptime_us() });
@@ -971,14 +797,8 @@ fn render_world(
             raster_us,
         )
     };
-    let rect = [DirtyRect {
-        x: 0,
-        y: 0,
-        width: WIDTH as u16,
-        height: HEIGHT as u16,
-    }];
-    unsafe { deskkin_renderer_progress(RendererProgress::Submit as u8) };
-    framebuffer.submit(elapsed_us(started, unsafe { deskkin_uptime_us() }), &rect)
+    let last_band = (HEIGHT - 1) / BAND_ROWS * BAND_ROWS;
+    framebuffer.submit_band(last_band, HEIGHT - last_band, Some(profile))
 }
 
 const fn empty_projected() -> ProjectedBillboard {
@@ -1129,7 +949,6 @@ extern "C" fn rust_main() {
     let mut ui_pointer_pressed = false;
     let mut world_snapshot = WorldSnapshot::default();
     let mut have_world_snapshot = false;
-    let mut rendered_shell = None;
     let mut world_motion = WorldMotion::new(unsafe { deskkin_uptime_us() });
 
     loop {
@@ -1224,7 +1043,6 @@ extern "C" fn rust_main() {
             };
             window.request_redraw();
         }
-        let shell_changed = have_world_snapshot && rendered_shell != Some(world_snapshot.shell);
         let render_result = if have_world_snapshot && world_snapshot.shell == 4 {
             unsafe { deskkin_shell_observe(4, 0) };
             unsafe { deskkin_renderer_progress(RendererProgress::Texture as u8) };
@@ -1278,14 +1096,11 @@ extern "C" fn rust_main() {
                 &mut world_telemetry,
             )
         } else {
-            render_frame(&window, &mut framebuffer, shell_changed)
+            render_frame(&window, &mut framebuffer)
         };
         if let Err(fault) = render_result {
             unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };
             return;
-        }
-        if have_world_snapshot {
-            rendered_shell = Some(world_snapshot.shell);
         }
         if have_world_snapshot && world_snapshot.shell != 4 {
             unsafe {

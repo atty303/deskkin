@@ -90,6 +90,7 @@ fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
         .count();
     assert!(pixel_phases >= stats.scaler_preparations as usize);
     assert!(pixel_phases <= boards.len());
+    compare_bands(boards, wire, &expected, stats);
     stats
 }
 
@@ -486,4 +487,97 @@ fn native_sprites_do_not_prepare_scalers() {
         TextureFilter::Nearest,
     );
     assert_eq!(compare(&[scaled], true).scaler_preparations, 1);
+}
+
+fn compare_bands(boards: &[SceneBillboard<'_>], wire: bool, expected: &[u16], full: SceneStats) {
+    use crate::{BandTarget, ColumnSample, PreparedBoard, PreparedScene};
+    let stride = 327;
+    for height in [1, 7, 30, 32, 64, 240] {
+        let mut scratch = std::vec![PreparedBoard::default(); boards.len()];
+        let mut columns = std::vec![ColumnSample::default(); boards.len() * 320];
+        let mut cutoffs = [0; 1200];
+        let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut cutoffs).unwrap();
+        let mut plan = PreparedScene::new(
+            boards,
+            &mut occlusion,
+            &mut scratch,
+            &mut columns,
+            &mut |_| {},
+        )
+        .unwrap();
+        let mut actual = std::vec![0xdead; expected.len()];
+        let mut band = std::vec![0xdead; stride * height + 38];
+        for y in (0..240).step_by(height) {
+            let rows = height.min(240 - y);
+            band.fill(0xdead);
+            plan.raster_band(
+                BandTarget::new(&mut band[19..19 + stride * rows], stride, y, rows).unwrap(),
+                (
+                    &mut |y| demo_world::background_row(y, 147),
+                    &mut ScalarBlitter,
+                ),
+                wire,
+                &mut |_| {},
+            );
+            assert!(band[..19].iter().all(|&v| v == 0xdead));
+            assert!(band[19 + stride * rows..].iter().all(|&v| v == 0xdead));
+            actual[y * stride..(y + rows) * stride].copy_from_slice(&band[19..19 + stride * rows]);
+        }
+        assert!(
+            actual == expected,
+            "stitched band pixels/guards differ at height {height}"
+        );
+        assert_eq!(plan.stats().raster, full.raster);
+        assert_eq!(plan.stats().scaler_preparations, full.scaler_preparations);
+        assert_eq!(plan.stats().coverage_tests, full.coverage_tests);
+    }
+}
+
+#[test]
+fn band_bounds_and_scratch_fail_before_writing_pixels() {
+    use crate::{BandTarget, PreparedScene};
+    let mut pixels = [0xdead; 320];
+    for (stride, y, rows) in [
+        (319, 0, 1),
+        (320, 240, 1),
+        (320, 239, 2),
+        (usize::MAX, 0, 2),
+        (320, 0, 0),
+    ] {
+        assert!(BandTarget::new(&mut pixels, stride, y, rows).is_err());
+    }
+    assert!(pixels.iter().all(|&p| p == 0xdead));
+    let texture = Texture {
+        size: SourceSize {
+            width: 1,
+            height: 1,
+        },
+        pixels: &[0xffff],
+        coverage: Coverage::Opaque,
+    };
+    let boards = [board(
+        texture,
+        TextureRegion {
+            source_x: 0,
+            source_y: 0,
+            width: 1,
+            height: 1,
+            stride: 1,
+        },
+        ScreenRect {
+            x: 0,
+            y: 0,
+            width: 13,
+            height: 13,
+        },
+        1,
+        0,
+        TextureFilter::Bilinear,
+    )];
+    let mut cutoffs = [0; 1200];
+    let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut cutoffs).unwrap();
+    assert!(matches!(
+        PreparedScene::new(&boards, &mut occlusion, &mut [], &mut [], &mut |_| {}),
+        Err(RasterError::InsufficientScratch)
+    ));
 }

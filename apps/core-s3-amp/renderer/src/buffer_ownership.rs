@@ -48,12 +48,6 @@ impl<const N: usize> BufferOwnership<N> {
         Ok(())
     }
 
-    pub fn cancel_render(&mut self, index: usize) {
-        if self.rendering == Some(index) {
-            self.rendering = None;
-        }
-    }
-
     pub fn submission_failed(&mut self, index: usize) {
         if index < N {
             self.inflight[index] = false;
@@ -106,13 +100,5 @@ mod tests {
         assert_eq!(ownership.complete(0), Err(OwnershipError::NotInFlight));
         ownership.submit(0).unwrap();
         assert_eq!(ownership.submit(0), Err(OwnershipError::NotRendering));
-    }
-
-    #[test]
-    fn skipped_render_releases_the_buffer() {
-        let mut ownership = BufferOwnership::<2>::new();
-        ownership.begin_render(0).unwrap();
-        ownership.cancel_render(0);
-        ownership.begin_render(1).unwrap();
     }
 }
