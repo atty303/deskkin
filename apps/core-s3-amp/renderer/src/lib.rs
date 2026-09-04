@@ -484,6 +484,7 @@ fn render_frame(
 }
 
 struct BillboardTexture {
+    size: SourceSize,
     pixels: Vec<u16>,
 }
 
@@ -495,16 +496,26 @@ fn capture_billboard(
     text: &str,
     color: slint::Color,
 ) -> Result<BillboardTexture, RendererFault> {
+    let size = if demo == 2 {
+        demo_world::PORTRAIT_CARD
+    } else {
+        demo_world::LANDSCAPE_CARD
+    };
+    component.set_capture_width(i32::from(size.width));
+    component.set_capture_height(i32::from(size.height));
     component.set_capture_notice(notice);
     component.set_capture_demo(demo);
     component.set_capture_status_text(text.into());
     component.set_capture_status_color(color);
     component.set_capture_mode(true);
-    window.set_size(PhysicalSize::new(272, 124));
+    window.set_size(PhysicalSize::new(
+        u32::from(size.width),
+        u32::from(size.height),
+    ));
     window.request_redraw();
-    let mut pixels = vec![Rgb565Pixel(0); 272 * 124];
+    let mut pixels = vec![Rgb565Pixel(0); usize::from(size.width) * usize::from(size.height)];
     let rendered = window.draw_if_needed(|renderer| {
-        let _ = renderer.render(&mut pixels, 272);
+        let _ = renderer.render(&mut pixels, usize::from(size.width));
     });
     component.set_capture_mode(false);
     window.set_size(PhysicalSize::new(WIDTH as u32, HEIGHT as u32));
@@ -513,6 +524,7 @@ fn capture_billboard(
         return Err(RendererFault::RenderSkipped);
     }
     Ok(BillboardTexture {
+        size,
         pixels: pixels.into_iter().map(|pixel| pixel.0).collect(),
     })
 }
@@ -706,7 +718,6 @@ fn render_world(
     unsafe { deskkin_renderer_progress(RendererProgress::Raster as u8) };
     motion.advance(started);
     let pixels = framebuffer.words_mut(index);
-    demo_world::paint_background(pixels, true).map_err(|_| RendererFault::RenderSkipped)?;
     let camera = CameraPose {
         radius: WorldUnit::from_int(4),
         observed_azimuth: UnwrappedAngle::from_units(snapshot.observed_yaw),
@@ -735,6 +746,8 @@ fn render_world(
     sort_far_to_near(&mut projected[..count]);
     let sort_us = elapsed_us(sort_started, unsafe { deskkin_uptime_us() });
     let raster_started = unsafe { deskkin_uptime_us() };
+    demo_world::paint_background(pixels, true, &projected[..count])
+        .map_err(|_| RendererFault::RenderSkipped)?;
     let mut nearest_samples = 0_u32;
     let mut bilinear_samples = 0_u32;
     for value in projected[..count].iter().copied() {
@@ -776,46 +789,27 @@ fn render_world(
                 )
                 .map_err(|_| RendererFault::RenderSkipped)?
             }
-            10..=12 => raster_billboard_be(
-                pixels,
-                WIDTH,
-                value,
-                Texture {
-                    size: SourceSize {
-                        width: 272,
-                        height: 124,
+            10..=12 | 20 | 40..=42 => {
+                let texture = match value.source.0 {
+                    10..=12 => &textures.availability[usize::from(value.source.0 - 10)],
+                    20 => &textures.notice,
+                    _ => &textures.demo[usize::from(value.source.0 - 40)],
+                }
+                .as_ref()
+                .ok_or(RendererFault::RenderSkipped)?;
+                raster_billboard_be(
+                    pixels,
+                    WIDTH,
+                    value,
+                    Texture {
+                        size: texture.size,
+                        pixels: &texture.pixels,
+                        alpha: &[],
+                        format: PixelFormat::OpaqueRgb565,
                     },
-                    pixels: &textures.availability[(value.source.0 - 10) as usize]
-                        .as_ref()
-                        .ok_or(RendererFault::RenderSkipped)?
-                        .pixels,
-                    alpha: &[],
-                    format: PixelFormat::OpaqueRgb565,
-                },
-            )
-            .map_err(|_| RendererFault::RenderSkipped)?,
-            20 | 40..=42 => raster_billboard_be(
-                pixels,
-                WIDTH,
-                value,
-                Texture {
-                    size: SourceSize {
-                        width: 272,
-                        height: 124,
-                    },
-                    pixels: &(if value.source.0 == 20 {
-                        &textures.notice
-                    } else {
-                        &textures.demo[usize::from(value.source.0 - 40)]
-                    })
-                    .as_ref()
-                    .ok_or(RendererFault::RenderSkipped)?
-                    .pixels,
-                    alpha: &[],
-                    format: PixelFormat::OpaqueRgb565,
-                },
-            )
-            .map_err(|_| RendererFault::RenderSkipped)?,
+                )
+                .map_err(|_| RendererFault::RenderSkipped)?
+            }
             _ => return Err(RendererFault::RenderSkipped),
         };
         nearest_samples = nearest_samples.saturating_add(stats.nearest_samples);

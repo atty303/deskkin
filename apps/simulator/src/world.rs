@@ -83,8 +83,6 @@ impl WorldScene {
     ) -> Result<(), String> {
         self.advance(elapsed_ms);
         self.ensure_textures(ui, views)?;
-        demo_world::paint_background(&mut self.framebuffer, false)
-            .map_err(|error| format!("world background: {error:?}"))?;
 
         let entities = demo_world::entities(
             self.motion,
@@ -112,6 +110,8 @@ impl WorldScene {
             }
         }
         sort_far_to_near(&mut projected[..count]);
+        demo_world::paint_background(&mut self.framebuffer, false, &projected[..count])
+            .map_err(|error| format!("world background: {error:?}"))?;
         self.metrics.visible = u16::try_from(count).unwrap_or(u16::MAX);
         self.metrics.nearest_samples = 0;
         self.metrics.bilinear_samples = 0;
@@ -256,6 +256,13 @@ fn availability_index(surface: availability::Surface) -> usize {
 }
 
 fn capture_billboard(ui: &StatusWindow, notice: bool, demo: i32) -> Result<OwnedTexture, String> {
+    let size = if demo == 2 {
+        demo_world::PORTRAIT_CARD
+    } else {
+        demo_world::LANDSCAPE_CARD
+    };
+    ui.set_capture_width(i32::from(size.width));
+    ui.set_capture_height(i32::from(size.height));
     ui.set_world_mode(false);
     ui.set_capture_notice(notice);
     ui.set_capture_demo(demo);
@@ -267,18 +274,15 @@ fn capture_billboard(ui: &StatusWindow, notice: bool, demo: i32) -> Result<Owned
     ui.set_capture_mode(false);
     ui.set_world_mode(true);
     let snapshot = snapshot?;
-    let mut pixels = Vec::with_capacity(272 * 124);
-    for y in 0..124usize {
-        for x in 0..272usize {
+    let mut pixels = Vec::with_capacity(usize::from(size.width) * usize::from(size.height));
+    for y in 0..usize::from(size.height) {
+        for x in 0..usize::from(size.width) {
             let pixel = snapshot.as_slice()[y * WIDTH + x];
             pixels.push(rgb565(pixel.r, pixel.g, pixel.b));
         }
     }
     Ok(OwnedTexture {
-        size: SourceSize {
-            width: 272,
-            height: 124,
-        },
+        size,
         pixels,
         alpha: Vec::new(),
         format: PixelFormat::OpaqueRgb565,
@@ -429,6 +433,15 @@ mod tests {
         };
         scene.tick(&ui, views, 0).unwrap();
         assert_eq!(scene.metrics.cache_misses, 3);
+        let portrait = scene.demo_cache[2].as_ref().unwrap();
+        assert_eq!(portrait.size, demo_world::PORTRAIT_CARD);
+        let width = usize::from(portrait.size.width);
+        let height = usize::from(portrait.size.height);
+        assert_eq!(portrait.pixels.len(), width * height);
+        assert_eq!(
+            portrait.pixels[(height - 1) * width + width / 2],
+            rgb565(0x4d, 0x66, 0x60)
+        );
         assert_eq!(
             usize::from(scene.metrics.visible + scene.metrics.culled),
             demo_world::CAPACITY

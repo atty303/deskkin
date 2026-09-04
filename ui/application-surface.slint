@@ -104,19 +104,21 @@ export component ApplicationSurface inherits Rectangle {
         border-width: 2px;
         border-color: root.demo-card == 1 ? #8c7751 : #4d6660;
         Text {
-            x: 20px; y: 12px;
-            text: root.demo-card == 0 ? "DEMO / THE GARDEN" : root.demo-card == 1 ? "DEMO / FIELD NOTES" : "DEMO / SLOW EXPLORING";
-            color: #c8ac79; font-size: 14px; font-weight: 600;
+            x: root.demo-card == 2 ? 16px : 20px; y: 12px;
+            text: root.demo-card == 0 ? "DEMO / THE GARDEN" : root.demo-card == 1 ? "DEMO / FIELD NOTES" : "DEMO / EXPLORE";
+            color: #c8ac79; font-size: root.demo-card == 2 ? 12px : 14px; font-weight: 600;
         }
         Text {
-            x: 20px; y: 33px;
-            text: root.demo-card == 0 ? "Night garden" : root.demo-card == 1 ? "After hours" : "Take a look";
+            x: root.demo-card == 2 ? 16px : 20px; y: 33px;
+            text: root.demo-card == 0 ? "Night garden" : root.demo-card == 1 ? "After hours" : "Take a\nlook";
             color: #f1dfb9; font-size: 28px; font-weight: 700;
         }
         Text {
-            x: 20px; y: 73px; width: parent.width - 40px;
-            text: root.demo-card == 0 ? "Tiny worlds. Warm lights.\nA little company for your desk." : root.demo-card == 1 ? "Lanterns drift. Leaves sway.\nThere is no hurry here." : "Drag to explore the garden.\nThe view keeps drifting.";
-            color: #b6c9bd; font-size: 16px;
+            x: root.demo-card == 2 ? 16px : 20px;
+            y: root.demo-card == 2 ? 113px : 73px;
+            width: parent.width - (root.demo-card == 2 ? 32px : 40px);
+            text: root.demo-card == 0 ? "Tiny worlds. Warm lights.\nA little company for your desk." : root.demo-card == 1 ? "Lanterns drift. Leaves sway.\nThere is no hurry here." : "Drag to explore\nthe garden.\n\nThe view keeps\ndrifting.";
+            color: #b6c9bd; font-size: root.demo-card == 2 ? 14px : 16px;
         }
     }
 }

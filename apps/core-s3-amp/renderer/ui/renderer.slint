@@ -7,10 +7,12 @@ export component RendererWindow inherits Window {
     in property <bool> capture-mode: false;
     in property <bool> capture-notice: false;
     in property <int> capture-demo: -1;
+    in property <int> capture-width: 272;
+    in property <int> capture-height: 124;
     in property <string> capture-status-text: "Unknown";
     in property <color> capture-status-color: #f3b33d;
-    width: capture-mode ? 272px : 320px;
-    height: capture-mode ? 124px : 240px;
+    width: capture-mode ? capture-width * 1px : 320px;
+    height: capture-mode ? capture-height * 1px : 240px;
     in-out property <image> pet-atlas;
     in-out property <int> pet-frame-index: 0;
     in property <string> shell-state: "SetupRequired";

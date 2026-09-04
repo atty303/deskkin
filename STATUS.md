@@ -4,36 +4,42 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
-The paired world's solid clear is replaced by a shared, allocation-free RGB565
-sky-to-ground gradient. Muted sage near the foreground character's feet suggests
-ground without floor geometry; navy above and deep green below keep the night
-garden's contrast. Fixed 4x4 dithering softens RGB565 banding without temporal
-noise. The existing back buffer is filled directly before billboard composition.
+The paired world has a crisp, dark-green ground region below a muted sky.
+Its boundary follows the character's projected foot anchor using the same
+observed-camera projection as the billboards, with viewport-center fallback
+when the character is culled. No floor geometry or additional framebuffer is
+introduced. Fixed 4x4 dithering softens RGB565 banding without temporal noise;
+the existing back buffer is filled directly before billboard composition.
 
 The garden now has three persistent information-card slots with richer text.
 Availability and Notice retain their semantic meaning; absent views use labelled
-demo garden/field-note copy, and a third card is an exploration guide. The camera
+demo garden/field-note copy. The third exploration-guide card uses a portrait
+136x204 Slint capture and layout; the other two remain landscape 272x124. The camera
 continuously advances 3 degrees/s (120 seconds/turn) in paired mode, composed with
 unwrapped drag through observed yaw and the existing 180 degrees/s rate limit.
 The decorative objects, invisible coordinate model, internal DMA framebuffers,
 PSRAM cache ownership and pairing UI are preserved. No new dependencies.
 
-Headless front and 60-second gradient previews were inspected. Background tests
+Headless front and 60-second ground/portrait previews were inspected. Background tests
 cover complete overwrite, invalid-buffer non-mutation, trailing guards, repeatability
-and native/wire byte-order equivalence. Existing scene and simulator tests pass.
+and native/wire byte-order equivalence, plus foot tracking across depth, camera
+height, turn seams and viewport extremes. Simulator tests verify full-height
+portrait capture and scene tests verify exactly one portrait among three cards.
 `mise run fix`, lint, targeted tests and the final `mise run test` passed, including
 all AMP domains and inert recovery (build record
-`e1ecb2b8-45e9-44ee-a625-37326e1b9d6c`). APPCPU image size is 1,678,244 bytes;
-the linker map places the 1,920-byte background table in `.flash.rodata` at
-0x3de8fcf8. No extra framebuffer or heap allocation is introduced. Fresh review
-found no required changes. The gradient is not flashed or live-qualified yet;
-LCD dark-tone/dither appearance and render timing remain live acceptance items.
+`c76718a7-660e-47f6-b13d-d4ca7bc021f9`). APPCPU image size is 1,671,120 bytes;
+the linker map places the 3,840-byte background table in `.flash.rodata` at
+0x3de8f5ac. Background drawing adds no heap allocation; demo card textures use
+190,400 bytes in PSRAM. Background time is included in world-raster and total
+render timing. Fresh review found no required changes. This revision is not
+flashed or live-qualified yet; LCD dark-tone/dither appearance, portrait text
+readability, ground-motion appearance and render timing remain live acceptance items.
 
-The three-card/automatic-camera revision was flashed with all AMP domain hashes
-verified (record `18092542-53ba-4f2d-8150-5d7e6e478959`). Status record
-`4af4f20a-f836-40b1-9a91-58a6bb8714d1` showed Paired mode, 632 completed frames
-(up from 147), fresh progress, and zero renderer/allocation/transfer/stale/touch-drop
-faults. The requested gradient is not part of that live image yet.
+The preceding static-gradient revision was flashed with all AMP domain hashes
+verified (record `a8902089-991d-4cb2-bc2b-bbcca5646c0b`). Status record
+`53375539-8c6b-4c82-b4ff-a2f9e76bfce3` showed Paired mode, 640 completed frames
+(up from 230), fresh progress, and zero renderer/allocation/transfer/stale/touch-drop
+faults. The darker tracking ground and portrait card are not in that live image.
 
 ## Previous qualified baseline
 

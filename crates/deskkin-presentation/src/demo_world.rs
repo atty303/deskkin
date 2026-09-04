@@ -2,22 +2,32 @@
 //! Rendering primitives remain independent of this scene's entity budget.
 
 use crate::{
-    Billboard, BillboardId, CylindricalPose, RasterError, SourceSize, TextureFilter, TextureId,
-    TouchYawAdapter, UnwrappedAngle, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, WorldUnit, sin_q15,
+    Billboard, BillboardId, CylindricalPose, ProjectedBillboard, RasterError, SourceSize,
+    TextureFilter, TextureId, TouchYawAdapter, UnwrappedAngle, VIEWPORT_HEIGHT, VIEWPORT_WIDTH,
+    WorldUnit, sin_q15,
 };
 
-// One four-pixel dither period per row: 1,920 flash bytes, not a third framebuffer.
-static BACKGROUND_ROWS: [[u16; 4]; VIEWPORT_HEIGHT as usize] = background_rows();
+// Separate sky/ground ramps, one four-pixel dither period per row, in flash.
+static BACKGROUND_ROWS: [[u16; 4]; VIEWPORT_HEIGHT as usize * 2] = background_rows();
+pub const CHARACTER_ID: BillboardId = BillboardId(1);
+pub const LANDSCAPE_CARD: SourceSize = SourceSize {
+    width: 272,
+    height: 124,
+};
+pub const PORTRAIT_CARD: SourceSize = SourceSize {
+    width: 136,
+    height: 204,
+};
 
-const fn background_rows() -> [[u16; 4]; VIEWPORT_HEIGHT as usize] {
+const fn background_rows() -> [[u16; 4]; VIEWPORT_HEIGHT as usize * 2] {
     let stops = [
-        (0, [20, 38, 56]),
-        (112, [48, 68, 74]),
-        (174, [71, 80, 74]),
-        (239, [36, 46, 41]),
+        (0, [24, 38, 42]),
+        (239, [91, 111, 97]),
+        (240, [29, 47, 29]),
+        (479, [9, 20, 13]),
     ];
     let bayer = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-    let mut rows = [[0; 4]; VIEWPORT_HEIGHT as usize];
+    let mut rows = [[0; 4]; VIEWPORT_HEIGHT as usize * 2];
     let mut y = 0;
     let mut segment = 0;
     while y < rows.len() {
@@ -49,17 +59,40 @@ const fn background_rows() -> [[u16; 4]; VIEWPORT_HEIGHT as usize] {
     rows
 }
 
-/// Replaces clear for the demo's packed 320x240 framebuffer. A static vertical
-/// gradient suggests ground without geometry or yaw-dependent seams. Wire order
-/// matches the `CoreS3` rasterizer; extra trailing storage is left untouched.
-pub fn paint_background(pixels: &mut [u16], wire_order: bool) -> Result<(), RasterError> {
+/// The first ground row follows the character's projected billboard foot anchor,
+/// not individual animation-frame alpha. Missing characters use the screen center.
+#[must_use]
+pub fn ground_line(projected: &[ProjectedBillboard]) -> i32 {
+    projected
+        .iter()
+        .find(|billboard| billboard.id == CHARACTER_ID)
+        .map_or(VIEWPORT_HEIGHT / 2, |billboard| {
+            billboard
+                .screen_rect
+                .y
+                .saturating_add(billboard.screen_rect.height)
+        })
+        .clamp(0, VIEWPORT_HEIGHT)
+}
+
+/// Replaces clear for the demo's packed 320x240 framebuffer. The projected
+/// character sets a crisp sky/ground boundary without introducing floor geometry.
+/// Wire order matches the `CoreS3` rasterizer; trailing storage is untouched.
+pub fn paint_background(
+    pixels: &mut [u16],
+    wire_order: bool,
+    projected: &[ProjectedBillboard],
+) -> Result<(), RasterError> {
     let frame = pixels
         .get_mut(..(VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize)
         .ok_or(RasterError::InvalidFramebuffer)?;
-    for (row, colors) in frame
-        .chunks_exact_mut(VIEWPORT_WIDTH as usize)
-        .zip(&BACKGROUND_ROWS)
-    {
+    let ground_y = ground_line(projected) as usize;
+    for (y, row) in frame.chunks_exact_mut(VIEWPORT_WIDTH as usize).enumerate() {
+        let colors = &BACKGROUND_ROWS[if y < ground_y {
+            y
+        } else {
+            VIEWPORT_HEIGHT as usize + y - ground_y
+        }];
         let colors = colors.map(|color| if wire_order { color.to_be() } else { color });
         for span in row.chunks_exact_mut(4) {
             span.copy_from_slice(&colors);
@@ -192,13 +225,10 @@ pub fn entities(
     availability: Option<TextureId>,
     notice: bool,
 ) -> impl Iterator<Item = (Billboard, SourceSize)> {
-    let board = SourceSize {
-        width: 272,
-        height: 124,
-    };
+    let board = LANDSCAPE_CARD;
     let principal = [
         Some(entity(
-            1,
+            CHARACTER_ID.0,
             TextureId(1),
             WorldUnit::ratio(22, 10),
             motion.character_azimuth(),
@@ -232,9 +262,9 @@ pub fn entities(
             TextureId(42),
             WorldUnit::ratio(23, 10),
             UnwrappedAngle::from_degrees(170),
-            WorldUnit::ratio(8, 10),
-            WorldUnit::ONE,
-            board,
+            WorldUnit::ratio(2, 10),
+            WorldUnit::ratio(16, 10),
+            PORTRAIT_CARD,
         )),
         Some(entity(
             4,
@@ -318,10 +348,10 @@ mod tests {
         let length = (VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize;
         let mut native = std::vec![0xffff; length + 4];
         let mut wire = native.clone();
-        paint_background(&mut native[..length - 1], false).unwrap_err();
+        paint_background(&mut native[..length - 1], false, &[]).unwrap_err();
         assert!(native.iter().all(|&pixel| pixel == 0xffff));
-        paint_background(&mut native, false).unwrap();
-        paint_background(&mut wire, true).unwrap();
+        paint_background(&mut native, false, &[]).unwrap();
+        paint_background(&mut wire, true, &[]).unwrap();
         assert_eq!(&native[length..], &[0xffff; 4]);
         assert_eq!(&wire[length..], &[0xffff; 4]);
         assert!(
@@ -333,7 +363,7 @@ mod tests {
             assert_eq!(*native, u16::from_be(*wire));
         }
         let before = native.clone();
-        paint_background(&mut native, false).unwrap();
+        paint_background(&mut native, false, &[]).unwrap();
         assert_eq!(native, before);
         for row in native[..length].chunks_exact(VIEWPORT_WIDTH as usize) {
             assert!(row.chunks_exact(4).all(|span| span == &row[..4]));
@@ -346,12 +376,63 @@ mod tests {
             ]
         };
         let top = channels(native[0]);
-        let ground = channels(native[174 * VIEWPORT_WIDTH as usize]);
+        let sky = channels(native[119 * VIEWPORT_WIDTH as usize]);
+        let ground = channels(native[120 * VIEWPORT_WIDTH as usize]);
         let bottom = channels(native[length - VIEWPORT_WIDTH as usize]);
         assert!(top[2] > top[0]);
         assert!(bottom[1] > bottom[0] && bottom[1] > bottom[2]);
-        assert!(ground.iter().sum::<u16>() > top.iter().sum::<u16>());
+        assert!(sky.iter().sum::<u16>() > ground.iter().sum::<u16>() + 50);
         assert!(ground.iter().sum::<u16>() > bottom.iter().sum::<u16>());
+    }
+
+    #[test]
+    fn ground_tracks_projected_feet_across_depth_height_and_turn_seams() {
+        let (character, size) = entities(DemoMotion::default(), None, false).next().unwrap();
+        let mut camera = CameraPose {
+            radius: WorldUnit::from_int(4),
+            height: WorldUnit::ZERO,
+            observed_azimuth: UnwrappedAngle::ZERO,
+        };
+        let mut previous = 0;
+        let mut near = 0;
+        let mut far = 0;
+        for degrees in 0..=361 {
+            camera.observed_azimuth = UnwrappedAngle::from_degrees(degrees);
+            let p = project_billboard(character, size, camera).unwrap();
+            let line = ground_line(&[p]);
+            assert_eq!(line, p.screen_rect.y + p.screen_rect.height);
+            if degrees == 0 {
+                near = line;
+            }
+            if degrees == 180 {
+                far = line;
+            }
+            if degrees > 0 {
+                assert!((line - previous).abs() <= 1);
+            }
+            previous = line;
+        }
+        assert!(near > far + 30);
+        camera.observed_azimuth = UnwrappedAngle::ZERO;
+        camera.height = WorldUnit::ratio(1, 2);
+        let mut p = project_billboard(character, size, camera).unwrap();
+        assert!(ground_line(&[p]) > near);
+        let mut frame = std::vec![0; (VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize];
+        for line in [i32::MIN, 0, 139, 182, 240, i32::MAX] {
+            p.screen_rect.y = line;
+            p.screen_rect.height = 0;
+            paint_background(&mut frame, false, &[p]).unwrap();
+            let boundary = ground_line(&[p]) as usize;
+            if boundary > 0 {
+                assert_eq!(&frame[..4], &BACKGROUND_ROWS[0]);
+            }
+            if boundary < 240 {
+                assert_eq!(
+                    &frame[boundary * 320..boundary * 320 + 4],
+                    &BACKGROUND_ROWS[240]
+                );
+            }
+        }
     }
 
     #[test]
@@ -402,6 +483,25 @@ mod tests {
         let mut motion = DemoMotion::default();
         for _ in 0..120 {
             let full: std::vec::Vec<_> = entities(motion, Some(TextureId(10)), true).collect();
+            let cards: std::vec::Vec<_> = full
+                .iter()
+                .filter(|(b, _)| b.filter == TextureFilter::Bilinear)
+                .collect();
+            assert_eq!(cards.len(), 3);
+            assert_eq!(
+                cards
+                    .iter()
+                    .filter(|(_, size)| *size == PORTRAIT_CARD)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                cards
+                    .iter()
+                    .filter(|(_, size)| *size == LANDSCAPE_CARD)
+                    .count(),
+                2
+            );
             assert_eq!(full.len(), CAPACITY);
             let demo: std::vec::Vec<_> = entities(motion, None, false).collect();
             assert_eq!(demo.len(), CAPACITY);

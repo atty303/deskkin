@@ -91,10 +91,12 @@ the final 320×240 RGB565 framebuffer. Information textures use fixed-point
 bilinear sampling; Character and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor geometry, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
-The background is a static screen-space gradient: dark blue above, a muted sage
-glow near the character's foreground feet, and deep green below. A compile-time
-four-pixel ordered-dither pattern per row avoids a full background texture and
-per-pixel gradient arithmetic. The same painter supports native and wire byte order.
+The background separates a muted sky gradient from darker green ground with a
+crisp boundary at the character's projected billboard bottom. It follows observed
+camera pose and character motion, not animation-frame alpha; the backdrop uses
+screen center if the character is culled. Compile-time ordered-dither row patterns
+avoid a full background texture and per-pixel gradient arithmetic. The same
+painter supports native and wire byte order.
 
 The paired night-garden demo contains a moving Character, three information cards,
 a radially moving garden drone, three terrariums, three
@@ -112,7 +114,8 @@ yaw effect. A shared fractional-time camera adapter adds a slow 3 degrees/s
 unwrapped orbit to touch, without regenerating textures. APPCPU publishes this
 target and PROCPU owns observed following. The first two card slots display
 Availability and Notice when present, otherwise explicitly labelled demo prose;
-the third is a demo exploration guide. Semantic view absence is not fabricated
+the third is a 136x204 portrait exploration guide; the first two stay 272x124
+landscape cards. Semantic view absence is not fabricated
 as a real status or notice. Each closed demo texture is cached on first use.
 
 The simulator owns one hosted Slint window. It synchronously switches the same

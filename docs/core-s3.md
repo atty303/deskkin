@@ -113,7 +113,7 @@ still accepts caller-owned slices; the 23-entity capacity belongs only to this
 demo, not to a global entity registry. The benchmark's expected entity count
 includes decorations and three cards. Normal operation replaces absent semantic
 boards with demo copy; absence still remains explicit in ApplicationViews.
-The three additional canonical demo textures consume at most 202,368 bytes in
+The three additional canonical demo textures consume at most 190,400 bytes in
 APPCPU PSRAM and are generated only on first use.
 
 World coordinates are signed Q16.16 and azimuth is an unwrapped signed integer
@@ -141,12 +141,17 @@ in PSRAM (82,944 bytes total), plus a 243-byte light texture. Source provenance
 and prompts are in `assets/world/night-garden/README.md`. The custom rasterizer
 writes directly into the clipped final framebuffer: nearest+A8 for Character
 and decoration sprites, fixed-point bilinear for opaque information boards.
-Solid clear is replaced by a shared static sky-to-ground RGB565 gradient with
-4x4 ordered dithering. A 1,920-byte flash-resident row table is copied directly
+The exploration guide is a 136x204 portrait card with its own Slint layout and
+captured dimensions; other information cards remain 272x124 landscape.
+Solid clear is replaced by separate sky and dark-ground RGB565 gradients with
+a crisp boundary at the character's projected billboard bottom, following the
+same observed pose and motion as its rendering. Culled characters use screen center.
+With 4x4 ordered dithering, a 3,840-byte flash-resident row table is copied directly
 into the owned internal framebuffer in wire byte order; no extra framebuffer,
 heap allocation, floor geometry, or per-pixel gradient calculation is needed.
-Its time is included in the existing total render duration, not billboard sampling
-counters. It remains unchanged by yaw, so continuous turns cannot create a seam.
+Its time is included in world-raster and total render duration, not billboard
+sampling counters. Ground position uses the existing periodic projection, with
+no separately wrapped camera angle or animation-alpha-dependent jitter.
 
 ## AMP memory and channels
 
