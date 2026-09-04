@@ -130,14 +130,19 @@ and occluded spans. They retain the same sampling counters and raster phase hook
 There is no particle simulation, physics or per-frame texture generation.
 The device keeps projected entities and decoration descriptors in reusable PSRAM
 heap storage. A non-inlined raster helper owns the scene array so its stack frame
-is not live during recursive depth sorting; the renderer stack remains 12 KiB.
+is not live during recursive depth sorting; the renderer stack is 32 KiB.
 
 The paired night-garden demo contains a moving Character, three information cards,
 a radially moving garden drone, three terrariums, three
-lanterns, twelve drifting lights, and 48 static ground particles. Six hand-authored
+lanterns, twelve drifting lights, and 224 static ground particles. Six hand-authored
 pixel silhouettes (mushrooms, sedge, flowers, cairns, crystals and trail markers)
 share cached 12/6/3 px LODs at depths up to 2/4/8 units, using 3,402 bytes of
-RGB565+A8 plus 18 bytes of opaque masks on the device. Generated artwork is normalized to three
+RGB565+A8 plus 18 bytes of opaque masks on the device. Another 176 grass clumps
+use three blade silhouettes with 96x48, 48x24 and 6x3 px native LODs, adding
+52,041 bytes including masks. Each source grass group contains 47 fine blades
+and dense low growth with irregular edges. Planting favors the outer ground;
+near and middle LODs overlap to cover the foreground. All share the ground anchor.
+Generated artwork is normalized to three
 96x96 straight-alpha sprites, converted once to RGB565+A8 in the renderer's
 owned heap, and reused by repeated entities. The shared `demo_world` module
 owns deterministic bounded periodic motion and placement; its capacity does

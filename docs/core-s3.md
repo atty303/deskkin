@@ -95,7 +95,7 @@ configuration.
 The cylinder is an invisible coordinate model. No cylinder surface, ring,
 floor, track, tangent-facing board, mesh, lighting, or z-buffer is rendered.
 The paired night-garden demo uses 23 camera-facing screen-axis-aligned
-billboards and 48 fixed-pixel ground particles, with shared scene placement and motion in `demo_world.rs`:
+billboards and 224 fixed-pixel ground particles, with shared scene placement and motion in `demo_world.rs`:
 
 - Character at radius 2.2, moving +12 degrees/s with the existing QOI loops.
 - Availability at radius 1.8 and -45 degrees, above the character, or a
@@ -113,13 +113,19 @@ billboards and 48 fixed-pixel ground particles, with shared scene placement and 
   using 3,420 bytes including masks. Depth selects the LOD; native-size raster
   skips scaler setup (and its preparation count) and retains normal clipping,
   alpha and painter order.
-  Particle foot anchors and the 1.2-unit character use ground height -1.0.
+- Another 176 grass clumps use three variants with 96x48, 48x24 and 6x3 px
+  native LODs, adding 52,041 bytes including masks. Planting favors the
+  outer ground; larger near and middle LODs overlap into a dense foreground.
+  Source images contain 47 fine blades and dense low growth with irregular edges.
+
+Particle foot anchors and the 1.2-unit character use ground height -1.0.
 
 All autonomous motion uses bounded periodic integer phases. The render API
-still accepts caller-owned slices; the 71-entity capacity belongs only to this
+still accepts caller-owned slices; the 247-entity capacity belongs only to this
 demo, not to a global entity registry. Projected entities and decoration
 metadata use reusable PSRAM heap storage. A non-inlined raster helper keeps its
-scene array off the recursive sort call stack; no per-frame allocation is added.
+scene array off the recursive sort call stack. The renderer uses a 32 KiB
+PSRAM stack for the expanded scene; no per-frame allocation is added.
 The benchmark's expected entity count
 includes decorations and three cards. Normal operation replaces absent semantic
 boards with demo copy; absence still remains explicit in ApplicationViews.

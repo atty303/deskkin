@@ -722,7 +722,7 @@ fn world_billboard<'a>(
                 },
             }
         }
-        30..=33 | 50..=67 => {
+        30..=33 | 50..=76 => {
             let texture = &textures.decorations[usize::from(if value.source.0 < 50 {
                 value.source.0 - 30
             } else {

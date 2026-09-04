@@ -188,7 +188,7 @@ impl WorldScene {
                 )
                 .map_err(|error| format!("world raster: {error:?}"));
             }
-            let mut scene = [resolve(projected[0])?; demo_world::CAPACITY];
+            let mut scene = vec![resolve(projected[0])?; count];
             for (slot, value) in scene.iter_mut().zip(&projected[..count]) {
                 *slot = resolve(*value)?;
             }
@@ -287,7 +287,7 @@ impl WorldScene {
     fn texture(&self, id: TextureId, views: ApplicationViews) -> Result<&OwnedTexture, String> {
         match id.0 {
             1 => Ok(&self.character[self.character_frame]),
-            30..=33 | 50..=67 => {
+            30..=33 | 50..=76 => {
                 Ok(&self.decorations[usize::from(if id.0 < 50 { id.0 - 30 } else { id.0 - 46 })])
             }
             40..=42 => self.demo_cache[usize::from(id.0 - 40)]

@@ -93,8 +93,9 @@ pub fn background_row(y: usize, ground_y: usize) -> [u16; 4] {
     }]
 }
 
-pub const CAPACITY: usize = 23 + 48;
-pub const DECORATION_TEXTURE_COUNT: usize = 22;
+pub const GRASS_COUNT: usize = 176;
+pub const CAPACITY: usize = 23 + 48 + GRASS_COUNT;
+pub const DECORATION_TEXTURE_COUNT: usize = 31;
 pub const SPRITE_SIZE: SourceSize = SourceSize {
     width: 96,
     height: 96,
@@ -322,25 +323,102 @@ pub fn entities(
 }
 
 pub fn particles() -> impl Iterator<Item = crate::Particle> {
-    (0..48_u16).map(|index| {
-        let cluster = i32::from(index / 6);
-        let kind = usize::from(index % 6);
+    (0..48_u16)
+        .map(|index| {
+            let cluster = i32::from(index / 6);
+            let kind = usize::from(index % 6);
+            crate::Particle {
+                id: BillboardId(200 + index),
+                pose: CylindricalPose {
+                    radius: WorldUnit::ratio([19, 27, 23, 29, 21, 26][kind] - cluster % 3, 10),
+                    azimuth: UnwrappedAngle::from_degrees(i64::from(
+                        cluster * 45 - 174 + [0, 11, -9, 18, -17, 5][kind] + (cluster % 3) * 3,
+                    )),
+                    height: WorldUnit::from_int(-1),
+                },
+                lods: core::array::from_fn(|lod| crate::ParticleLod {
+                    texture: TextureId(50 + (kind * 3 + lod) as u16),
+                    size: detail_lod_size(lod),
+                    max_depth: WorldUnit::from_int([2, 4, 8][lod]),
+                }),
+            }
+        })
+        .chain(grass_particles())
+}
+
+fn grass_particles() -> impl Iterator<Item = crate::Particle> {
+    (0..GRASS_COUNT).map(|index| {
+        let ring = index / 22;
+        let slot = index % 22;
+        let jitter = ((index * 73 + 19) % 101) as i32;
+        let variant = index % 3;
         crate::Particle {
-            id: BillboardId(200 + index),
+            id: BillboardId(300 + index as u16),
             pose: CylindricalPose {
-                radius: WorldUnit::ratio([19, 27, 23, 29, 21, 26][kind] - cluster % 3, 10),
-                azimuth: UnwrappedAngle::from_degrees(i64::from(
-                    cluster * 45 - 174 + [0, 11, -9, 18, -17, 5][kind] + (cluster % 3) * 3,
-                )),
+                radius: WorldUnit::ratio(
+                    [60, 130, 225, 245, 270, 280, 280, 280][ring] + jitter / 6,
+                    100,
+                ),
+                azimuth: UnwrappedAngle::from_units(
+                    slot as i64 * 65_536 / 22 + ring as i64 * 1_139 + i64::from(jitter) * 19,
+                ),
                 height: WorldUnit::from_int(-1),
             },
             lods: core::array::from_fn(|lod| crate::ParticleLod {
-                texture: TextureId(50 + (kind * 3 + lod) as u16),
-                size: detail_lod_size(lod),
+                texture: TextureId(68 + (variant * 3 + lod) as u16),
+                size: grass_lod_size(lod),
                 max_depth: WorldUnit::from_int([2, 4, 8][lod]),
             }),
         }
     })
+}
+
+fn grass_lod_size(lod: usize) -> SourceSize {
+    let height = [48, 24, 3][lod];
+    SourceSize {
+        width: height * 2,
+        height,
+    }
+}
+
+// Dense, low-contrast tufts: multiple blade tips and a broken moss base keep
+// repeated patches from reading as solid rectangles. Generated only at startup.
+fn grass_pixel(index: usize, x: u16, y: u16) -> (u16, u8) {
+    let variant = (index - 22) / 3;
+    let block = [1, 2, 16][(index - 22) % 3];
+    let mut shade = 0;
+    for dy in 0..block {
+        for dx in 0..block {
+            let px = i32::from(x) * block + dx;
+            let py = i32::from(y) * block + dy;
+            let foot = 46 - (px / 7 + variant as i32) % 4;
+            let rise = foot - py;
+            for blade in 0..47 {
+                let root = 1 + blade * 2;
+                let edge = root.min(96 - root).min(14);
+                let height = (9 + (blade * 7 + variant as i32 * 5) % 35) * edge / 14;
+                let lean = (blade + variant as i32) % 5 - 2;
+                let stem = root + lean * rise / 12;
+                if rise > 0
+                    && rise <= height
+                    && (px == stem || (rise < height / 3 && px == stem + 1))
+                {
+                    shade = shade.max(2 + (blade as usize + variant) % 3);
+                }
+            }
+            let base_height = 23 + (px * 13 + variant as i32 * 7) % 7;
+            if (2..94).contains(&px) && rise > 0 && rise <= base_height {
+                shade = shade.max(1 + ((px / 3 + py / 2) as usize + variant) % 2);
+            }
+        }
+    }
+    match shade {
+        1 => (0x19e3, 255),
+        2 => (0x2224, 255),
+        3 => (0x2ac5, 255),
+        4 => (0x3b26, 255),
+        _ => (0, 0),
+    }
 }
 
 pub fn projected_entities(
@@ -460,7 +538,8 @@ pub fn decoration_size(index: usize) -> SourceSize {
             width: 9,
             height: 9,
         },
-        _ => detail_lod_size((index - 4) % 3),
+        4..=21 => detail_lod_size((index - 4) % 3),
+        _ => grass_lod_size((index - 22) % 3),
     }
 }
 
@@ -479,6 +558,7 @@ pub fn decoration_pixel(index: usize, x: u16, y: u16) -> (u16, u8) {
             )
         }
         3 => light_pixel(i32::from(x), i32::from(y)),
+        22.. => grass_pixel(index, x, y),
         _ => {
             let detail = (index - 4) / 3;
             let block = 1 << ((index - 4) % 3);
@@ -725,7 +805,7 @@ mod tests {
             max_pixels = max_pixels.max(pixels);
         }
         // Counts transparent texels too; clipping and occlusion can only reduce it.
-        assert!(max_pixels <= 4_000, "detail pixel budget: {max_pixels}");
+        assert!(max_pixels <= 225_000, "detail pixel budget: {max_pixels}");
         std::println!("maximum detail bounding-box pixels per frame: {max_pixels}");
     }
 

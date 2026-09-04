@@ -699,7 +699,7 @@ int main(void)
 	display_stack = sys_heap_aligned_alloc(&renderer_heap, ARCH_STACK_PTR_ALIGN,
 					       K_THREAD_STACK_LEN(4096));
 	renderer_stack = sys_heap_aligned_alloc(&renderer_heap, ARCH_STACK_PTR_ALIGN,
-					        K_THREAD_STACK_LEN(12288));
+					        K_THREAD_STACK_LEN(32768));
 	if (display_stack == NULL || renderer_stack == NULL) {
 		atomic_inc(&allocation_failures);
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_EXHAUSTED, 0, 0);
@@ -737,7 +737,7 @@ int main(void)
 	deskkin_renderer_observe(RENDERER_STARTING_THREADS, RENDERER_FAULT_NONE, 0, 0);
 	k_tid_t display_tid = k_thread_create(&display_thread, display_stack, 4096,
 					    display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
-	k_tid_t renderer_tid = k_thread_create(&renderer_thread, renderer_stack, 12288,
+	k_tid_t renderer_tid = k_thread_create(&renderer_thread, renderer_stack, 32768,
 					     renderer_entry, NULL, NULL, NULL, 0, 0, K_FOREVER);
 	k_thread_time_slice_set(display_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL);
 	k_thread_time_slice_set(renderer_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL);

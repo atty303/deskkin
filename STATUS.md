@@ -4,55 +4,60 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
-The source uses 71 entities: 23 billboards and 48 static particles. Six silhouettes
-(mushrooms, sedge, flowers, cairns, crystals and trail markers) share native-size
-12/6/3 px LODs. Native-size nearest raster bypasses scaler coordinates and its
-preparation counter while retaining clipping, alpha, tile occlusion, wire order
-and diagnostic phase hooks. Particle textures and masks consume 3,420 bytes.
-The fog horizon is fixed; the 1.2-unit character and particles use ground height
--1.0. Information cards are raised above the planting layer.
+The night garden uses 247 entities: 23 billboards and 224 static particles.
+The added 176 grass clumps share three blade variants with native 96x48, 48x24
+and 6x3 px LODs. Planting favors the outer ground; larger near/middle LODs
+overlap into a denser foreground while the far LOD stays small. Each source
+group contains 47 fine blades and dense low growth with irregular edges.
+The existing six small-detail silhouettes retain
+12/6/3 px LODs. All particle foot anchors use ground height -1.0. Grass textures
+and masks add 52,041 bytes; all particle textures and masks total 55,461 bytes.
+Native-size raster retains binary alpha, clipping, painter order and tile
+occlusion without preparing scaler coordinates. Across a full camera turn,
+particle bounding boxes cover at most 222,408 pixels before clipping/occlusion.
 
-Projected entities and decoration descriptors use reusable renderer-owned PSRAM
-heap storage. The scene array lives in a non-inlined raster helper, separating
-its stack frame from recursive depth sorting. The existing 12 KiB renderer stack
-and framebuffer ownership are unchanged. Whole-thread stack high-water is not
-measured. No dependency, persistence, protocol or pairing change is included.
+Projected entities and decoration descriptors use reusable renderer-owned PSRAM.
+The device scene array remains separate from recursive sorting. Its expanded
+renderer stack is 32 KiB (20 KiB additional PSRAM). ELF entry frames are
+18,144 bytes for draw_world_scene, 2,752 for raster_billboard_masked, 352 for
+raster_scene_observed, 960 for render_world and 1,488 for rust_main. Their sum
+is 23,696 bytes; this is not a measured whole-thread high-water mark. The desktop
+simulator allocates its scene list on the heap. No dependencies or protocol,
+persistence, pairing or framebuffer changes are included.
 
-Headless front, side and rear composition is inspected. `mise run test` passed
-(record `337bd732-1853-456e-998b-cb5f7fac5082`); following review corrections,
-strict Clippy, 26 presentation and 15 simulator tests passed, and all AMP domains
-plus inert recovery rebuilt cleanly (`aabf1830-1726-4c63-a70e-f14f09ec751b`).
-Fresh review and delta review have no remaining required changes.
+Headless front, side and rear compositions were inspected. Strict Clippy and the full
+`mise run test` passed, including all AMP domains and inert recovery (build
+`41f6c848-eb4a-480b-8a27-cce808cdc2dd`). Fresh review and delta reviews have
+no remaining actionable findings.
 
-Final flash `d13b9187-47ef-4283-a78b-d3e3b1c5875b` verified every AMP domain hash.
-The 60-second physical benchmark `79e3b14e-10b8-4fe6-a482-4abf7e41a51d` completed
-all 1,200 requested updates with 1,208 frames over 59.958 measured seconds:
-20.147 FPS, two deadline misses, and zero renderer, allocation, transfer,
-stale-snapshot, touch-drop or cache faults. It observed 69 visible and two culled
-entities. Last render/transfer was 30.814/32.053 ms. The 20 FPS target is met;
-it remains a measurement rather than a performance gate.
+Flash `6dfe62d8-ddc4-4896-a2b6-01651448418d` verified every AMP domain hash.
+The 60-second benchmark `4f5a5933-fd96-426d-906f-890942e2c8f1` observed 755
+completed frames over 59.963 seconds: 12.591 FPS, 1,203 deadline misses and all
+1,200 requested updates issued. Its final view contained all 247 entities.
+Last render/transfer was 77.329/33.838 ms, maximum render 91.616 ms. Renderer,
+allocation, transfer, stale-snapshot, touch-drop and cache faults remained zero.
+The preceding 71-entity garden measured 20.147 FPS and two deadline misses.
+The soft 20 FPS target is not met: foreground coverage and image density are
+improved at a substantial rendering cost.
 
-Matched-duration normal-scene profiles each sampled 260 frames over 120 seconds:
+Normal-scene profiling `1ccb143a-b6f5-4701-811a-b3b91b74e1ca` collected 260
+samples over 120 seconds. Compared with the preceding 71-entity garden profile
+`6d35deda-2af8-44eb-907f-a20c23eaf1bb` of the same duration:
 
-| Phase | Before mean | Final mean |
+| Phase | Previous mean | Current mean |
 | --- | --- | --- |
-| Coverage | 1.167 ms | 0.447 ms |
-| Background | 2.118 ms | 2.193 ms |
-| Scaler setup | 1.593 ms | 2.832 ms |
-| Pixel raster | 28.328 ms | 28.875 ms |
-| Sum | 33.206 ms | 34.347 ms |
+| Coverage | 0.447 ms | 3.238 ms |
+| Background | 2.193 ms | 1.949 ms |
+| Scaler setup | 2.832 ms | 4.964 ms |
+| Pixel raster | 28.875 ms | 61.884 ms |
+| Sum | 34.347 ms | 72.035 ms |
 
-Records are `a3be5d8a-6279-4b01-b65d-8659a21b9fde` and
-`6d35deda-2af8-44eb-907f-a20c23eaf1bb`. The phase sum is 1.141 ms (3.4%) higher
-with the added particles and revised composition. Setup timing includes
-validation and visibility work even when native sprites skip scaler coordinates;
-preparation counts exclude those sprites. These full-turn observational samples
-include preemption and instrumentation, are not frame-locked CPU timing, and
-cannot isolate particle cost from the composition changes. Both the benchmark
-and final normal-scene profile completed without a renderer stop or typed fault.
-Post-measurement status `7cd6a105-5a06-4045-afdc-bc3fa2ef8c78` observed 6,022
-completed frames, a fresh Paired heartbeat, advancing renderer/display sequences,
-and zero renderer, allocation, transfer, stale-snapshot and touch-drop faults.
+These observational phase samples include preemption and instrumentation, not
+frame-locked CPU timing. Pixel raster dominates the increase; native LOD avoids
+scaling work but does not make dense overlapping pixel coverage free.
+Post-measurement status `b2dea89e-a165-4ad1-a194-dc282f3b7f86` observed 2,975
+completed frames, fresh Paired heartbeat, advancing renderer/display sequences
+and zero renderer, allocation, transfer, stale-snapshot or touch-drop faults.
 
 ## Previous qualified baseline
 
@@ -103,7 +108,7 @@ stable far-to-near painter sorting, direct RGB565 nearest/bilinear/A8 raster,
 horizontal touch mapping, and 0.5 turn/s observed-yaw limiting.
 
 The simulator and CoreS3 share an invisible cylindrical night-garden scene with
-23 camera-facing billboards and 48 native-size LOD particles over a dithered foggy night-sky/ground gradient: moving Character,
+23 camera-facing billboards and 224 native-size LOD particles over a dithered foggy night-sky/ground gradient: moving Character,
 three information cards, a radially moving garden drone, three botanical
 terrariums, three lanterns, and twelve drifting lights. Availability and Notice
 use canonical 272x124 Slint captures; the custom renderer handles projection,
@@ -255,9 +260,10 @@ from the inferred interrupt sequence.
 Replace the pinned APPCPU entry patch only when an equivalent
 upstream-compatible startup path is verified.
 
-The current particle garden still needs live visual acceptance for composition, parallax, continuous
+The user accepted the preceding particle garden composition. The denser grass
+version still needs live visual acceptance for composition, parallax, continuous
 320 px turns without a seam jump, 180 degrees/s observed following, and intact
-pairing UI. Both normal and benchmark operation have 71 entities: absent
+pairing UI. Both normal and benchmark operation have 247 entities: absent
 Availability/Notice slots use explicitly labelled demo cards, with a third
 exploration guide always present. Camera target drifts 3 degrees/s in addition
 to drag, through the existing observed-pose limiter.

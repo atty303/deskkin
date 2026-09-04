@@ -584,7 +584,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("CONFIG_TIMESLICE_PER_THREAD=y", config)
         self.assertIn("#define RENDERER_TIME_SLICE_TICKS 1", adapter)
         self.assertIn("k_thread_create(&display_thread, display_stack, 4096", adapter)
-        self.assertIn("k_thread_create(&renderer_thread, renderer_stack, 12288", adapter)
+        self.assertIn("k_thread_create(&renderer_thread, renderer_stack, 32768", adapter)
         self.assertNotIn("K_THREAD_STACK_DEFINE(display_stack", adapter)
         self.assertNotIn("K_THREAD_STACK_DEFINE(renderer_stack", adapter)
         self.assertIn("atomic_inc(&allocation_failures)", adapter)
