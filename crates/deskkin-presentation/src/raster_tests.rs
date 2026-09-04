@@ -143,6 +143,8 @@ fn specialized_raster_matches_reference_pixels_stats_and_guards() {
             (41, 29, 17, 11),
             (0, 0, 1, 1),
             (0, 0, 41, 29),
+            (-5, -7, i32::from(region.width), i32::from(region.height)),
+            (311, 233, i32::from(region.width), i32::from(region.height)),
             (-320, 0, 320, 240),
             (320, 0, 100, 100),
             (0, 240, 100, 100),

@@ -95,7 +95,7 @@ configuration.
 The cylinder is an invisible coordinate model. No cylinder surface, ring,
 floor, track, tangent-facing board, mesh, lighting, or z-buffer is rendered.
 The paired night-garden demo uses 23 camera-facing screen-axis-aligned
-billboards, with shared scene placement and motion in `demo_world.rs`:
+billboards and 48 fixed-pixel ground particles, with shared scene placement and motion in `demo_world.rs`:
 
 - Character at radius 2.2, moving +12 degrees/s with the existing QOI loops.
 - Availability at radius 1.8 and -45 degrees, above the character, or a
@@ -106,12 +106,21 @@ billboards, with shared scene placement and motion in `demo_world.rs`:
 - A generated garden drone at +42 degrees, ping-ponging from radius 1.0 to
   2.5 at 0.25 unit/s while gently bobbing.
 - Three botanical terrariums and three warm lanterns distributed around the
-  circle at different heights and radii, with staggered slow vertical motion.
+  circle at different heights and radii; only lanterns bob.
 - Twelve small drifting lights. Their glow is baked alpha, not lighting.
+- Forty-eight static ground particles: mushrooms, sedge, flowers, mossy cairns,
+  crystals and trail markers. Six shared 12/6/3 px LOD sets are cached once,
+  using 3,420 bytes including masks. Depth selects the LOD; native-size raster
+  skips scaler setup (and its preparation count) and retains normal clipping,
+  alpha and painter order.
+  Particle foot anchors and the 1.2-unit character use ground height -1.0.
 
 All autonomous motion uses bounded periodic integer phases. The render API
-still accepts caller-owned slices; the 23-entity capacity belongs only to this
-demo, not to a global entity registry. The benchmark's expected entity count
+still accepts caller-owned slices; the 71-entity capacity belongs only to this
+demo, not to a global entity registry. Projected entities and decoration
+metadata use reusable PSRAM heap storage. A non-inlined raster helper keeps its
+scene array off the recursive sort call stack; no per-frame allocation is added.
+The benchmark's expected entity count
 includes decorations and three cards. Normal operation replaces absent semantic
 boards with demo copy; absence still remains explicit in ApplicationViews.
 The three additional canonical demo textures consume at most 190,400 bytes in
@@ -144,15 +153,14 @@ writes directly into the clipped final framebuffer: nearest+A8 for Character
 and decoration sprites, fixed-point bilinear for opaque information boards.
 The exploration guide is a 136x204 portrait card with its own Slint layout and
 captured dimensions; other information cards remain 272x124 landscape.
-Solid clear is replaced by separate sky and dark-ground RGB565 gradients with
-a crisp boundary at the character's projected billboard bottom, following the
-same observed pose and motion as its rendering. Culled characters use screen center.
+Solid clear is replaced by sky and dark-ground RGB565 gradients joined through
+a soft fog band at the fixed center horizon. Character motion cannot shift it.
 With 4x4 ordered dithering, a 3,840-byte flash-resident row table is copied directly
 into the owned internal framebuffer in wire byte order; no extra framebuffer,
 heap allocation, floor geometry, or per-pixel gradient calculation is needed.
 Its time is included in world-raster and total render duration, not billboard
-sampling counters. Ground position uses the existing periodic projection, with
-no separately wrapped camera angle or animation-alpha-dependent jitter.
+sampling counters. Native-size nearest sprites use direct texel addressing;
+other sizes and information boards use the shared scaler.
 The shared scaler uses exact incremental Q16 coordinates and specialized
 nearest/bilinear, opaque/A8 and byte-order kernels. Its bounded 2,560-byte
 horizontal coordinate/weight scratch lives on the existing PSRAM renderer stack;

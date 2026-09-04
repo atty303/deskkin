@@ -21,9 +21,12 @@ pub const PORTRAIT_CARD: SourceSize = SourceSize {
 
 const fn background_rows() -> [[u16; 4]; VIEWPORT_HEIGHT as usize * 2] {
     let stops = [
-        (0, [24, 38, 42]),
-        (239, [91, 111, 97]),
-        (240, [29, 47, 29]),
+        (0, [18, 31, 39]),
+        (119, [72, 94, 85]),
+        (239, [72, 94, 85]),
+        (240, [72, 94, 85]),
+        (260, [42, 65, 48]),
+        (310, [19, 38, 24]),
         (479, [9, 20, 13]),
     ];
     let bayer = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
@@ -59,34 +62,17 @@ const fn background_rows() -> [[u16; 4]; VIEWPORT_HEIGHT as usize * 2] {
     rows
 }
 
-/// The first ground row follows the character's projected billboard foot anchor,
-/// not individual animation-frame alpha. Missing characters use the screen center.
-#[must_use]
-pub fn ground_line(projected: &[ProjectedBillboard]) -> i32 {
-    projected
-        .iter()
-        .find(|billboard| billboard.id == CHARACTER_ID)
-        .map_or(VIEWPORT_HEIGHT / 2, |billboard| {
-            billboard
-                .screen_rect
-                .y
-                .saturating_add(billboard.screen_rect.height)
-        })
-        .clamp(0, VIEWPORT_HEIGHT)
-}
+/// Level camera: the ground's vanishing line stays at the viewport center.
+pub const HORIZON: usize = VIEWPORT_HEIGHT as usize / 2;
 
-/// Replaces clear for the demo's packed 320x240 framebuffer. The projected
-/// character sets a crisp sky/ground boundary without introducing floor geometry.
+/// Replaces clear for the demo's packed 320x240 framebuffer. The
+/// sky and ground meet in a fixed fog band without introducing floor geometry.
 /// Wire order matches the `CoreS3` rasterizer; trailing storage is untouched.
-pub fn paint_background(
-    pixels: &mut [u16],
-    wire_order: bool,
-    projected: &[ProjectedBillboard],
-) -> Result<(), RasterError> {
+pub fn paint_background(pixels: &mut [u16], wire_order: bool) -> Result<(), RasterError> {
     let frame = pixels
         .get_mut(..(VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize)
         .ok_or(RasterError::InvalidFramebuffer)?;
-    let ground_y = ground_line(projected) as usize;
+    let ground_y = HORIZON;
     for (y, row) in frame.chunks_exact_mut(VIEWPORT_WIDTH as usize).enumerate() {
         let colors =
             background_row(y, ground_y).map(|color| if wire_order { color.to_be() } else { color });
@@ -107,7 +93,8 @@ pub fn background_row(y: usize, ground_y: usize) -> [u16; 4] {
     }]
 }
 
-pub const CAPACITY: usize = 23;
+pub const CAPACITY: usize = 23 + 48;
+pub const DECORATION_TEXTURE_COUNT: usize = 22;
 pub const SPRITE_SIZE: SourceSize = SourceSize {
     width: 96,
     height: 96,
@@ -238,8 +225,8 @@ pub fn entities(
             TextureId(1),
             WorldUnit::ratio(22, 10),
             motion.character_azimuth(),
-            WorldUnit::ZERO,
-            WorldUnit::ratio(14, 10),
+            WorldUnit::ratio(-4, 10),
+            WorldUnit::ratio(12, 10),
             SourceSize {
                 width: 144,
                 height: 156,
@@ -259,7 +246,7 @@ pub fn entities(
             if notice { TextureId(20) } else { TextureId(41) },
             WorldUnit::ratio(18, 10),
             UnwrappedAngle::from_degrees(35),
-            WorldUnit::ratio(-11, 10),
+            WorldUnit::ratio(8, 10),
             WorldUnit::ONE,
             board,
         )),
@@ -284,9 +271,9 @@ pub fn entities(
     ];
     // Azimuth, radius, center height and full sprite height, in tenths of a unit.
     let props = [
-        (-65, 25, -8, 12, TERRARIUM),
-        (70, 24, -10, 13, TERRARIUM),
-        (175, 27, -9, 14, TERRARIUM),
+        (-65, 25, -4, 12, TERRARIUM),
+        (70, 24, -4, 12, TERRARIUM),
+        (175, 27, -3, 14, TERRARIUM),
         (-110, 23, 16, 6, LANTERN),
         (110, 26, 15, 7, LANTERN),
         (5, 15, 15, 5, LANTERN),
@@ -301,7 +288,11 @@ pub fn entities(
             UnwrappedAngle::from_degrees(azimuth),
             WorldUnit::from_bits(
                 WorldUnit::ratio(height, 10).bits()
-                    + motion.bob(12_000, index as i64 * 10_923, 12).bits(),
+                    + if texture == LANTERN {
+                        motion.bob(12_000, index as i64 * 10_923, 12).bits()
+                    } else {
+                        0
+                    },
             ),
             WorldUnit::ratio(size, 10),
             SPRITE_SIZE,
@@ -330,6 +321,192 @@ pub fn entities(
     principal.into_iter().flatten().chain(props).chain(lights)
 }
 
+pub fn particles() -> impl Iterator<Item = crate::Particle> {
+    (0..48_u16).map(|index| {
+        let cluster = i32::from(index / 6);
+        let kind = usize::from(index % 6);
+        crate::Particle {
+            id: BillboardId(200 + index),
+            pose: CylindricalPose {
+                radius: WorldUnit::ratio([19, 27, 23, 29, 21, 26][kind] - cluster % 3, 10),
+                azimuth: UnwrappedAngle::from_degrees(i64::from(
+                    cluster * 45 - 174 + [0, 11, -9, 18, -17, 5][kind] + (cluster % 3) * 3,
+                )),
+                height: WorldUnit::from_int(-1),
+            },
+            lods: core::array::from_fn(|lod| crate::ParticleLod {
+                texture: TextureId(50 + (kind * 3 + lod) as u16),
+                size: detail_lod_size(lod),
+                max_depth: WorldUnit::from_int([2, 4, 8][lod]),
+            }),
+        }
+    })
+}
+
+pub fn projected_entities(
+    motion: DemoMotion,
+    availability: Option<TextureId>,
+    notice: bool,
+    camera: crate::CameraPose,
+) -> impl Iterator<Item = Result<ProjectedBillboard, crate::ProjectionCull>> {
+    entities(motion, availability, notice)
+        .map(move |(billboard, source)| crate::project_billboard(billboard, source, camera))
+        .chain(particles().map(move |particle| crate::project_particle(particle, camera)))
+}
+
+fn detail_lod_size(lod: usize) -> SourceSize {
+    let side = [12, 6, 3][lod];
+    SourceSize {
+        width: side,
+        height: side,
+    }
+}
+
+// Hand-authored pixel silhouettes: mushroom pair, sedge, flowers, mossy cairn,
+// crystal cluster and a trail marker. Dots are transparent; all ink is opaque.
+// Small binary-alpha sprites avoid soft-glow overdraw and are cached once.
+const DETAILS: [[&[u8; 12]; 12]; 6] = [
+    [
+        b"............",
+        b"............",
+        b"...rrr......",
+        b"..rhrhr.....",
+        b".rrrrrrr....",
+        b"...ss....rr.",
+        b"...ss...rhrh",
+        b"...ss...rrrr",
+        b"...ss....s..",
+        b"..gssg...s..",
+        b".ggggggggg..",
+        b"............",
+    ],
+    [
+        b"............",
+        b".....g......",
+        b"..g..g......",
+        b"...g.g...g..",
+        b"...ghg..g...",
+        b".g..hg.g....",
+        b"..g.hhgg....",
+        b"...ghhg..g..",
+        b"...ghhggg...",
+        b"....hhg.....",
+        b"...ggggg....",
+        b"............",
+    ],
+    [
+        b"............",
+        b"..r.........",
+        b".rhr....h...",
+        b"..r....hhh..",
+        b"..g.....h...",
+        b"..g..r..g...",
+        b"..g.rhr.g...",
+        b"..gg.r..g...",
+        b"...g.g.gg...",
+        b"...ggggg....",
+        b"..ggggggg...",
+        b"............",
+    ],
+    [
+        b"............",
+        b"............",
+        b"............",
+        b".....ss.....",
+        b"....shss....",
+        b"....ssss....",
+        b"...ssssss...",
+        b"..shhsssss..",
+        b"..sssssssg..",
+        b".ggssssssgg.",
+        b".gggggggggg.",
+        b"............",
+    ],
+    [
+        b"............",
+        b".....h......",
+        b"....hcs.....",
+        b"....hcs.....",
+        b"..h.hcs.....",
+        b".hcshcs.h...",
+        b".hcshcshcs..",
+        b".hcshcshcs..",
+        b"..cshcshcs..",
+        b"...sccscs...",
+        b"..ssssssss..",
+        b"............",
+    ],
+    [
+        b"............",
+        b".....s......",
+        b"..sssssss...",
+        b"..shhhssss..",
+        b"..sssssss...",
+        b".....s......",
+        b".....s......",
+        b".....s......",
+        b".....s......",
+        b"....gsg.....",
+        b"...ggsgg....",
+        b"............",
+    ],
+];
+
+#[must_use]
+pub fn decoration_size(index: usize) -> SourceSize {
+    match index {
+        0..=2 => SPRITE_SIZE,
+        3 => SourceSize {
+            width: 9,
+            height: 9,
+        },
+        _ => detail_lod_size((index - 4) % 3),
+    }
+}
+
+/// Called only during texture creation; index is in `0..DECORATION_TEXTURE_COUNT`.
+#[must_use]
+pub fn decoration_pixel(index: usize, x: u16, y: u16) -> (u16, u8) {
+    match index {
+        0..=2 => {
+            let rgba = ARTWORK[index];
+            let offset = (usize::from(y) * 96 + usize::from(x)) * 4;
+            (
+                ((u16::from(rgba[offset]) >> 3) << 11)
+                    | ((u16::from(rgba[offset + 1]) >> 2) << 5)
+                    | (u16::from(rgba[offset + 2]) >> 3),
+                rgba[offset + 3],
+            )
+        }
+        3 => light_pixel(i32::from(x), i32::from(y)),
+        _ => {
+            let detail = (index - 4) / 3;
+            let block = 1 << ((index - 4) % 3);
+            // Keep thin stems and petals at distant LODs. Choose the brightest
+            // occupied texel in each block once during cache creation.
+            let mut ink = b'.';
+            for dy in 0..block {
+                for dx in 0..block {
+                    let candidate =
+                        DETAILS[detail][usize::from(y) * block + dy][usize::from(x) * block + dx];
+                    if candidate != b'.' && (ink == b'.' || candidate == b'h') {
+                        ink = candidate;
+                    }
+                }
+            }
+            let color = match ink {
+                b'g' => 0x5ba9, // moss
+                b'r' => 0xcaad, // coral
+                b'h' => 0xef56, // warm ivory
+                b's' => 0x7c0e, // stone / stems
+                b'c' => 0x65d7, // turquoise
+                _ => return (0, 0),
+            };
+            (color, 255)
+        }
+    }
+}
+
 /// Tiny procedural light, not geometry or a per-pixel lighting pass.
 #[must_use]
 pub fn light_pixel(x: i32, y: i32) -> (u16, u8) {
@@ -354,10 +531,10 @@ mod tests {
         let length = (VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize;
         let mut native = std::vec![0xffff; length + 4];
         let mut wire = native.clone();
-        paint_background(&mut native[..length - 1], false, &[]).unwrap_err();
+        paint_background(&mut native[..length - 1], false).unwrap_err();
         assert!(native.iter().all(|&pixel| pixel == 0xffff));
-        paint_background(&mut native, false, &[]).unwrap();
-        paint_background(&mut wire, true, &[]).unwrap();
+        paint_background(&mut native, false).unwrap();
+        paint_background(&mut wire, true).unwrap();
         assert_eq!(&native[length..], &[0xffff; 4]);
         assert_eq!(&wire[length..], &[0xffff; 4]);
         assert!(
@@ -369,7 +546,7 @@ mod tests {
             assert_eq!(*native, u16::from_be(*wire));
         }
         let before = native.clone();
-        paint_background(&mut native, false, &[]).unwrap();
+        paint_background(&mut native, false).unwrap();
         assert_eq!(native, before);
         for row in native[..length].chunks_exact(VIEWPORT_WIDTH as usize) {
             assert!(row.chunks_exact(4).all(|span| span == &row[..4]));
@@ -387,58 +564,8 @@ mod tests {
         let bottom = channels(native[length - VIEWPORT_WIDTH as usize]);
         assert!(top[2] > top[0]);
         assert!(bottom[1] > bottom[0] && bottom[1] > bottom[2]);
-        assert!(sky.iter().sum::<u16>() > ground.iter().sum::<u16>() + 50);
+        assert!(sky.iter().zip(ground).all(|(a, b)| a.abs_diff(b) <= 9));
         assert!(ground.iter().sum::<u16>() > bottom.iter().sum::<u16>());
-    }
-
-    #[test]
-    fn ground_tracks_projected_feet_across_depth_height_and_turn_seams() {
-        let (character, size) = entities(DemoMotion::default(), None, false).next().unwrap();
-        let mut camera = CameraPose {
-            radius: WorldUnit::from_int(4),
-            height: WorldUnit::ZERO,
-            observed_azimuth: UnwrappedAngle::ZERO,
-        };
-        let mut previous = 0;
-        let mut near = 0;
-        let mut far = 0;
-        for degrees in 0..=361 {
-            camera.observed_azimuth = UnwrappedAngle::from_degrees(degrees);
-            let p = project_billboard(character, size, camera).unwrap();
-            let line = ground_line(&[p]);
-            assert_eq!(line, p.screen_rect.y + p.screen_rect.height);
-            if degrees == 0 {
-                near = line;
-            }
-            if degrees == 180 {
-                far = line;
-            }
-            if degrees > 0 {
-                assert!((line - previous).abs() <= 1);
-            }
-            previous = line;
-        }
-        assert!(near > far + 30);
-        camera.observed_azimuth = UnwrappedAngle::ZERO;
-        camera.height = WorldUnit::ratio(1, 2);
-        let mut p = project_billboard(character, size, camera).unwrap();
-        assert!(ground_line(&[p]) > near);
-        let mut frame = std::vec![0; (VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize];
-        for line in [i32::MIN, 0, 139, 182, 240, i32::MAX] {
-            p.screen_rect.y = line;
-            p.screen_rect.height = 0;
-            paint_background(&mut frame, false, &[p]).unwrap();
-            let boundary = ground_line(&[p]) as usize;
-            if boundary > 0 {
-                assert_eq!(&frame[..4], &BACKGROUND_ROWS[0]);
-            }
-            if boundary < 240 {
-                assert_eq!(
-                    &frame[boundary * 320..boundary * 320 + 4],
-                    &BACKGROUND_ROWS[240]
-                );
-            }
-        }
     }
 
     #[test]
@@ -508,9 +635,9 @@ mod tests {
                     .count(),
                 2
             );
-            assert_eq!(full.len(), CAPACITY);
+            assert_eq!(full.len() + particles().count(), CAPACITY);
             let demo: std::vec::Vec<_> = entities(motion, None, false).collect();
-            assert_eq!(demo.len(), CAPACITY);
+            assert_eq!(demo.len() + particles().count(), CAPACITY);
             assert_eq!(
                 demo.iter()
                     .filter(|(b, _)| matches!(b.texture_id.0, 40..=42))
@@ -528,7 +655,7 @@ mod tests {
                         .iter()
                         .any(|(other, _)| other.id == billboard.id)
                 );
-                assert!(matches!(billboard.texture_id.0, 1 | 10 | 20 | 30..=33 | 42));
+                assert!(matches!(billboard.texture_id.0, 1 | 10 | 20 | 30..=39 | 42));
                 for degrees in (0..360).step_by(30) {
                     let camera = CameraPose {
                         radius: WorldUnit::from_int(4),
@@ -544,6 +671,62 @@ mod tests {
             }
             motion.advance(1_000);
         }
+    }
+
+    #[test]
+    fn particle_lods_are_native_sized_and_keep_the_ground_anchor() {
+        for particle in particles() {
+            for (depth, lod) in [(2, 0), (3, 1), (4, 1), (5, 2), (8, 2)] {
+                let particle = crate::Particle {
+                    pose: CylindricalPose {
+                        radius: WorldUnit::ZERO,
+                        ..particle.pose
+                    },
+                    ..particle
+                };
+                let camera = CameraPose {
+                    radius: WorldUnit::from_int(depth),
+                    height: WorldUnit::ZERO,
+                    observed_azimuth: UnwrappedAngle::ZERO,
+                };
+                let p = crate::project_particle(particle, camera).unwrap();
+                let index = usize::from(p.source.0 - 46);
+                let size = decoration_size(index);
+                assert_eq!(p.source, particle.lods[lod].texture);
+                assert_eq!(p.screen_rect.width, i32::from(size.width));
+                assert_eq!(p.screen_rect.height, i32::from(size.height));
+                assert_eq!(
+                    p.screen_rect.y + p.screen_rect.height,
+                    120 + 160 / i32::from(depth)
+                );
+                assert_eq!(p.filter, TextureFilter::Nearest);
+                let pixels: std::vec::Vec<_> = (0..size.height)
+                    .flat_map(|y| (0..size.width).map(move |x| decoration_pixel(index, x, y)))
+                    .collect();
+                assert!(pixels.iter().any(|p| p.1 == 255));
+                assert!(pixels.iter().all(|p| p.1 == 0 || p.1 == 255));
+            }
+        }
+    }
+
+    #[test]
+    fn small_details_bound_full_turn_raster_work() {
+        let mut max_pixels = 0;
+        for degrees in 0..360 {
+            let camera = CameraPose {
+                radius: WorldUnit::from_int(4),
+                height: WorldUnit::ZERO,
+                observed_azimuth: UnwrappedAngle::from_degrees(degrees),
+            };
+            let pixels: i32 = particles()
+                .filter_map(|particle| crate::project_particle(particle, camera).ok())
+                .map(|p| p.screen_rect.width * p.screen_rect.height)
+                .sum();
+            max_pixels = max_pixels.max(pixels);
+        }
+        // Counts transparent texels too; clipping and occlusion can only reduce it.
+        assert!(max_pixels <= 4_000, "detail pixel budget: {max_pixels}");
+        std::println!("maximum detail bounding-box pixels per frame: {max_pixels}");
     }
 
     #[test]

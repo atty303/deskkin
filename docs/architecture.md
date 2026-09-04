@@ -118,20 +118,32 @@ with an explicit limit of 65,535 boards. There is no depth or per-entity visibil
 buffer. Screen tiles can be 8x8 or 16x16 independently of the source mask;
 the product uses 8x8. Sampling counters count visited destination samples after
 occlusion, including transparent samples; skipped samples are not counted.
-The background separates a muted sky gradient from darker green ground with a
-crisp boundary at the character's projected billboard bottom. It follows observed
-camera pose and character motion, not animation-frame alpha; the backdrop uses
-screen center if the character is culled. Compile-time ordered-dither row patterns
-avoid a full background texture and per-pixel gradient arithmetic. The same
-painter supports native and wire byte order.
+The background joins a muted sky to darker green ground through a soft fog band
+at the level camera's fixed horizon. Character movement does not move the ground.
+Compile-time ordered-dither row patterns avoid a full background texture and
+per-pixel gradient arithmetic. The same painter supports native and wire byte order.
+
+Particles have a world-space bottom-center anchor and three discrete native-size
+LODs, sharing projection, depth sorting and occlusion with billboards. Native-size
+nearest sprites bypass scaler tables and coordinate stepping, including clipped
+and occluded spans. They retain the same sampling counters and raster phase hooks.
+There is no particle simulation, physics or per-frame texture generation.
+The device keeps projected entities and decoration descriptors in reusable PSRAM
+heap storage. A non-inlined raster helper owns the scene array so its stack frame
+is not live during recursive depth sorting; the renderer stack remains 12 KiB.
 
 The paired night-garden demo contains a moving Character, three information cards,
 a radially moving garden drone, three terrariums, three
-lanterns, and twelve drifting lights. Generated artwork is normalized to three
+lanterns, twelve drifting lights, and 48 static ground particles. Six hand-authored
+pixel silhouettes (mushrooms, sedge, flowers, cairns, crystals and trail markers)
+share cached 12/6/3 px LODs at depths up to 2/4/8 units, using 3,402 bytes of
+RGB565+A8 plus 18 bytes of opaque masks on the device. Generated artwork is normalized to three
 96x96 straight-alpha sprites, converted once to RGB565+A8 in the renderer's
 owned heap, and reused by repeated entities. The shared `demo_world` module
 owns deterministic bounded periodic motion and placement; its capacity does
-not limit the generic renderer. All are screen-axis
+not limit the generic renderer. The character is 1.2 units tall with its foot
+anchor at ground height -1.0; the ground particles share that height. Information
+cards are raised above the planting layer. All are screen-axis
 aligned camera-facing billboards. Camera radius is 4.0, entity radius is bounded
 to 0..=3.0, the near plane is 0.25, horizontal FOV is 90 degrees, and focal
 length is 160 px. Touch maps each positive 320 px horizontal drag to one

@@ -4,83 +4,55 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
-Background composition scans the cutoff map once per tile band, retaining at
-most 20 visible spans in 80 bytes of PSRAM-stack scratch, then reuses those
-spans across the 8 or 16 rows. Four-pixel pattern stores replace per-pixel
-pattern indexing. Each row's background callback still runs once in order.
-The product retains 8x8 tiles, conservative opaque coverage and painter order.
-The existing scaler coordinate table, textures, internal-SRAM double
-framebuffers, DMA and scheduling remain unchanged; no dependency, persistent
-allocation or diagnostic schema is added.
+The source uses 71 entities: 23 billboards and 48 static particles. Six silhouettes
+(mushrooms, sedge, flowers, cairns, crystals and trail markers) share native-size
+12/6/3 px LODs. Native-size nearest raster bypasses scaler coordinates and its
+preparation counter while retaining clipping, alpha, tile occlusion, wire order
+and diagnostic phase hooks. Particle textures and masks consume 3,420 bytes.
+The fog horizon is fixed; the 1.2-unit character and particles use ground height
+-1.0. Information cards are raised above the planting layer.
 
-The final image is flashed with all AMP domain hashes verified (record
-`764900b5-14a0-4dd2-b769-2dbc7c4c5ef3`). Normal-scene 120-second profiles before
-and after sampled 259 and 260 distinct frames respectively:
+Projected entities and decoration descriptors use reusable renderer-owned PSRAM
+heap storage. The scene array lives in a non-inlined raster helper, separating
+its stack frame from recursive depth sorting. The existing 12 KiB renderer stack
+and framebuffer ownership are unchanged. Whole-thread stack high-water is not
+measured. No dependency, persistence, protocol or pairing change is included.
+
+Headless front, side and rear composition is inspected. `mise run test` passed
+(record `337bd732-1853-456e-998b-cb5f7fac5082`); following review corrections,
+strict Clippy, 26 presentation and 15 simulator tests passed, and all AMP domains
+plus inert recovery rebuilt cleanly (`aabf1830-1726-4c63-a70e-f14f09ec751b`).
+Fresh review and delta review have no remaining required changes.
+
+Final flash `d13b9187-47ef-4283-a78b-d3e3b1c5875b` verified every AMP domain hash.
+The 60-second physical benchmark `79e3b14e-10b8-4fe6-a482-4abf7e41a51d` completed
+all 1,200 requested updates with 1,208 frames over 59.958 measured seconds:
+20.147 FPS, two deadline misses, and zero renderer, allocation, transfer,
+stale-snapshot, touch-drop or cache faults. It observed 69 visible and two culled
+entities. Last render/transfer was 30.814/32.053 ms. The 20 FPS target is met;
+it remains a measurement rather than a performance gate.
+
+Matched-duration normal-scene profiles each sampled 260 frames over 120 seconds:
 
 | Phase | Before mean | Final mean |
 | --- | --- | --- |
-| Coverage | 1.064 ms | 1.147 ms |
-| Background | 10.259 ms | 2.126 ms |
-| Scaler setup | 1.643 ms | 1.538 ms |
-| Pixel raster | 28.604 ms | 28.718 ms |
-| Sum | 41.570 ms | 33.529 ms |
+| Coverage | 1.167 ms | 0.447 ms |
+| Background | 2.118 ms | 2.193 ms |
+| Scaler setup | 1.593 ms | 2.832 ms |
+| Pixel raster | 28.328 ms | 28.875 ms |
+| Sum | 33.206 ms | 34.347 ms |
 
-Profile records are `1c5c381a-aebf-48de-a24d-5011868fb033` and
-`7baa79b4-9f4c-4e5d-ace8-bca57ea7c2bb`. Background is about 79% shorter and
-the measured phase sum about 19% shorter. Mean nearest/bilinear sample counts
-were 20,499/14,256 before and 20,465/14,271 after. Times use the existing
-approximate RC_SLOW wall clock and include preemption and instrumentation.
-These are comparable full-camera-turn samples, not frame-locked replay,
-exclusive CPU time, measured PSRAM traffic or an FPS improvement guarantee.
-
-A separately flashed arithmetic-coordinate candidate was not retained: its
-pixel/setup means were 30.498/0.739 ms versus 28.718/1.538 ms with the original
-coordinate table and the same background optimization (profile
-`57d98bcc-6140-4023-9e91-658641825561`). Reducing table reads by recomputing
-coordinates did not improve combined pixel/setup time in this trial.
-
-Post-profile status is Paired and fresh, with 3,201 completed frames, last
-render/transfer 32.578/32.445 ms and zero renderer, allocation, transfer,
-stale-snapshot and touch-drop faults (record
-`3653d948-8faa-43e0-b388-87f0dd689eef`). Whole-thread stack high-water and
-frame-locked device A/B remain unverified.
-
-`mise run fix`, strict Clippy, portable/simulator checks and the once-run full
-`mise run test` passed. After rejecting the coordinate candidate, the 24
-presentation tests and strict Clippy passed again, and all AMP domains plus
-inert recovery rebuilt successfully (record
-`ef04d4a6-5bf3-4809-8056-e1223bb70571`). APPCPU image size is 1,737,340 bytes.
-Tests compare exact pixels and framebuffer guards with the independent raster
-oracle and painter output, including clipping, atlas regions, alpha holes,
-wire order, both tile sizes, empty coverage and maximum alternating background
-spans. Fresh review's architecture-document mismatch was corrected; delta
-review has no remaining required changes.
-
-The paired world has a crisp, dark-green ground region below a muted sky.
-Its boundary follows the character's projected foot anchor using the same
-observed-camera projection as the billboards, with viewport-center fallback
-when the character is culled. No floor geometry or additional framebuffer is
-introduced. Fixed 4x4 dithering softens RGB565 banding without temporal noise;
-the existing back buffer is filled directly before billboard composition.
-
-The garden now has three persistent information-card slots with richer text.
-Availability and Notice retain their semantic meaning; absent views use labelled
-demo garden/field-note copy. The third exploration-guide card uses a portrait
-136x204 Slint capture and layout; the other two remain landscape 272x124. The camera
-continuously advances 3 degrees/s (120 seconds/turn) in paired mode, composed with
-unwrapped drag through observed yaw and the existing 180 degrees/s rate limit.
-The decorative objects, invisible coordinate model, internal DMA framebuffers,
-PSRAM cache ownership and pairing UI are preserved. No new dependencies.
-
-Headless front and 60-second ground/portrait previews were inspected. Background tests
-cover complete overwrite, invalid-buffer non-mutation, trailing guards, repeatability
-and native/wire byte-order equivalence, plus foot tracking across depth, camera
-height, turn seams and viewport extremes. Simulator tests verify full-height
-portrait capture and scene tests verify exactly one portrait among three cards.
-The 3,840-byte background table remains flash-resident. Background drawing
-adds no heap allocation; demo card textures use
-190,400 bytes in PSRAM. Background time is included in world-raster and total
-render timing. The ground/portrait revision was flashed and visually accepted.
+Records are `a3be5d8a-6279-4b01-b65d-8659a21b9fde` and
+`6d35deda-2af8-44eb-907f-a20c23eaf1bb`. The phase sum is 1.141 ms (3.4%) higher
+with the added particles and revised composition. Setup timing includes
+validation and visibility work even when native sprites skip scaler coordinates;
+preparation counts exclude those sprites. These full-turn observational samples
+include preemption and instrumentation, are not frame-locked CPU timing, and
+cannot isolate particle cost from the composition changes. Both the benchmark
+and final normal-scene profile completed without a renderer stop or typed fault.
+Post-measurement status `7cd6a105-5a06-4045-afdc-bc3fa2ef8c78` observed 6,022
+completed frames, a fresh Paired heartbeat, advancing renderer/display sequences,
+and zero renderer, allocation, transfer, stale-snapshot and touch-drop faults.
 
 ## Previous qualified baseline
 
@@ -131,7 +103,7 @@ stable far-to-near painter sorting, direct RGB565 nearest/bilinear/A8 raster,
 horizontal touch mapping, and 0.5 turn/s observed-yaw limiting.
 
 The simulator and CoreS3 share an invisible cylindrical night-garden scene with
-23 camera-facing billboards over a dithered night-sky/ground gradient: moving Character,
+23 camera-facing billboards and 48 native-size LOD particles over a dithered foggy night-sky/ground gradient: moving Character,
 three information cards, a radially moving garden drone, three botanical
 terrariums, three lanterns, and twelve drifting lights. Availability and Notice
 use canonical 272x124 Slint captures; the custom renderer handles projection,
@@ -283,10 +255,9 @@ from the inferred interrupt sequence.
 Replace the pinned APPCPU entry patch only when an equivalent
 upstream-compatible startup path is verified.
 
-The previous four-entity demo passed user visual acceptance. The new garden
-scene still needs live visual acceptance for composition, parallax, continuous
+The current particle garden still needs live visual acceptance for composition, parallax, continuous
 320 px turns without a seam jump, 180 degrees/s observed following, and intact
-pairing UI. Both normal and benchmark operation have 23 entities: absent
+pairing UI. Both normal and benchmark operation have 71 entities: absent
 Availability/Notice slots use explicitly labelled demo cards, with a third
 exploration guide always present. Camera target drifts 3 degrees/s in addition
 to drag, through the existing observed-pose limiter.

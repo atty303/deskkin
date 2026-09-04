@@ -397,7 +397,10 @@ pub fn raster_scene_observed(
             wire,
             (mask, observer),
         )?;
-        if result.nearest_samples + result.bilinear_samples > 0 {
+        let native = board.projected.filter == TextureFilter::Nearest
+            && board.projected.screen_rect.width == i32::from(board.region.width)
+            && board.projected.screen_rect.height == i32::from(board.region.height);
+        if !native && result.nearest_samples + result.bilinear_samples > 0 {
             stats.scaler_preparations += 1;
         }
         stats.raster.nearest_samples = stats

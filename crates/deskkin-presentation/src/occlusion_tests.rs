@@ -69,13 +69,12 @@ fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
     assert!(actual == expected, "observer changed output");
     assert_eq!(phases.first(), Some(&RasterPhase::Coverage));
     assert_eq!(phases.last(), Some(&RasterPhase::Idle));
-    assert_eq!(
-        phases
-            .iter()
-            .filter(|&&phase| phase == RasterPhase::Pixels)
-            .count(),
-        stats.scaler_preparations as usize
-    );
+    let pixel_phases = phases
+        .iter()
+        .filter(|&&phase| phase == RasterPhase::Pixels)
+        .count();
+    assert!(pixel_phases >= stats.scaler_preparations as usize);
+    assert!(pixel_phases <= boards.len());
     stats
 }
 
@@ -219,32 +218,20 @@ fn occlusion_matches_painter_across_scales_regions_holes_and_ties() {
             ..opaque
         };
         for rect in [
-            full,
-            ScreenRect {
-                x: 7,
-                y: 5,
-                width: 305,
-                height: 227,
-            },
-            ScreenRect {
-                x: -91,
-                y: -33,
-                width: 507,
-                height: 349,
-            },
-            ScreenRect {
-                x: 311,
-                y: 234,
-                width: 19,
-                height: 7,
-            },
-            ScreenRect {
-                x: 0,
-                y: 0,
-                width: 17,
-                height: 9,
-            },
-        ] {
+            (0, 0, 320, 240),
+            (-5, 13, 31, 23),
+            (311, 233, 31, 23),
+            (7, 5, 305, 227),
+            (-91, -33, 507, 349),
+            (311, 234, 19, 7),
+            (0, 0, 17, 9),
+        ]
+        .map(|(x, y, width, height)| ScreenRect {
+            x,
+            y,
+            width,
+            height,
+        }) {
             for filter in [TextureFilter::Nearest, TextureFilter::Bilinear] {
                 let boards = [
                     board(opaque, region, full, 3, 1, TextureFilter::Bilinear),
@@ -443,4 +430,45 @@ fn measure_scene(boards: &[SceneBillboard<'_>], overlap: bool, alpha: bool) {
             start.elapsed()
         );
     }
+}
+
+#[test]
+fn native_sprites_do_not_prepare_scalers() {
+    let size = SourceSize {
+        width: 3,
+        height: 3,
+    };
+    let texture = Texture {
+        size,
+        pixels: &[0xffff; 9],
+        coverage: Coverage::Opaque,
+    };
+    let region = TextureRegion {
+        source_x: 0,
+        source_y: 0,
+        width: 3,
+        height: 3,
+        stride: 3,
+    };
+    let rect = ScreenRect {
+        x: 10,
+        y: 10,
+        width: 3,
+        height: 3,
+    };
+    let native = board(texture, region, rect, 1, 1, TextureFilter::Nearest);
+    assert_eq!(compare(&[native], true).scaler_preparations, 0);
+    let scaled = board(
+        texture,
+        region,
+        ScreenRect {
+            width: 6,
+            height: 6,
+            ..rect
+        },
+        1,
+        1,
+        TextureFilter::Nearest,
+    );
+    assert_eq!(compare(&[scaled], true).scaler_preparations, 1);
 }

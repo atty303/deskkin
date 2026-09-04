@@ -4,7 +4,7 @@ use deskkin_presentation::{
     RateLimitedObservedYaw, SceneBillboard, ScreenTile, SourceSize, Texture, TextureFilter,
     TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoCamera, DemoMotion},
-    project_billboard, raster_scene, sort_far_to_near,
+    raster_scene, sort_far_to_near,
 };
 use slint::{ComponentHandle, Image, Rgb8Pixel, SharedPixelBuffer};
 
@@ -85,7 +85,7 @@ pub(crate) struct WorldScene {
     character: Vec<OwnedTexture>,
     character_frame: usize,
     character_frame_elapsed_ms: u32,
-    decorations: [OwnedTexture; 4],
+    decorations: [OwnedTexture; demo_world::DECORATION_TEXTURE_COUNT],
     framebuffer: Vec<u16>,
     cutoffs: Vec<u16>,
     metrics: WorldMetrics,
@@ -128,24 +128,25 @@ impl WorldScene {
         self.advance(elapsed_ms);
         self.ensure_textures(ui, views)?;
 
-        let entities = demo_world::entities(
-            self.motion,
-            views.availability.map(|surface| {
-                TextureId(10 + u16::try_from(availability_index(surface)).unwrap_or(0))
-            }),
-            views.synthetic_notice.is_some(),
-        );
-
         let camera = CameraPose {
             radius: WorldUnit::from_int(4),
             observed_azimuth: self.observed.observed(),
             height: WorldUnit::ZERO,
         };
+        let entities = demo_world::projected_entities(
+            self.motion,
+            views.availability.map(|surface| {
+                TextureId(10 + u16::try_from(availability_index(surface)).unwrap_or(0))
+            }),
+            views.synthetic_notice.is_some(),
+            camera,
+        );
+
         let mut projected = [empty_projected(); demo_world::CAPACITY];
         let mut count = 0;
         self.metrics.culled = 0;
-        for (billboard, source) in entities {
-            match project_billboard(billboard, source, camera) {
+        for projected_entity in entities {
+            match projected_entity {
                 Ok(value) => {
                     projected[count] = value;
                     count += 1;
@@ -159,8 +160,7 @@ impl WorldScene {
         let mut cutoffs = core::mem::take(&mut self.cutoffs);
         let mut occlusion =
             Occlusion::new(ScreenTile::Eight, &mut cutoffs).expect("screen tile storage");
-        let ground = usize::try_from(demo_world::ground_line(&projected[..count]))
-            .expect("ground line is clamped to the viewport");
+        let ground = demo_world::HORIZON;
         let draw = (|| {
             let resolve = |value: ProjectedBillboard| {
                 let texture = self.texture(value.source, views)?.borrow();
@@ -287,7 +287,9 @@ impl WorldScene {
     fn texture(&self, id: TextureId, views: ApplicationViews) -> Result<&OwnedTexture, String> {
         match id.0 {
             1 => Ok(&self.character[self.character_frame]),
-            30..=33 => Ok(&self.decorations[usize::from(id.0 - 30)]),
+            30..=33 | 50..=67 => {
+                Ok(&self.decorations[usize::from(if id.0 < 50 { id.0 - 30 } else { id.0 - 46 })])
+            }
             40..=42 => self.demo_cache[usize::from(id.0 - 40)]
                 .as_ref()
                 .ok_or_else(|| "demo texture cache missing".into()),
@@ -376,24 +378,10 @@ fn character_texture() -> Vec<OwnedTexture> {
         .collect()
 }
 
-fn decoration_textures() -> [OwnedTexture; 4] {
+fn decoration_textures() -> [OwnedTexture; demo_world::DECORATION_TEXTURE_COUNT] {
     core::array::from_fn(|index| {
-        if index == 3 {
-            return generated_alpha_texture(
-                SourceSize {
-                    width: 9,
-                    height: 9,
-                },
-                |x, y| demo_world::light_pixel(i32::from(x), i32::from(y)),
-            );
-        }
-        let rgba = demo_world::ARTWORK[index];
-        generated_alpha_texture(demo_world::SPRITE_SIZE, |x, y| {
-            let offset = (usize::from(y) * 96 + usize::from(x)) * 4;
-            (
-                rgb565(rgba[offset], rgba[offset + 1], rgba[offset + 2]),
-                rgba[offset + 3],
-            )
+        generated_alpha_texture(demo_world::decoration_size(index), |x, y| {
+            demo_world::decoration_pixel(index, x, y)
         })
     })
 }
@@ -453,18 +441,19 @@ mod tests {
             observed_azimuth: scene.observed.observed(),
             height: WorldUnit::ZERO,
         };
-        let mut projected: Vec<_> = demo_world::entities(
+        let mut projected: Vec<_> = demo_world::projected_entities(
             scene.motion,
             views
                 .availability
                 .map(|surface| TextureId(10 + u16::try_from(availability_index(surface)).unwrap())),
             views.synthetic_notice.is_some(),
+            camera,
         )
-        .filter_map(|(board, size)| project_billboard(board, size, camera).ok())
+        .filter_map(Result::ok)
         .collect();
         sort_far_to_near(&mut projected);
         let mut expected = vec![0; WIDTH * HEIGHT];
-        demo_world::paint_background(&mut expected, false, &projected).unwrap();
+        demo_world::paint_background(&mut expected, false).unwrap();
         let mut samples = 0;
         for value in projected {
             let texture = scene.texture(value.source, views).unwrap().borrow();

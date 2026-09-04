@@ -12,7 +12,7 @@ use deskkin_presentation::{
     ProjectedBillboard, RasterPhase, SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture,
     TextureFilter, TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoMotion},
-    project_billboard, raster_scene_observed, sort_far_to_near,
+    raster_scene_observed, sort_far_to_near,
 };
 use qoi::{Channels, Decoder};
 use slint::platform::software_renderer::{
@@ -549,7 +549,7 @@ struct WorldTextures {
     availability: [Option<BillboardTexture>; 3],
     notice: Option<BillboardTexture>,
     demo: [Option<BillboardTexture>; 3],
-    decorations: [DecorationTexture; 4],
+    decorations: Vec<DecorationTexture>,
 }
 
 struct WorldTelemetry {
@@ -565,44 +565,27 @@ fn new_world_textures() -> WorldTextures {
         availability: [None, None, None],
         notice: None,
         demo: [None, None, None],
-        decorations: core::array::from_fn(|index| {
-            let size = if index == 3 {
-                SourceSize {
-                    width: 9,
-                    height: 9,
+        decorations: (0..demo_world::DECORATION_TEXTURE_COUNT)
+            .map(|index| {
+                let size = demo_world::decoration_size(index);
+                let length = usize::from(size.width) * usize::from(size.height);
+                let mut pixels = Vec::with_capacity(length);
+                let mut alpha = Vec::with_capacity(length);
+                for y in 0..size.height {
+                    for x in 0..size.width {
+                        let (color, opacity) = demo_world::decoration_pixel(index, x, y);
+                        pixels.push(color);
+                        alpha.push(opacity);
+                    }
                 }
-            } else {
-                demo_world::SPRITE_SIZE
-            };
-            let length = usize::from(size.width) * usize::from(size.height);
-            let mut pixels = Vec::with_capacity(length);
-            let mut alpha = Vec::with_capacity(length);
-            for y in 0..size.height {
-                for x in 0..size.width {
-                    let (color, opacity) = if index == 3 {
-                        demo_world::light_pixel(i32::from(x), i32::from(y))
-                    } else {
-                        let rgba = demo_world::ARTWORK[index];
-                        let offset =
-                            (usize::from(y) * usize::from(size.width) + usize::from(x)) * 4;
-                        (
-                            (u16::from(rgba[offset] >> 3) << 11)
-                                | (u16::from(rgba[offset + 1] >> 2) << 5)
-                                | u16::from(rgba[offset + 2] >> 3),
-                            rgba[offset + 3],
-                        )
-                    };
-                    pixels.push(color);
-                    alpha.push(opacity);
+                DecorationTexture {
+                    size,
+                    pixels,
+                    opaque_blocks: alpha_mask(size, &alpha),
+                    alpha,
                 }
-            }
-            DecorationTexture {
-                size,
-                pixels,
-                opaque_blocks: alpha_mask(size, &alpha),
-                alpha,
-            }
-        }),
+            })
+            .collect(),
     }
 }
 
@@ -690,6 +673,7 @@ struct WorldMotion {
     scene: DemoMotion,
     updated_at_us: u64,
     cutoffs: Vec<u16>,
+    projected: Vec<ProjectedBillboard>,
 }
 
 impl WorldMotion {
@@ -698,6 +682,7 @@ impl WorldMotion {
             scene: DemoMotion::default(),
             updated_at_us: now_us,
             cutoffs: vec![0; ScreenTile::Eight.cells()],
+            projected: vec![empty_projected(); demo_world::CAPACITY],
         }
     }
 
@@ -737,8 +722,12 @@ fn world_billboard<'a>(
                 },
             }
         }
-        30..=33 => {
-            let texture = &textures.decorations[usize::from(value.source.0 - 30)];
+        30..=33 | 50..=67 => {
+            let texture = &textures.decorations[usize::from(if value.source.0 < 50 {
+                value.source.0 - 30
+            } else {
+                value.source.0 - 46
+            })];
             Texture {
                 size: texture.size,
                 pixels: &texture.pixels,
@@ -785,6 +774,48 @@ fn world_billboard<'a>(
     SceneBillboard::new(value, texture, region).map_err(|_| RendererFault::RenderSkipped)
 }
 
+// Keep the scene array off the projection/sort call stack: slice sorting can
+// recurse, and its scratch must not overlap this renderer's large raster frame.
+#[inline(never)]
+fn draw_world_scene(
+    pixels: &mut [u16],
+    projected: &[ProjectedBillboard],
+    decoded: &DecodedLoop,
+    frame_index: u8,
+    textures: &WorldTextures,
+    occlusion: &mut Occlusion<'_>,
+    observer: &mut impl FnMut(RasterPhase),
+) -> Result<deskkin_presentation::SceneStats, RendererFault> {
+    let ground = demo_world::HORIZON;
+    if projected.is_empty() {
+        raster_scene_observed(
+            pixels,
+            WIDTH,
+            &[],
+            |y| demo_world::background_row(y, ground),
+            true,
+            occlusion,
+            observer,
+        )
+    } else {
+        let mut scene =
+            [world_billboard(projected[0], decoded, frame_index, textures)?; demo_world::CAPACITY];
+        for (slot, value) in scene.iter_mut().zip(projected) {
+            *slot = world_billboard(*value, decoded, frame_index, textures)?;
+        }
+        raster_scene_observed(
+            pixels,
+            WIDTH,
+            &scene[..projected.len()],
+            |y| demo_world::background_row(y, ground),
+            true,
+            occlusion,
+            observer,
+        )
+    }
+    .map_err(|_| RendererFault::RenderSkipped)
+}
+
 fn render_world(
     framebuffer: &mut Framebuffer,
     decoded: &DecodedLoop,
@@ -812,20 +843,21 @@ fn render_world(
         observed_azimuth: UnwrappedAngle::from_units(snapshot.observed_yaw),
         height: WorldUnit::ZERO,
     };
-    let billboards = demo_world::entities(
+    let billboards = demo_world::projected_entities(
         motion.scene,
         (snapshot.availability != 0).then_some(TextureId(
             10 + u16::from(snapshot.availability.saturating_sub(1)),
         )),
         snapshot.notice != 0,
+        camera,
     );
     let projection_started = unsafe { deskkin_uptime_us() };
-    let mut projected = [empty_projected(); demo_world::CAPACITY];
+    let projected = &mut motion.projected;
     let mut count = 0;
     let mut candidates = 0_u8;
-    for (billboard, source) in billboards {
+    for projected_entity in billboards {
         candidates = candidates.saturating_add(1);
-        if let Ok(value) = project_billboard(billboard, source, camera) {
+        if let Ok(value) = projected_entity {
             projected[count] = value;
             count += 1;
         }
@@ -835,7 +867,6 @@ fn render_world(
     sort_far_to_near(&mut projected[..count]);
     let sort_us = elapsed_us(sort_started, unsafe { deskkin_uptime_us() });
     let raster_started = unsafe { deskkin_uptime_us() };
-    let ground = demo_world::ground_line(&projected[..count]) as usize;
     let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut motion.cutoffs)
         .map_err(|_| RendererFault::RenderSkipped)?;
     let mut profile = [0_u32; 8];
@@ -850,33 +881,15 @@ fn render_world(
         phase = next;
         phase_started = now;
     };
-    let stats = if count == 0 {
-        raster_scene_observed(
-            pixels,
-            WIDTH,
-            &[],
-            |y| demo_world::background_row(y, ground),
-            true,
-            &mut occlusion,
-            &mut observer,
-        )
-    } else {
-        let mut scene =
-            [world_billboard(projected[0], decoded, frame_index, textures)?; demo_world::CAPACITY];
-        for (slot, value) in scene.iter_mut().zip(&projected[..count]) {
-            *slot = world_billboard(*value, decoded, frame_index, textures)?;
-        }
-        raster_scene_observed(
-            pixels,
-            WIDTH,
-            &scene[..count],
-            |y| demo_world::background_row(y, ground),
-            true,
-            &mut occlusion,
-            &mut observer,
-        )
-    }
-    .map_err(|_| RendererFault::RenderSkipped)?;
+    let stats = draw_world_scene(
+        pixels,
+        &projected[..count],
+        decoded,
+        frame_index,
+        textures,
+        &mut occlusion,
+        &mut observer,
+    )?;
     profile[4] = stats.coverage_tests;
     profile[5] = stats.scaler_preparations;
     profile[6] = stats.raster.nearest_samples;

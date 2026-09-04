@@ -181,20 +181,10 @@ pub fn project_billboard(
     source: SourceSize,
     camera: CameraPose,
 ) -> Result<ProjectedBillboard, ProjectionCull> {
-    if billboard.pose.radius < WorldUnit::ZERO || billboard.pose.radius > WorldUnit::from_int(3) {
-        return Err(ProjectionCull::InvalidRadius);
-    }
     if source.width == 0 || source.height == 0 {
         return Err(ProjectionCull::InvalidSource);
     }
-    let delta = billboard.pose.azimuth.units() - camera.observed_azimuth.units();
-    let x = ((i64::from(billboard.pose.radius.bits()) * i64::from(sin_q15(delta))) >> 15) as i32;
-    let radial_depth =
-        ((i64::from(billboard.pose.radius.bits()) * i64::from(cos_q15(delta))) >> 15) as i32;
-    let depth = camera.radius.bits().saturating_sub(radial_depth);
-    if depth < WorldUnit::ratio(1, 4).bits() {
-        return Err(ProjectionCull::NearPlane);
-    }
+    let (center_x, center_y, depth) = project_anchor(billboard.pose, camera)?;
     let projected_height = ((i64::from(billboard.world_height.bits()) * i64::from(FOCAL_LENGTH))
         / i64::from(depth)) as i32;
     if projected_height <= 0 {
@@ -202,14 +192,6 @@ pub fn project_billboard(
     }
     let projected_width =
         ((i64::from(projected_height) * i64::from(source.width)) / i64::from(source.height)) as i32;
-    let center_x =
-        VIEWPORT_WIDTH / 2 + ((i64::from(x) * i64::from(FOCAL_LENGTH)) / i64::from(depth)) as i32;
-    let vertical = camera
-        .height
-        .bits()
-        .saturating_sub(billboard.pose.height.bits());
-    let center_y = VIEWPORT_HEIGHT / 2
-        + ((i64::from(vertical) * i64::from(FOCAL_LENGTH)) / i64::from(depth)) as i32;
     let rect = ScreenRect {
         x: center_x - projected_width / 2,
         y: center_y - projected_height / 2,
@@ -229,6 +211,79 @@ pub fn project_billboard(
         depth: WorldUnit::from_bits(depth),
         source: billboard.texture_id,
         filter: billboard.filter,
+    })
+}
+
+fn project_anchor(
+    pose: CylindricalPose,
+    camera: CameraPose,
+) -> Result<(i32, i32, i32), ProjectionCull> {
+    if pose.radius < WorldUnit::ZERO || pose.radius > WorldUnit::from_int(3) {
+        return Err(ProjectionCull::InvalidRadius);
+    }
+    let delta = pose.azimuth.units() - camera.observed_azimuth.units();
+    let x = ((i64::from(pose.radius.bits()) * i64::from(sin_q15(delta))) >> 15) as i32;
+    let radial_depth = ((i64::from(pose.radius.bits()) * i64::from(cos_q15(delta))) >> 15) as i32;
+    let depth = camera.radius.bits().saturating_sub(radial_depth);
+    if depth < WorldUnit::ratio(1, 4).bits() {
+        return Err(ProjectionCull::NearPlane);
+    }
+    let center_x =
+        VIEWPORT_WIDTH / 2 + ((i64::from(x) * i64::from(FOCAL_LENGTH)) / i64::from(depth)) as i32;
+    let vertical = camera.height.bits().saturating_sub(pose.height.bits());
+    let center_y = VIEWPORT_HEIGHT / 2
+        + ((i64::from(vertical) * i64::from(FOCAL_LENGTH)) / i64::from(depth)) as i32;
+    Ok((center_x, center_y, depth))
+}
+
+/// A fixed-pixel sprite at a bottom-center world anchor. LODs are ordered near to far;
+/// each LOD texture is drawn at its native size, without continuous scaling.
+#[derive(Clone, Copy, Debug)]
+pub struct Particle {
+    pub id: BillboardId,
+    pub pose: CylindricalPose,
+    pub lods: [ParticleLod; 3],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParticleLod {
+    pub texture: TextureId,
+    pub size: SourceSize,
+    pub max_depth: WorldUnit,
+}
+
+pub fn project_particle(
+    particle: Particle,
+    camera: CameraPose,
+) -> Result<ProjectedBillboard, ProjectionCull> {
+    let (x, y, depth) = project_anchor(particle.pose, camera)?;
+    let lod = particle
+        .lods
+        .iter()
+        .find(|lod| depth <= lod.max_depth.bits())
+        .ok_or(ProjectionCull::OutsideViewport)?;
+    if lod.size.width == 0 || lod.size.height == 0 {
+        return Err(ProjectionCull::InvalidSource);
+    }
+    let rect = ScreenRect {
+        x: x - i32::from(lod.size.width) / 2,
+        y: y - i32::from(lod.size.height),
+        width: i32::from(lod.size.width),
+        height: i32::from(lod.size.height),
+    };
+    if rect.x >= VIEWPORT_WIDTH
+        || rect.y >= VIEWPORT_HEIGHT
+        || rect.x.saturating_add(rect.width) <= 0
+        || rect.y.saturating_add(rect.height) <= 0
+    {
+        return Err(ProjectionCull::OutsideViewport);
+    }
+    Ok(ProjectedBillboard {
+        id: particle.id,
+        screen_rect: rect,
+        depth: WorldUnit::from_bits(depth),
+        source: lod.texture,
+        filter: TextureFilter::Nearest,
     })
 }
 
@@ -451,6 +506,26 @@ fn raster_billboard_masked(
     {
         return Ok(RasterStats::default());
     }
+    if projected.filter == TextureFilter::Nearest
+        && projected.screen_rect.width == i32::from(region.width)
+        && projected.screen_rect.height == i32::from(region.height)
+    {
+        observer(RasterPhase::Pixels);
+        let nearest_samples = raster_native(
+            framebuffer,
+            stride,
+            projected,
+            texture,
+            region,
+            big_endian,
+            mask,
+        );
+        observer(RasterPhase::Setup);
+        return Ok(RasterStats {
+            nearest_samples,
+            bilinear_samples: 0,
+        });
+    }
     let mut x = AxisStepper::new(
         region.width,
         projected.screen_rect.width,
@@ -494,6 +569,65 @@ fn raster_billboard_masked(
             bilinear_samples: samples,
         },
     })
+}
+
+fn raster_native(
+    framebuffer: &mut [u16],
+    stride: usize,
+    projected: ProjectedBillboard,
+    texture: Texture<'_>,
+    region: TextureRegion,
+    big_endian: bool,
+    mask: Option<(&Occlusion<'_>, usize)>,
+) -> u32 {
+    let rect = projected.screen_rect;
+    let left = rect.x.max(0) as usize;
+    let right = rect.x.saturating_add(rect.width).min(VIEWPORT_WIDTH) as usize;
+    let top = rect.y.max(0) as usize;
+    let bottom = rect.y.saturating_add(rect.height).min(VIEWPORT_HEIGHT) as usize;
+    let mut samples = 0;
+    for y in top..bottom {
+        let source_row = (usize::from(region.source_y) + (y as i32 - rect.y) as usize)
+            * usize::from(region.stride);
+        let mut x = left;
+        while x < right {
+            let span = mask.map_or(Some((x, right)), |(map, index)| {
+                map.visible_span(y, x, right, index)
+            });
+            let Some((start, end)) = span else { break };
+            for column in start..end {
+                let source =
+                    source_row + usize::from(region.source_x) + (column as i32 - rect.x) as usize;
+                let alpha = if texture.coverage.is_alpha() {
+                    texture.coverage.alpha()[source]
+                } else {
+                    255
+                };
+                samples += 1;
+                if alpha == 0 {
+                    continue;
+                }
+                let destination = &mut framebuffer[y * stride + column];
+                let color = texture.pixels[source];
+                let color = if alpha == 255 {
+                    color
+                } else {
+                    blend_rgb565(
+                        if big_endian {
+                            u16::from_be(*destination)
+                        } else {
+                            *destination
+                        },
+                        color,
+                        alpha,
+                    )
+                };
+                *destination = if big_endian { color.to_be() } else { color };
+            }
+            x = end;
+        }
+    }
+    samples
 }
 
 // Carrying the division remainder preserves floor(offset * source / destination)
