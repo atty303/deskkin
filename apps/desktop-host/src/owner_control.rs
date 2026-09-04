@@ -1427,12 +1427,18 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let payload = br#"{"command":"owner_info"}"#;
-        overflow
-            .write_all(&(u32::try_from(payload.len()).unwrap()).to_be_bytes())
-            .unwrap();
-        overflow.write_all(payload).unwrap();
         let mut prefix = [0; 4];
-        assert!(overflow.read_exact(&mut prefix).is_err());
+        // A rejected connection may close before either write or the read.
+        let rejected = overflow
+            .write_all(&(u32::try_from(payload.len()).unwrap()).to_be_bytes())
+            .and_then(|()| overflow.write_all(payload))
+            .and_then(|()| overflow.read_exact(&mut prefix));
+        assert!(matches!(
+            rejected.map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::UnexpectedEof)
+        ));
         drop(partial);
         for _ in 0..100 {
             if matches!(
