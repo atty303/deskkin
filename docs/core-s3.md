@@ -271,7 +271,7 @@ GDMA source implicated in the APPCPU interrupt-return failure beside the 1 kHz
 level-3 timer. Each 32-row payload fits in one DMA batch; a complete screen uses
 eight batches. Existing DMA descriptors and completion polling are reused.
 
-PROCPU and APPCPU static DRAM meet at `0x3fce4c00`; both linkers derive that
+PROCPU and APPCPU static DRAM meet at `0x3fcc4c00`; both linkers derive that
 physical boundary from the AMP reservation and enforce it at link time. The
 separate 32 KiB SRAM2 bank contains the 21 KiB service stack, 3 KiB control
 stack, and 8 KiB Wi-Fi stack because those paths can execute while the shared
@@ -286,10 +286,32 @@ active pre-kernel boot stack. Its main stack is therefore reclaimed only after
 thread termination and full zeroization; its boot high-water mark is reported
 as unavailable rather than inferred from an unsafe fill pattern.
 
+Internal SRAM is controlled by the image linkers and `amp-memory.overlay`, not
+by the flash partitions in `amp-partitions.overlay`. The DMA bands have a named
+`.noinit.deskkin_display_bands` input section inside PROCPU's `.dram0.noinit`.
+The remaining range from aligned `_end` to the end of `dram0_0_seg` is exported
+as `__deskkin_internal_free_start/end` by `amp-dram-boundary.ld`. Static growth
+or a change in band size automatically changes this range; the link fails if
+less than 1 KiB remains. The pool is owned by PROCPU's existing internal-memory
+allocator, so future PROCPU consumers can use `deskkin_runtime_internal_calloc/free`
+without reserving another fixed array. APPCPU must not independently allocate
+from that pool. APPCPU has a separate 129 KiB system heap (the previous 1 KiB
+plus 128 KiB from the framebuffer savings), available through Zephyr
+`k_malloc/k_calloc/k_free`; its large renderer allocations continue to use PSRAM.
+The two `CONFIG_ESP_APPCPU_DRAM_SIZE` settings in the supervisor and renderer
+reserve the APPCPU span. Their 0xc00 difference compensates for the ROM-end
+clamp and alignment used by the APPCPU linker; increase or decrease both by
+the same amount when transferring capacity between CPUs.
+Changing CPU ownership requires updating the AMP reservations
+and checking both linked images, including the IRAM/DRAM address aliases.
+
 Boot completion is an explicit SRAM ownership boundary. After the terminated
 PROCPU and APPCPU main threads are joined, their 4 KiB stacks and the unused
-1 KiB shared-memory prefix are zeroized and combined into a 9 KiB internal
-runtime heap used by the Espressif components that require internal memory.
+1 KiB shared-memory prefix are zeroized and combined with the linker-derived
+unused PROCPU range in the internal runtime heap. The existing memory-ready
+diagnostic records its total registered bytes, including the 9 KiB reclaimed
+after boot. Espressif components and other PROCPU consumers use this allocator
+when they require internal memory.
 During Wi-Fi initialization, its 1.5 KiB coordinator stack temporarily borrows
 the beginning of the not-yet-active service stack. The coordinator is joined
 and the borrowed bytes are zeroized before the service thread is created, so

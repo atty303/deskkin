@@ -189,15 +189,18 @@ PROCPU owns the low 4 MiB Quad-PSRAM region for service allocation,
 Wi-Fi/network state, input/message queues, and non-cache-critical stacks. It
 publishes the explicitly reserved high 4 MiB as the APPCPU caller-owned heap
 for Character decode, canonical information and object textures, Slint/world
-allocation, and the long-lived renderer/display stacks. The two full-screen
-band buffers remain in internal SRAM for direct GDMA transfer; other
-large storage defaults to PSRAM.
+allocation, and the long-lived renderer/display stacks. The two display band buffers are allocated in the PROCPU internal-SRAM
+image and handed to APPCPU for direct GDMA transfer; other large storage
+defaults to PSRAM. The linker-derived unused PROCPU range joins the existing
+internal allocator after boot, so static growth and band-size changes resize
+the reusable pool without a separate fixed reservation. APPCPU has a distinct
+129 KiB internal system heap for its own consumers; neither CPU allocates from
+the other CPU's heap.
 
 The cache-independent SRAM2 bank contains the PROCPU service and Wi-Fi stacks
 that can run across flash cache-disable intervals. The PROCPU stack that loads
 the AP image is internal for the same cache-disable requirement. APPCPU internal
-SRAM contains only boot/device initialization, drivers, kernel state, and the
-band buffers; its long-lived rendering work runs on stacks allocated from the
+SRAM contains boot/device initialization, drivers and kernel state; its long-lived rendering work runs on stacks allocated from the
 high PSRAM region.
 
 ESP32-S3 flash operations can temporarily disable the instruction cache shared

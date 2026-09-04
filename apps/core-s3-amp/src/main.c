@@ -77,7 +77,8 @@ static atomic_t display_ready;
 
 static atomic_t boot_stage;
 static atomic_t boot_error;
-static __aligned(32) uint16_t internal_framebuffer[2U][320U * DESKKIN_DISPLAY_BAND_ROWS];
+static __aligned(32) uint16_t internal_framebuffer[2U][320U * DESKKIN_DISPLAY_BAND_ROWS]
+	__attribute__((section(".noinit.deskkin_display_bands")));
 #define RENDERER_HEAP_SIZE (4U * 1024U * 1024U)
 static uintptr_t renderer_heap;
 static size_t renderer_heap_size;
@@ -415,7 +416,9 @@ extern void deskkin_amp_service_failed(void);
 extern struct k_thread z_main_thread;
 #define WIFI_BOOT_STACK_SIZE 1536U
 BUILD_ASSERT(WIFI_BOOT_STACK_SIZE <= DESKKIN_SERVICE_STACK_SIZE);
-static struct shared_multi_heap_region runtime_sram_regions[3];
+extern char __deskkin_internal_free_start[];
+extern char __deskkin_internal_free_end[];
+static struct shared_multi_heap_region runtime_sram_regions[4];
 static atomic_t runtime_sram_ready;
 static uintptr_t wifi_boot_stack_start;
 static int wifi_boot_result;
@@ -499,7 +502,15 @@ static int initialize_runtime_sram(void)
 		.addr = app_start,
 		.size = app_size,
 	};
-	for (size_t index = 0U; index < 3U; ++index) {
+	const uintptr_t free_start = (uintptr_t)__deskkin_internal_free_start;
+	const size_t free_size = (uintptr_t)__deskkin_internal_free_end - free_start;
+	runtime_sram_regions[3] = (struct shared_multi_heap_region){
+		.attr = SMH_REG_ATTR_CACHEABLE,
+		.addr = free_start,
+		.size = free_size,
+	};
+	memset((void *)free_start, 0, free_size);
+	for (size_t index = 0U; index < ARRAY_SIZE(runtime_sram_regions); ++index) {
 		const int result = shared_multi_heap_add(&runtime_sram_regions[index], NULL);
 		if (result != 0) {
 			return result;
@@ -508,7 +519,7 @@ static int initialize_runtime_sram(void)
 	atomic_set(&runtime_sram_ready, 1);
 	diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 2U, (int16_t)prefix_size,
 			  (int16_t)main_size,
-			  (uint32_t)(prefix_size + main_size + app_size));
+			  (uint32_t)(prefix_size + main_size + app_size + free_size));
 	diagnostic_record(DESKKIN_DIAGNOSTIC_MEMORY, 4U, 0, 0, app_handoff.used);
 	return 0;
 }

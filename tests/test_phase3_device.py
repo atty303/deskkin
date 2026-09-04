@@ -363,7 +363,14 @@ class Phase3DeviceTests(unittest.TestCase):
 
     def test_amp_supervisor_dram_ends_at_renderer_origin(self):
         linker = (ROOT / "apps/core-s3-amp/amp-dram-boundary.ld").read_text(encoding="utf-8")
-        self.assertIn("ASSERT(_end <= 0x3fce4c00", linker)
+        self.assertIn("__deskkin_internal_free_start = ALIGN(_end, 32)", linker)
+        self.assertIn(
+            "__deskkin_internal_free_end = ORIGIN(dram0_0_seg) + LENGTH(dram0_0_seg)", linker
+        )
+        self.assertIn("ASSERT(__deskkin_internal_free_start < __deskkin_internal_free_end", linker)
+        self.assertIn(
+            "ASSERT(__deskkin_internal_free_end - __deskkin_internal_free_start >= 1024", linker
+        )
         reservation = (
             ROOT / "patches/zephyr-core-s3/0011-reserve-appcpu-sram-on-both-cores.patch"
         ).read_text(encoding="utf-8")
@@ -649,7 +656,7 @@ class Phase3DeviceTests(unittest.TestCase):
         )
         self.assertIn("CONFIG_TICKLESS_KERNEL=n", config)
         self.assertIn("CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000", config)
-        self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=1024", config)
+        self.assertIn("CONFIG_HEAP_MEM_POOL_SIZE=132096", config)
         self.assertNotIn("CONFIG_HEAP_MEM_POOL_IGNORE_MIN=y", config)
         overlay = (ROOT / "apps/core-s3-amp/renderer/app.overlay").read_text(encoding="utf-8")
         self.assertIn('&dma {\n\tstatus = "okay";\n\tzephyr,deferred-init;', overlay)

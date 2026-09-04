@@ -4,81 +4,63 @@ Updated: 2026-09-05
 
 ## Completed work
 
-CoreS3 now renders directly into two 320x32 RGB565 internal-SRAM bands, with
-16 rows in the final band. Framebuffers shrink from **300 KiB to 40 KiB**,
-releasing **260 KiB** of static internal SRAM. World and Slint shell rendering
-share the completion-gated ownership path; only a successfully transferred
-whole frame counts as presented. Rendering overlaps the preceding band's DMA.
+Internal SRAM released by the band buffers is now reusable on **both CPUs**.
+SRAM layout comes from the Zephyr image linkers and `amp-memory.overlay`;
+`amp-partitions.overlay` describes flash, not SRAM.
 
-Projection, sorting, coverage and horizontal sampling data are prepared once
-per frozen frame. The reusable horizontal sampling cache adds 58,880 bytes of
-PSRAM plus approximately 5,928 bytes of board metadata. There is no world
-PSRAM full-frame intermediate, pixel-copy stage or per-frame allocation.
-Grass density, size, LOD and assets are unchanged. No dependencies, portable
-application-core changes or persistent user-state changes were introduced.
+| Owner / use | Reserved or registered capacity |
+| --- | ---: |
+| DMA display bands, allocated in PROCPU and handed to APPCPU | 40,960 bytes (40 KiB) |
+| PROCPU linker-derived unused range | 136,896 bytes (133.6875 KiB) |
+| PROCPU runtime allocator, including reclaimed main stacks/shared prefix | 146,112 bytes (142.6875 KiB) |
+| APPCPU independent system heap | 132,096 bytes (129 KiB), plus allocator metadata |
 
-## Performance findings
+These are pool capacities before allocator metadata and live allocations, not
+current free-byte measurements. PROCPU's aligned free range is
+`[0x3fca3540, 0x3fcc4c00)`; its end matches APPCPU's start. APPCPU ends at
+`0x3fced400`. IRAM aliases, ROM/shared memory and the separate SRAM2 worker
+stacks remain disjoint. Display bands have a named `.noinit.deskkin_display_bands`
+input section and cannot be included in the free pool.
 
-| Implementation, both uncapped | Median FPS, 60 seconds x 3 | Mean pixel phase | Mean alpha blit | Internal framebuffer SRAM |
-| --- | ---: | ---: | ---: | ---: |
-| Fresh full-buffer baseline (`fd6a83c9`) | 21.178 | 37.860 ms | 13.835 ms | 300 KiB |
-| Selected 32-row bands | **19.972** | 37.373 ms | 11.834 ms | **40 KiB** |
+PROCPU consumers use the existing `deskkin_runtime_internal_calloc/free` path;
+APPCPU consumers use Zephyr `k_malloc/k_calloc/k_free`. Neither allocator owns
+the other CPU's memory. PROCPU static growth automatically reduces the
+linker-derived pool, with a link-time minimum-capacity guard. APPCPU's existing
+1 KiB heap gained 128 KiB, reserved by moving both CPU boundary settings by the
+same amount. The settings and their ROM/alignment offset are documented in
+`docs/core-s3.md`. Large Slint/world allocations continue to use PSRAM.
 
-Baseline runs were 21.178 / 20.588 / 21.202 FPS; band runs were
-19.913 / 19.972 / 19.991. This change trades **5.69%** lower median FPS for
-260 KiB less internal framebuffer SRAM. It is near the 20 FPS guideline, not
-a guaranteed minimum or a speed improvement over the full-buffer baseline.
-Both implementations received a fresh flash, three 60-second benchmarks and
-a 120-second normal profile under the same configuration.
-
-The initial band candidate measured 15.511 FPS, with 65.992 ms mean transfer
-time and 16.761 ms renderer buffer wait. A one-factor follow-up keeps short
-SPI DMA transfers (at most 64 bytes, including 1–4 byte panel commands) polling
-without yielding, while pixel payloads still yield for concurrent rendering.
-This reduced mean transfer time to **38.206 ms** and renderer buffer wait to
-**1.653 ms**. The first candidate also completed its 60-second benchmark and
-120-second profile. The result identifies per-command task handoffs as a
-major avoidable overhead when splitting the screen into eight transfers.
-
-The selected 120-second profile has 259 samples. Mean display wait between
-bands is 8.955 ms, coverage 1.683 ms, background 1.559 ms, scaler setup 1.180 ms,
-opaque blit 0.329 ms and sampling/span residual 25.209 ms. Mean alpha/opaque
-pixel counts are 164,001 / 13,708. Timings include elapsed preemption;
-sampling/span residual is not isolated texture sampling. Band availability
-still leaves transfer gaps, so overlap is preserved but not continuous.
-PROCPU/APPCPU static DRAM are 111,928 / 34,096 bytes, compared with
-378,168 / 34,104 bytes in the baseline.
+The previously qualified 32-row double buffers, last band 16 rows, preserve
+renderer/DMA overlap. Grass, assets, LOD, portable core, persistent state and
+dependencies are unchanged. No pixel intermediate or copy stage was added.
 
 ## Verification
 
-`mise run test` passed, including clean CoreS3 conformance build
-`a0d3f259-db7c-4330-92b0-d45e01753c33`. The 27 portable presentation tests
-include stitched bands against full-frame pixels, clipping, atlas offsets,
-stride guards and scratch bounds. A host harness using the actual Slint line
-renderer and band ownership adapter produced zero differing pixels across
-three shell states and 24 bands with delayed fake DMA completion. A display
-worker harness checked successful transfers and failures in every band across
-17 two-frame scenarios, including recovery without false full-frame success.
-Fresh independent full-diff review found no actionable issues at
-`a42a00514ab10442e72f7c7bfa04fd5dc71658e0`; only this status summary changed
-afterward.
+`mise run test` passed, including clean CoreS3 build
+`e34e027a-2d55-42a3-b284-359797dcc191`. Fresh independent full review and a
+test-only delta review found no actionable issues at
+`00514811ea4b20cf461c31d2737d0f692bcbdbfb`; only this status summary changed
+afterward. Actual ELF symbols verify the common CPU boundary, IRAM/DRAM alias
+bounds, band exclusion and heap extents.
 
-Final flash `29139e5b-e1f0-44fa-94c4-0b9f4c893da5` completed startup hardware
-blit/guard checks and continued drawing through all three benchmarks and
-120-second profile `dff50c07-1514-44cb-b40c-2c8e15b8e147`.
-Final status `a12907a9-1c8f-4b9a-8b45-fa0f2430fd36` confirmed 6,905 frames,
-fresh heartbeat, renderer fault 0 and zero allocation, transfer and stale
-snapshot failures. LCD motion has not been camera-observed: on this flashed
-build, check that dragging the world keeps the grass and image contours intact
-without horizontal seams or flicker. Pixel and ownership tests passed, but do
-not observe physical scanout artifacts.
+Final flash `a76cdc12-1ba3-41be-bb4f-2debd970b206` booted successfully.
+The existing memory-ready diagnostic reported **146,112 registered bytes**,
+matching the linked PROCPU pool plus 9 KiB reclaimed after boot.
+A 60-second benchmark measured **20.024 FPS**; the preceding band version's
+three-run median was 19.972 FPS. This single run is a regression check, not a
+claim of improved speed. A 120-second normal profile completed 259 samples:
+mean pixel phase 37.394 ms, alpha blit 11.817 ms, transfer 38.233 ms,
+renderer buffer wait 1.616 ms and display inter-band wait 8.869 ms.
+Final status `383da205-2f97-4f38-85ad-04f1bdd33247` confirmed 5,318 frames,
+fresh heartbeat and zero renderer faults, allocation/transfer failures or
+stale snapshots. The user accepted the preceding band's physical appearance;
+this layout change was checked through device diagnostics, without new camera
+capture.
 
-Source harnesses, logs, diagnostic run IDs, ELF digests and comparisons are
-intentionally retained in `.deskkin/experiments/band-buffers/` as local evidence.
-The existing renderer-exclusive PIE ownership and spillable `call4` startup
-trampoline remain unchanged. Other APPCPU threads and ISRs do not use PIE;
-q/SAR_BYTE state is not live across kernel calls. Zephyr preserves SAR across
-preemption and leaves CP3 enabled.
+Logs, layout symbols, ELF digests and diagnostic IDs are intentionally retained
+in `.deskkin/experiments/sram-layout/`. The earlier band pixel/guard/ownership
+qualification remains in `.deskkin/experiments/band-buffers/`. No unresolved
+implementation work remains in this slice.
 
 ## Current baseline
 
@@ -118,7 +100,8 @@ cache-independent 32 KiB SRAM2 bank contains the 21 KiB service, 3 KiB control,
 and 8 KiB Wi-Fi stacks. PROCPU loads APPCPU synchronously on its internal main
 stack before it starts control and service threads. After both cores leave
 their main threads, the two 4 KiB main stacks plus the unused 1 KiB shared
-prefix become a zeroized 9 KiB internal runtime heap. The Wi-Fi boot
+prefix contribute 9 KiB to the internal runtime heap alongside the
+linker-derived unused PROCPU range. The Wi-Fi boot
 coordinator temporarily borrows 1.5 KiB from the inactive service stack and is
 joined and zeroized before service ownership begins.
 

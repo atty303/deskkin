@@ -3,7 +3,7 @@
 /*
  * A 32 KiB data SRAM bank remains available above the ESP32-S3 32 KiB
  * data-cache window. Keep cache-disable-safe worker stacks here so the main
- * SRAM bank can retain the two DMA-capable full-screen framebuffers.
+ * SRAM bank remains available for DMA bands and reusable internal allocations.
  */
 .sram2.noinit 0x3fcf0000 (NOLOAD) :
 {

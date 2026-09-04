@@ -2,7 +2,8 @@
 
 /*
  * Keep the 416 KiB SRAM1 bank contiguous for the two Zephyr images and the
- * DMA-capable full-screen framebuffers. The AMP protocol is polled directly;
+ * DMA-capable display bands. Unused PROCPU image space is a linker-sized runtime
+ * pool, not a fixed framebuffer reservation. The AMP protocol is polled directly;
  * it needs neither the inherited IPM payload nor software doorbells. Pack its
  * bounded control block into shm0 at the baseline address and offset. After
  * boot, only the unused shm0 prefix becomes runtime SRAM; the live channel and
