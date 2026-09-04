@@ -1121,7 +1121,8 @@ extern "C" fn rust_main() {
     component.on_confirm(|| unsafe { deskkin_publish_ui_command(2) });
     component.on_cancel(|| unsafe { deskkin_publish_ui_command(3) });
     let mut display_enabled = false;
-    let mut next_frame_at_us = unsafe { deskkin_uptime_us() }.saturating_add(50_000);
+    let mut animation_updated_us = unsafe { deskkin_uptime_us() };
+    let mut next_frame_at_us = animation_updated_us.saturating_add(50_000);
     let mut touch = demo_world::DemoCamera::new(UnwrappedAngle::ZERO);
     let mut camera_updated_us = unsafe { deskkin_uptime_us() };
     let mut touch_generation = 0_u32;
@@ -1132,6 +1133,7 @@ extern "C" fn rust_main() {
     let mut world_motion = WorldMotion::new(unsafe { deskkin_uptime_us() });
 
     loop {
+        let frame_started_us = unsafe { deskkin_uptime_us() };
         unsafe { deskkin_renderer_progress(RendererProgress::Loop as u8) };
         unsafe { deskkin_renderer_progress(RendererProgress::Snapshot as u8) };
         let snapshot_result = unsafe { deskkin_world_snapshot(&mut world_snapshot) };
@@ -1319,17 +1321,25 @@ extern "C" fn rust_main() {
             }
             display_enabled = true;
         }
-        let frame_deadline_us = next_frame_at_us;
+        let world_active = have_world_snapshot && world_snapshot.shell == 4;
+        let frame_deadline_us = if world_active {
+            frame_started_us.saturating_add(50_000)
+        } else {
+            next_frame_at_us
+        };
         let work_completed_us = unsafe { deskkin_uptime_us() };
         unsafe { deskkin_renderer_progress(RendererProgress::Pacing as u8) };
-        while unsafe { deskkin_uptime_us() } < frame_deadline_us {
+        while !world_active && unsafe { deskkin_uptime_us() } < frame_deadline_us {
             if let Err(fault) = framebuffer.publish_completions() {
                 unsafe { deskkin_renderer_observe(RendererStage::Failed as u8, fault as u8, 0, 0) };
                 return;
             }
             unsafe { deskkin_yield() };
         }
-        let frame = animator.advance(50);
+        let animation_now_us = unsafe { deskkin_uptime_us() };
+        let animation_elapsed_ms = animation_now_us.saturating_sub(animation_updated_us) / 1000;
+        animation_updated_us += animation_elapsed_ms * 1000;
+        let frame = animator.advance(u32::try_from(animation_elapsed_ms).unwrap_or(u32::MAX));
         component.set_pet_frame_index(i32::from(frame.index));
         if work_completed_us > frame_deadline_us {
             let missed = (work_completed_us - frame_deadline_us) / 50_000 + 1;
@@ -1339,6 +1349,9 @@ extern "C" fn rust_main() {
             next_frame_at_us = frame_deadline_us.saturating_add(missed.saturating_mul(50_000));
         } else {
             next_frame_at_us = frame_deadline_us.saturating_add(50_000);
+        }
+        if world_active {
+            next_frame_at_us = work_completed_us.saturating_add(50_000);
         }
     }
 }

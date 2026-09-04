@@ -311,7 +311,10 @@ coordinate sequences, or screen snapshots. There is no remote exporter.
 The fixed benchmark runs 60 seconds through the normal paired world path. It
 requests a one-turn camera target, Character angular motion, generic-object
 radial motion, and simultaneous Availability plus Notice while observing 1,200
-updates at 20 Hz:
+updates at 20 Hz. World rendering runs as soon as a back buffer is available;
+the input rate does not cap rendering. The 50 ms frame budget is a diagnostic
+guideline. UI shells retain 20 Hz pacing, and character animation advances by
+actual elapsed time:
 
 ```bash
 mise run core-s3:benchmark -- --device /dev/ttyACM0
@@ -406,18 +409,22 @@ frame has no vector scratch. q0..q3 and SAR_BYTE are caller-clobbered; SAR and
 other PIE state are untouched. The funnel performs one additional vector load
 per span.
 
-Generic alpha reads A8 directly and expands eight values into 16-bit lanes in
-registers. It uses `weight = a8 + (a8 >> 7)` and
+Generic alpha reads eight A8 values using one 64-bit load, or two enclosing
+64-bit loads when unaligned, and expands them into 16-bit lanes in registers. It uses `weight = a8 + (a8 >> 7)` and
 `dst + ((src - dst) * weight >> 8)` for each RGB component, with exact transparent
 and opaque endpoints. This floor approximation can differ from the previous rounded
 interpolation. No alpha expansion buffer or per-span color copy is used. Complete
-zero-alpha vectors skip blending and destination access; fully opaque vectors
+zero-alpha vectors skip RGB source loads, blending and destination access; fully opaque vectors
 copy source words without reading destination. Other vectors use the same
 generic arithmetic. There is no grass-specific binary mask kernel.
 
 Independent source/A8 alignment and enclosing loads are bounded by the supplied
 backing slices. Destination prefixes/tails use the same approximation in scalar
-code. Consecutive unaligned RGB565 vectors reuse the previous loaded vector.
+code. Aligned, padded backing ends allow enclosing-vector validation once per
+span; arbitrary backings retain explicit bounds checks. Consecutive visible
+unaligned RGB565 vectors reuse the previous loaded vector; a transparent run
+invalidates that cache. Three mask loads share PIE instructions with component
+arithmetic, without changing the formula or adding memory traffic.
 Each alpha call handles the entire aligned part of the span, with q0..q7, SAR
 and SAR_BYTE caller-clobbered. It uses a 32-byte ABI frame and 64 bytes of
 immutable masks kept in internal SRAM. There are no per-call q/SAR/SAR_BYTE
@@ -425,7 +432,9 @@ saves or restores, alpha expansion scratch, or extra source-copy buffers.
 
 Startup checks 328,704 source/destination alignment, length 0–320, byte-order,
 alpha/no-alpha and padded/unpadded backing combinations plus 12,800 RGB extreme
-and alpha cases against the candidate arithmetic and guards.
+and alpha cases against the candidate arithmetic and guards. Another 4,096
+cases vary A8 backing alignment independently and alternate transparent, opaque
+and mixed runs to check source-cache transitions.
 A failed blit check publishes renderer fault 19 (`BlitCheck`) before presentation.
 The shared raster profile adds sampling/span overhead, opaque/alpha blit time,
 and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle

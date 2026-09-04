@@ -63,7 +63,9 @@ impl Blitter for PieBlitter {
                 start,
                 dst.len(),
             );
-            alpha_scalar(&mut dst[..prefix], &src[..prefix], &alpha[..prefix], wire);
+            if prefix != 0 {
+                alpha_scalar(&mut dst[..prefix], &src[..prefix], &alpha[..prefix], wire);
+            }
             if bulk != 0 {
                 unsafe {
                     deskkin_alpha_vectors(
@@ -75,12 +77,14 @@ impl Blitter for PieBlitter {
                     );
                 }
             }
-            alpha_scalar(
-                &mut dst[prefix + bulk..],
-                &src[prefix + bulk..],
-                &alpha[prefix + bulk..],
-                wire,
-            );
+            if prefix + bulk < dst.len() {
+                alpha_scalar(
+                    &mut dst[prefix + bulk..],
+                    &src[prefix + bulk..],
+                    &alpha[prefix + bulk..],
+                    wire,
+                );
+            }
         } else {
             let (prefix, bulk) = vector_span(
                 dst.as_ptr() as usize,
@@ -89,7 +93,9 @@ impl Blitter for PieBlitter {
                 start,
                 dst.len(),
             );
-            ScalarBlitter.blit(&mut dst[..prefix], &src[..prefix], None, wire);
+            if prefix != 0 {
+                ScalarBlitter.blit(&mut dst[..prefix], &src[..prefix], None, wire);
+            }
             if bulk != 0 {
                 unsafe {
                     deskkin_copy_pie(
@@ -100,7 +106,9 @@ impl Blitter for PieBlitter {
                     );
                 }
             }
-            ScalarBlitter.blit(&mut dst[prefix + bulk..], &src[prefix + bulk..], None, wire);
+            if prefix + bulk < dst.len() {
+                ScalarBlitter.blit(&mut dst[prefix + bulk..], &src[prefix + bulk..], None, wire);
+            }
         }
         self.cycles[kind] =
             self.cycles[kind].wrapping_add(unsafe { deskkin_blit_cycles() }.wrapping_sub(started));
@@ -141,6 +149,12 @@ fn alpha_span(
     start: usize,
     len: usize,
 ) -> (usize, usize) {
+    // With aligned, padded backing ends, every enclosing vector for an
+    // already-validated logical span is readable, including clipped starts.
+    if (source | source_len * 2 | alpha | alpha_len) & 15 == 0 {
+        let prefix = (((16 - (dst & 15)) & 15) / 2).min(len);
+        return (prefix, (len - prefix) / 8 * 8);
+    }
     let (mut prefix, _) = vector_span(dst, source, source_len, start, len);
     while prefix < len && ((alpha + start + prefix) & !15) < alpha {
         prefix = (prefix + 8).min(len);
@@ -164,6 +178,9 @@ fn vector_span(
 ) -> (usize, usize) {
     let mut prefix = ((16 - (dst & 15)) & 15) / 2;
     prefix = prefix.min(len);
+    if (source | source_len * 2) & 15 == 0 {
+        return (prefix, (len - prefix) / 8 * 8);
+    }
     let phase = ((source + (start + prefix) * 2) & 15) / 2;
     // Funnel loads include both enclosing vectors, bounded by the backing
     // allocation rather than the logical image or clip boundary.
@@ -179,7 +196,7 @@ fn vector_span(
 pub fn self_test() -> bool {
     let mut src = Aligned([0u16; 336]);
     let mut dst = Aligned([0u16; 352]);
-    let alpha: [u8; 336] = core::array::from_fn(|i| i as u8);
+    let mut alpha: [u8; 336] = core::array::from_fn(|i| i as u8);
     for (i, pixel) in src.0.iter_mut().enumerate() {
         *pixel = (i as u16).wrapping_mul(31337);
     }
@@ -226,6 +243,44 @@ pub fn self_test() -> bool {
                                 c
                             };
                             if wire { c.to_be() } else { c }
+                        } else {
+                            0xa55a
+                        };
+                        if pixel != expected {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Independent A8 alignment and transparent runs exercise source-cache reloads.
+    for (i, a) in alpha.iter_mut().enumerate() {
+        *a = match i / 32 % 4 {
+            0 | 2 => 0,
+            1 => 255,
+            _ => (i as u8).wrapping_mul(53),
+        };
+    }
+    for source_offset in 0..16 {
+        for alpha_offset in 0..16 {
+            for destination_offset in 0..8 {
+                for wire in [false, true] {
+                    dst.0.fill(0xa55a);
+                    let start = 8 + destination_offset;
+                    PieBlitter::default().blit_from(
+                        &mut dst.0[start..start + 256],
+                        &src.0,
+                        source_offset,
+                        Some(&alpha[alpha_offset..]),
+                        wire,
+                    );
+                    for (i, &pixel) in dst.0.iter().enumerate() {
+                        let expected = if (start..start + 256).contains(&i) {
+                            let si = source_offset + i - start;
+                            let d = if wire { u16::from_be(0xa55a) } else { 0xa55a };
+                            let color = alpha_pixel(d, src.0[si], alpha[alpha_offset + si]);
+                            if wire { color.to_be() } else { color }
                         } else {
                             0xa55a
                         };

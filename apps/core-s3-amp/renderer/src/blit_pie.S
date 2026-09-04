@@ -51,32 +51,35 @@ deskkin_copy_pie:
 deskkin_alpha_pie:
     entry a1, 32
     extui a11, a3, 0, 4
-    beqz a11, .Lalpha
-    ee.ld.128.usar.ip q7, a3, 16
+    extui a12, a4, 0, 3
+    movi a13, 1
 .Lalpha:
-    beqz a11, .Lsource_aligned
-    wur.sar_byte a11
-    ee.vld.128.ip q4, a3, 16
-    ee.src.q.qup q0, q7, q4
-    j .Lsource_ready
-.Lsource_aligned:
-    ee.vld.128.ip q0, a3, 16
-.Lsource_ready:
-    mov a8, a4
-    extui a9, a4, 0, 4
-    ee.ld.128.usar.ip q4, a8, 16
-    ee.zero.q q5
-    movi a10, 8
-    bgeu a10, a9, .Lalpha_loaded
-    ee.vld.128.ip q5, a8, 0
+    /* Only the eight required A8 values; unaligned spans use two 64-bit reads. */
+    ee.vld.l.64.ip q2, a4, 8
+    beqz a12, .Lalpha_loaded
+    ee.vld.h.64.ip q2, a4, 0
+    wur.sar_byte a12
+    ee.src.q q2, q2, q2
 .Lalpha_loaded:
-    ee.src.q q2, q4, q5
-    addi a4, a4, 8
     ee.movi.32.a q2, a8, 0
     ee.movi.32.a q2, a9, 1
     and a10, a8, a9
     or a8, a8, a9
     beqz a8, .Lalpha_transparent
+    beqz a11, .Lsource_aligned
+    /* A transparent run invalidates the previous enclosing source vector. */
+    beqz a13, .Lsource_cached
+    ee.vld.128.ip q7, a3, 0
+    movi a13, 0
+.Lsource_cached:
+    addi a3, a3, 16
+    wur.sar_byte a11
+    ee.vld.128.ip q4, a3, 0
+    ee.src.q.qup q0, q7, q4
+    j .Lsource_ready
+.Lsource_aligned:
+    ee.vld.128.ip q0, a3, 16
+.Lsource_ready:
     addi a10, a10, 1
     beqz a10, .Lalpha_opaque
     ee.zero.q q5
@@ -87,7 +90,7 @@ deskkin_alpha_pie:
     mov a8, a7
     ee.vld.128.ip q6, a8, 16
     ee.andq q5, q5, q6
-    ee.vadds.s16 q2, q2, q5
+    ee.vadds.s16.ld.incp q6, a8, q2, q2, q5
     ee.vld.128.ip q1, a2, 0
     beqz a6, .Ldestination_native
     ee.orq q4, q1, q1
@@ -97,33 +100,30 @@ deskkin_alpha_pie:
 .Ldestination_native:
     movi a9, 8
     wsr.sar a9
-    ee.vld.128.ip q6, a8, 16
     ee.andq q4, q0, q6
     ee.andq q5, q1, q6
     ee.vsubs.s16 q4, q4, q5
-    ee.vmul.s16 q4, q4, q2
+    ee.vmul.s16.ld.incp q6, a8, q4, q4, q2
     ee.vadds.s16 q3, q4, q5
-    ee.vld.128.ip q6, a8, 16
     ee.andq q4, q0, q6
     ee.andq q5, q1, q6
     ee.vsubs.s16 q4, q4, q5
     ee.vmul.s16 q4, q4, q2
-    ee.vadds.s16 q4, q4, q5
+    ee.vadds.s16.ld.incp q5, a8, q4, q4, q5
     ee.andq q4, q4, q6
     ee.orq q3, q3, q4
-    ee.vld.128.ip q6, a8, 0
     movi a9, 1
     wsr.sar a9
     ee.vsr.32 q4, q0
-    ee.vsr.32 q5, q1
-    ee.andq q4, q4, q6
-    ee.andq q5, q5, q6
-    ee.vsubs.s16 q4, q4, q5
+    ee.vsr.32 q6, q1
+    ee.andq q4, q4, q5
+    ee.andq q6, q6, q5
+    ee.vsubs.s16 q4, q4, q6
     movi a9, 8
     wsr.sar a9
     ee.vmul.s16 q4, q4, q2
-    ee.vadds.s16 q4, q4, q5
-    ee.andq q4, q4, q6
+    ee.vadds.s16 q4, q4, q6
+    ee.andq q4, q4, q5
     movi a9, 1
     wsr.sar a9
     ee.vsl.32 q4, q4
@@ -141,6 +141,8 @@ deskkin_alpha_pie:
     ee.orq q3, q0, q0
     j .Lalpha_encode
 .Lalpha_transparent:
+    addi a3, a3, 16
+    movi a13, 1
     addi a2, a2, 16
 .Lalpha_advance:
     addi a5, a5, -1
