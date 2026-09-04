@@ -1,6 +1,21 @@
 use super::*;
 use crate::{BillboardId, TextureId, WorldUnit, demo_world, raster_billboard_ordered};
 
+struct CustomBackground;
+
+impl Background for CustomBackground {
+    fn row(&mut self, y: usize) -> [u16; 4] {
+        demo_world::background_row(y, 147)
+    }
+
+    fn fill(&mut self, pixels: &mut [u16], colors: [u16; 4]) {
+        assert!(pixels.len().is_multiple_of(8));
+        for (index, pixel) in pixels.iter_mut().enumerate() {
+            *pixel = colors[index % 4];
+        }
+    }
+}
+
 fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
     let stride = 327;
     let mut expected = std::vec![0xdead; stride * 240 + 19];
@@ -60,7 +75,7 @@ fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
         &mut actual,
         stride,
         boards,
-        |y| demo_world::background_row(y, 147),
+        CustomBackground,
         wire,
         &mut Occlusion::new(ScreenTile::Eight, &mut [0; 1200]).unwrap(),
         &mut |phase| phases.push(phase),

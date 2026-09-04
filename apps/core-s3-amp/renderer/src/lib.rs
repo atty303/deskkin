@@ -23,6 +23,7 @@ use slint::{ComponentHandle, Image, LogicalPosition, PhysicalSize, Rgba8Pixel, S
 
 slint::include_modules!();
 
+mod background;
 mod buffer_ownership;
 
 use buffer_ownership::BufferOwnership;
@@ -214,6 +215,7 @@ enum RendererFault {
     QoiMetadata = 15,
     QoiDecode = 16,
     SharedSnapshot = 17,
+    BackgroundCheck = 18,
 }
 
 #[repr(u8)]
@@ -786,13 +788,12 @@ fn draw_world_scene(
     occlusion: &mut Occlusion<'_>,
     observer: &mut impl FnMut(RasterPhase),
 ) -> Result<deskkin_presentation::SceneStats, RendererFault> {
-    let ground = demo_world::HORIZON;
     if projected.is_empty() {
         raster_scene_observed(
             pixels,
             WIDTH,
             &[],
-            |y| demo_world::background_row(y, ground),
+            background::PieBackground,
             true,
             occlusion,
             observer,
@@ -807,7 +808,7 @@ fn draw_world_scene(
             pixels,
             WIDTH,
             &scene[..projected.len()],
-            |y| demo_world::background_row(y, ground),
+            background::PieBackground,
             true,
             occlusion,
             observer,
@@ -967,6 +968,17 @@ fn sas_text(sas: u32) -> slint::SharedString {
 #[no_mangle]
 extern "C" fn rust_main() {
     unsafe { deskkin_renderer_entry_probe() };
+    if !background::self_test() {
+        unsafe {
+            deskkin_renderer_observe(
+                RendererStage::Failed as u8,
+                RendererFault::BackgroundCheck as u8,
+                0,
+                0,
+            )
+        };
+        return;
+    }
     let state = Rc::new(RefCell::new(Vec::new()));
     if slint::platform::set_platform(Box::new(DevicePlatform {
         windows: state.clone(),

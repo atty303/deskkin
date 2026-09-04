@@ -346,3 +346,20 @@ acceptance is visual: no cylinder primitive, every board camera-facing,
 Availability and Notice coexist, Character/object parallax is visible, 320 px
 drag makes one continuous turn without a seam jump, observed yaw follows at
 180 degrees/s, and pairing UI remains intact.
+
+### Background PIE kernel
+
+CoreS3 background spans use 128-bit PIE stores through a device-only adapter.
+The portable `Background` interface retains a scalar default and the existing
+coverage and phase hooks. RGB565 wire order and the four-pixel dither phase
+are resolved before vector stores; unaligned prefixes and suffixes stay scalar.
+Each vector call writes at most 320 pixels. It saves/restores q0 and CPENABLE
+and locks interrupts only for that bounded call because Zephyr does not preserve
+CP3 state in this configuration. Other PIE registers are untouched.
+The leaf reserves 48 stack bytes and stores q0 in the lowest 16 bytes, leaving
+the upper 32 bytes for windowed-ABI spills. Vector scratch must not overlap the
+base save area: corrupting its saved stack pointer can stop APPCPU in a double
+exception after otherwise correct initial frames.
+At startup the same kernel is checked against expected pixels and guard words
+for all eight halfword alignments and lengths 0 through 320. Failure publishes
+renderer fault 18 (`BackgroundCheck`) and stops before frame presentation.

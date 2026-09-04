@@ -744,3 +744,21 @@ int main(void)
 	k_thread_start(renderer_tid);
 	return 0;
 }
+
+/* The current Zephyr context does not save CP3. Preserve q0 in the leaf and
+ * exclude preemption only for this bounded span (at most 40 vector stores). */
+extern void deskkin_background_pie(uint16_t *destination, const uint16_t *pattern,
+                                  size_t vectors);
+
+void deskkin_background_vectors(uint16_t *destination, const uint16_t *pattern,
+                                size_t vectors)
+{
+    const unsigned int key = irq_lock();
+    uint32_t saved;
+    __asm__ volatile("rsr.cpenable %0" : "=r"(saved));
+    const uint32_t enabled = saved | (1U << 3);
+    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(enabled) : "memory");
+    deskkin_background_pie(destination, pattern, vectors);
+    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
+    irq_unlock(key);
+}

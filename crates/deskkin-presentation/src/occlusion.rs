@@ -292,6 +292,29 @@ pub enum RasterPhase {
     Idle,
 }
 
+/// Repeating native RGB565 row colors and a platform-selectable span writer.
+/// `fill` receives colors in the framebuffer byte order and a span starting at
+/// pattern phase zero. It must overwrite only that span with the repeated colors.
+pub trait Background {
+    fn row(&mut self, y: usize) -> [u16; 4];
+
+    fn fill(&mut self, pixels: &mut [u16], colors: [u16; 4]) {
+        let mut chunks = pixels.chunks_exact_mut(4);
+        for chunk in &mut chunks {
+            chunk.copy_from_slice(&colors);
+        }
+        for (pixel, color) in chunks.into_remainder().iter_mut().zip(colors) {
+            *pixel = color;
+        }
+    }
+}
+
+impl<F: FnMut(usize) -> [u16; 4]> Background for F {
+    fn row(&mut self, y: usize) -> [u16; 4] {
+        self(y)
+    }
+}
+
 /// Boards must be far-to-near, with increasing ID for equal depths.
 /// Coverage is built before drawing; scaler coordinates are prepared once per
 /// visible board. Background returns four repeating native RGB565 words.
@@ -299,7 +322,7 @@ pub fn raster_scene(
     framebuffer: &mut [u16],
     stride: usize,
     boards: &[SceneBillboard<'_>],
-    background_row: impl FnMut(usize) -> [u16; 4],
+    background_row: impl Background,
     wire: bool,
     occlusion: &mut Occlusion<'_>,
 ) -> Result<SceneStats, RasterError> {
@@ -320,7 +343,7 @@ pub fn raster_scene_observed(
     framebuffer: &mut [u16],
     stride: usize,
     boards: &[SceneBillboard<'_>],
-    mut background_row: impl FnMut(usize) -> [u16; 4],
+    mut background_row: impl Background,
     wire: bool,
     occlusion: &mut Occlusion<'_>,
     observer: &mut impl FnMut(RasterPhase),
@@ -373,14 +396,15 @@ pub fn raster_scene_observed(
             }
         }
         for y in band..(band + tile).min(VIEWPORT_HEIGHT as usize) {
-            let colors = background_row(y).map(|c| if wire { c.to_be() } else { c });
+            let colors = background_row
+                .row(y)
+                .map(|c| if wire { c.to_be() } else { c });
             for &[start, end] in &spans[..count] {
-                for chunk in framebuffer
-                    [y * stride + usize::from(start)..y * stride + usize::from(end)]
-                    .chunks_exact_mut(4)
-                {
-                    chunk.copy_from_slice(&colors);
-                }
+                background_row.fill(
+                    &mut framebuffer
+                        [y * stride + usize::from(start)..y * stride + usize::from(end)],
+                    colors,
+                );
             }
         }
     }

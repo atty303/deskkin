@@ -361,7 +361,7 @@ impl RateLimitedObservedYaw {
 
 mod occlusion;
 pub use occlusion::{
-    Coverage, Mask8, Occlusion, RasterPhase, SceneBillboard, SceneStats, ScreenTile,
+    Background, Coverage, Mask8, Occlusion, RasterPhase, SceneBillboard, SceneStats, ScreenTile,
     build_opaque_mask, raster_scene, raster_scene_observed,
 };
 
