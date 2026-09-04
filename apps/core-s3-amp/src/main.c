@@ -23,7 +23,7 @@
 #include "../shared.h"
 
 #define CONTROL_FRAME_MAX 188
-#define STATUS_RESPONSE_SIZE 168
+#define STATUS_RESPONSE_SIZE 204
 #define HEARTBEAT_STALE_MS 500
 #define DIAGNOSTIC_EVENT_CAPACITY 64U
 #define DIAGNOSTIC_EVENT_SIZE 24U
@@ -896,6 +896,18 @@ size_t deskkin_amp_status_snapshot(const uint8_t *command_id, uint8_t *response)
 	sys_put_be32((uint32_t)atomic_get(&world_raster_max_us), &response[156]);
 	sys_put_be32(deskkin_shared_load(&AMP_SHARED->renderer_progress), &response[160]);
 	sys_put_be32(deskkin_shared_load(&AMP_SHARED->display_progress), &response[164]);
+	for (unsigned attempt = 0; attempt < 3U; ++attempt) {
+		uint32_t generation = deskkin_shared_load(&AMP_SHARED->raster_profile_publication);
+		if (generation == 0U) { continue; }
+		uint32_t values[8];
+		deskkin_shared_copy_from(values, AMP_SHARED->raster_profile, sizeof(values));
+		if (generation != deskkin_shared_load(&AMP_SHARED->raster_profile_publication)) { continue; }
+		sys_put_be32(generation, &response[168]);
+		for (unsigned index = 0; index < 8U; ++index) {
+			sys_put_be32(values[index], &response[172 + 4U * index]);
+		}
+		break;
+	}
 	return STATUS_RESPONSE_SIZE;
 }
 

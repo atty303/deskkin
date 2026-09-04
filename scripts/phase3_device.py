@@ -45,7 +45,7 @@ WORLD_BENCHMARK_MIN_COVERAGE_MILLI = 800
 WORLD_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
 WORLD_BENCHMARK_MIN_STATUS_RESPONSES = 20
 WORLD_DEMO_ENTITY_COUNT = 23
-STATUS_RESPONSE_SIZE = 168
+STATUS_RESPONSE_SIZE = 204
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -775,9 +775,62 @@ def decode_world_status(status: bytes) -> dict[str, int]:
             "world_raster_max_us": unsigned(156, 160) if len(status) >= 160 else 0,
             "renderer_progress": unsigned(160, 164) if len(status) >= 168 else 0,
             "display_progress": unsigned(164, 168) if len(status) >= 168 else 0,
+            "profile_generation": unsigned(168, 172),
+            "coverage_us": unsigned(172, 176),
+            "background_us": unsigned(176, 180),
+            "scaler_setup_us": unsigned(180, 184),
+            "pixel_raster_us": unsigned(184, 188),
+            "coverage_tests": unsigned(188, 192),
+            "scaler_preparations": unsigned(192, 196),
+            "profile_nearest_samples": unsigned(196, 200),
+            "profile_bilinear_samples": unsigned(200, 204),
         }
     )
     return decoded
+
+
+PROFILE_FIELDS = ("coverage_us", "background_us", "scaler_setup_us", "pixel_raster_us",
+                  "coverage_tests", "scaler_preparations", "profile_nearest_samples", "profile_bilinear_samples")
+
+
+def measure_raster(device_arg: str | None, duration: float) -> dict[str, object]:
+    if not 1 <= duration <= 120:
+        raise DeviceError("renderer_profile_failed")
+    started = time.monotonic()
+    samples: list[dict[str, int]] = []
+    previous = 0
+    last_progress = started
+    responses = 0
+    while time.monotonic() - started < duration and len(samples) < 600:
+        raw = run_control("status", device_arg)
+        responses += 1
+        sample = decode_world_status(raw)
+        if raw[26] != 4 or sample["heartbeat_freshness"] != 1 or any(
+            sample[key] for key in ("fault", "allocation_failures", "transfer_failures", "stale_snapshots")
+        ):
+            raise DeviceError("renderer_profile_failed")
+        generation = sample["profile_generation"]
+        if generation != 0 and generation != previous:
+            samples.append(sample)
+            previous = generation
+            last_progress = time.monotonic()
+        if time.monotonic() - last_progress > 2:
+            raise DeviceError("renderer_profile_failed")
+        time.sleep(0.2)
+    if len(samples) < 2 or samples[-1]["completed_frames"] == samples[0]["completed_frames"]:
+        raise DeviceError("renderer_profile_failed")
+    result = action_record("raster-profile", "success")
+    result.update(duration_ms=int((time.monotonic() - started) * 1000),
+                  status_responses=responses, profile_samples=len(samples), first_generation=samples[0]["profile_generation"],
+                  last_generation=samples[-1]["profile_generation"])
+    result["end_virtual_time_ms"] = result["duration_ms"]
+    for field in PROFILE_FIELDS:
+        values = [sample[field] for sample in samples]
+        result[field + "_min"] = min(values)
+        result[field + "_mean"] = sum(values) // len(values)
+        result[field + "_max"] = max(values)
+    print(json.dumps(result, separators=(",", ":")), file=sys.stderr)
+    return result
 
 
 def world_benchmark(
@@ -1104,7 +1157,8 @@ DIAGNOSTIC_RECORD_KEYS = frozenset(
         "projection_last_us", "projection_max_us", "sort_last_us", "sort_max_us",
         "texture_last_us", "texture_max_us", "world_raster_last_us", "world_raster_max_us",
         "shell_state", "availability", "heartbeat_freshness", "valid_availability_result",
-    }
+        "profile_samples",
+    } | {field + suffix for field in PROFILE_FIELDS for suffix in ("_min", "_mean", "_max")}
 )
 
 
@@ -1261,6 +1315,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
         "status": "device_ui",
         "run": "device_ui",
         "benchmark": "world_benchmark",
+        "raster-profile": "raster_profile",
         "watch": "diagnostic_stream",
         "recover": "nvs_publication",
     }[action]
@@ -1282,7 +1337,7 @@ def action_record(action: str, status: str, error_type: str | None = None) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "watch", "run", "benchmark", "recover"))
+    parser.add_argument("action", choices=("profile", "build", "flash", "identity", "provision", "status", "watch", "run", "benchmark", "raster-profile", "recover"))
     parser.add_argument("identity_action", nargs="?")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--age-identity", type=Path)
@@ -1361,6 +1416,8 @@ def main() -> int:
                 raise DeviceError("availability_timeout")
         elif args.action == "benchmark":
             records = [world_benchmark(args.device, WORLD_BENCHMARK_DURATION_SECONDS)]
+        elif args.action == "raster-profile":
+            records = [measure_raster(args.device, args.duration_seconds or 60)]
         result = "success"
         exit_code = 0
     except (DeviceError, OSError, subprocess.SubprocessError, UnicodeError, ValueError) as error:
@@ -1382,6 +1439,7 @@ def main() -> int:
             "benchmark_timeout",
             "world_not_observed",
             "world_benchmark_failed",
+            "renderer_profile_failed",
         } else None if boot_failure else "store_failed"
         print(message, file=sys.stderr)
     if not records:

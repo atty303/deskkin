@@ -201,6 +201,8 @@ struct deskkin_amp_shared {
 	uint32_t target_yaw_publication;
 	uint32_t renderer_progress;
 	uint32_t display_progress;
+	uint32_t raster_profile[8];
+	uint32_t raster_profile_publication;
 };
 
 _Static_assert(sizeof(struct deskkin_amp_shared) <= DESKKIN_SHARED_SIZE - DESKKIN_CHANNEL_OFFSET,

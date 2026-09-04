@@ -28,6 +28,7 @@ single-image firmware or `core-s3:amp-*` task alias.
 | `core-s3:wifi-provision` | Write one WPA2-Personal profile from an encrypted host profile. |
 | `core-s3:run` | Start the normal application service. |
 | `core-s3:benchmark` | Run the fixed 60-second paired world benchmark. |
+| `core-s3:raster-profile` | Sample per-frame raster timing without changing the scene. |
 | `core-s3:flash` | Flash every AMP sysbuild domain. |
 | `core-s3:recover` | Flash the inert recovery image. |
 
@@ -177,9 +178,28 @@ depth buffer or per-entity screen mask. Scene/coordinate scratch uses the existi
 PSRAM renderer stack; no per-frame heap allocation is added. The existing world-raster duration includes coverage
 testing and span setup; nearest/bilinear counters count only visited samples
 after occlusion (still including alpha-zero samples within visited spans).
-Portable scene stats additionally expose coverage-test and scaler-preparation
-counts for deterministic conformance and timing samples; no new per-frame log
-or USB schema is introduced.
+Portable scene stats expose coverage-test and scaler-preparation counts. An
+optional phase observer separates coverage, background, scaler setup and pixel
+raster work without changing sampled pixels. APPCPU records wall-clock
+microseconds using the existing approximate RC_SLOW clock (including preemption
+and observer overhead), not CPU-exclusive time or PSRAM bus traffic. Setup
+includes validation, visibility selection and
+coordinate preparation; pixel raster includes span traversal and blending.
+Eight scalar values (four times, two counts and two sampled-pixel counts) are
+published together through a separate generation-checked shared slot. Only
+successful world frames publish; zero generation means unavailable. The USB
+status response is 204 bytes; the final 36 bytes carry this coherent record.
+Shell observation explicitly changes to Paired when entering world mode, so
+world sample/projection fields are not interpreted as setup-screen diagnostics.
+
+`mise run core-s3:raster-profile -- --device /dev/ttyACM0` samples the unchanged
+paired scene for 60 seconds (1-120 seconds via `--duration-seconds`), retaining
+only min/mean/max scalar aggregates in the existing bounded local diagnostic
+store. It reads status at no more than 5 Hz, does not initiate pairing or change
+camera/animation state, rejects faults and stale/absent profiles, and supports
+the existing `--recording off`. Samples are not all completed frames or a
+matched-scene A/B benchmark. No pixels, text, touch traces or remote export are
+added. Current firmware and host tooling must be updated together.
 
 ## AMP memory and channels
 

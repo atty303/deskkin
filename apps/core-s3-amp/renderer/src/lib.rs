@@ -9,10 +9,10 @@ use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
 use deskkin_presentation::{
     BillboardId, CameraPose, Coverage, Mask8, Occlusion, PetAnimationState, PetAnimator,
-    ProjectedBillboard, SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture, TextureFilter,
-    TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
+    ProjectedBillboard, RasterPhase, SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture,
+    TextureFilter, TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoMotion},
-    project_billboard, raster_scene, sort_far_to_near,
+    project_billboard, raster_scene_observed, sort_far_to_near,
 };
 use qoi::{Channels, Decoder};
 use slint::platform::software_renderer::{
@@ -138,6 +138,7 @@ unsafe extern "C" {
     );
     fn deskkin_deadline_missed();
     fn deskkin_shell_observe(shell: u8, property_matches: u8);
+    fn deskkin_raster_profile(values: *const u32);
 }
 
 #[repr(u8)]
@@ -837,14 +838,27 @@ fn render_world(
     let ground = demo_world::ground_line(&projected[..count]) as usize;
     let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut motion.cutoffs)
         .map_err(|_| RendererFault::RenderSkipped)?;
+    let mut profile = [0_u32; 8];
+    let mut phase = RasterPhase::Idle;
+    let mut phase_started = unsafe { deskkin_uptime_us() };
+    let mut observer = |next: RasterPhase| {
+        let now = unsafe { deskkin_uptime_us() };
+        if phase != RasterPhase::Idle {
+            let index = phase as usize;
+            profile[index] = profile[index].saturating_add(elapsed_us(phase_started, now));
+        }
+        phase = next;
+        phase_started = now;
+    };
     let stats = if count == 0 {
-        raster_scene(
+        raster_scene_observed(
             pixels,
             WIDTH,
             &[],
             |y| demo_world::background_row(y, ground),
             true,
             &mut occlusion,
+            &mut observer,
         )
     } else {
         let mut scene =
@@ -852,16 +866,22 @@ fn render_world(
         for (slot, value) in scene.iter_mut().zip(&projected[..count]) {
             *slot = world_billboard(*value, decoded, frame_index, textures)?;
         }
-        raster_scene(
+        raster_scene_observed(
             pixels,
             WIDTH,
             &scene[..count],
             |y| demo_world::background_row(y, ground),
             true,
             &mut occlusion,
+            &mut observer,
         )
     }
     .map_err(|_| RendererFault::RenderSkipped)?;
+    profile[4] = stats.coverage_tests;
+    profile[5] = stats.scaler_preparations;
+    profile[6] = stats.raster.nearest_samples;
+    profile[7] = stats.raster.bilinear_samples;
+    unsafe { deskkin_raster_profile(profile.as_ptr()) };
     let nearest_samples = stats.raster.nearest_samples;
     let bilinear_samples = stats.raster.bilinear_samples;
     let raster_us = elapsed_us(raster_started, unsafe { deskkin_uptime_us() });
@@ -1114,6 +1134,7 @@ extern "C" fn rust_main() {
         }
         let shell_changed = have_world_snapshot && rendered_shell != Some(world_snapshot.shell);
         let render_result = if have_world_snapshot && world_snapshot.shell == 4 {
+            unsafe { deskkin_shell_observe(4, 0) };
             unsafe { deskkin_renderer_progress(RendererProgress::Texture as u8) };
             if let Err(fault) = ensure_world_textures(
                 &mut world_textures,

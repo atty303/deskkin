@@ -16,6 +16,55 @@ SPEC.loader.exec_module(device)
 
 
 class Phase3DeviceTests(unittest.TestCase):
+    def test_status_response_fits_every_ffi_completion_buffer(self):
+        supervisor = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
+        adapter = (ROOT / "apps/core-s3-service/src/adapter.c").read_text(encoding="utf-8")
+        service = (ROOT / "apps/core-s3-service/src/lib.rs").read_text(encoding="utf-8")
+        size = device.STATUS_RESPONSE_SIZE
+        self.assertIn(f"#define STATUS_RESPONSE_SIZE {size}", supervisor)
+        self.assertIn(f"#define COMPLETION_FRAME_MAX {size}", adapter)
+        self.assertIn(f"const STATUS_RESPONSE_SIZE: usize = {size};", service)
+        self.assertIn("uint8_t bytes[COMPLETION_FRAME_MAX];", adapter)
+        self.assertIn("[0_u8; STATUS_RESPONSE_SIZE]", service)
+
+    def test_raster_profile_is_coherent_bounded_and_scalar_only(self):
+        clock = [0.0]
+        generation = [0]
+        def sample(*args, **kwargs):
+            generation[0] += 1
+            raw = bytearray(device.STATUS_RESPONSE_SIZE)
+            raw[0] = 1
+            raw[26] = 4
+            raw[27] = 1
+            raw[40:44] = generation[0].to_bytes(4, "big")
+            raw[168:172] = generation[0].to_bytes(4, "big")
+            for index in range(8):
+                raw[172 + index * 4:176 + index * 4] = (100 + index).to_bytes(4, "big")
+            return bytes(raw)
+        with mock.patch.object(device, "run_control", side_effect=sample), mock.patch.object(
+            device.time, "monotonic", side_effect=lambda: clock[0]
+        ), mock.patch.object(device.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), mock.patch.object(device.sys, "stderr", io.StringIO()):
+            result = device.measure_raster(None, 1)
+        self.assertEqual(result["profile_samples"], 5)
+        self.assertEqual(result["coverage_us_mean"], 100)
+        self.assertEqual(result["pixel_raster_us_max"], 103)
+        self.assertEqual(result["profile_bilinear_samples_min"], 107)
+        self.assertTrue(set(result) <= device.DIAGNOSTIC_RECORD_KEYS)
+        with self.assertRaises(device.DeviceError):
+            device.measure_raster(None, 121)
+
+    def test_raster_profile_rejects_stopped_or_unpaired_input(self):
+        for paired in (False, True):
+            clock = [0.0]
+            raw = bytearray(device.STATUS_RESPONSE_SIZE)
+            raw[0] = raw[27] = 1
+            raw[26] = 4 if paired else 0
+            with mock.patch.object(device, "run_control", return_value=bytes(raw)), mock.patch.object(
+                device.time, "monotonic", side_effect=lambda: clock[0]
+            ), mock.patch.object(device.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                with self.assertRaises(device.DeviceError):
+                    device.measure_raster(None, 3)
+
     def test_device_build_inherits_cargo_network_policy(self):
         for offline in (None, "true", "false"):
             with self.subTest(offline=offline):
@@ -507,7 +556,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("const uint16_t nvs_failure = deskkin_nvs_last_failure();", supervisor)
         self.assertIn("response[65] = (uint8_t)(nvs_failure >> 8);", supervisor)
         self.assertIn("response[66] = (uint8_t)nvs_failure;", supervisor)
-        self.assertIn("#define STATUS_RESPONSE_SIZE 168", supervisor)
+        self.assertIn("#define STATUS_RESPONSE_SIZE 204", supervisor)
         self.assertIn("observe_renderer_stale(&renderer_stale_reported);", supervisor)
         self.assertIn("&AMP_SHARED->renderer_progress), &response[160]", supervisor)
         self.assertIn("&AMP_SHARED->display_progress), &response[164]", supervisor)

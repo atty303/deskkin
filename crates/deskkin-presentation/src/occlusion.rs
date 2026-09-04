@@ -283,6 +283,15 @@ pub struct SceneStats {
     pub scaler_preparations: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RasterPhase {
+    Coverage,
+    Background,
+    Setup,
+    Pixels,
+    Idle,
+}
+
 /// Boards must be far-to-near, with increasing ID for equal depths.
 /// Coverage is built before drawing; scaler coordinates are prepared once per
 /// visible board. Background returns four repeating native RGB565 words.
@@ -290,9 +299,31 @@ pub fn raster_scene(
     framebuffer: &mut [u16],
     stride: usize,
     boards: &[SceneBillboard<'_>],
+    background_row: impl FnMut(usize) -> [u16; 4],
+    wire: bool,
+    occlusion: &mut Occlusion<'_>,
+) -> Result<SceneStats, RasterError> {
+    raster_scene_observed(
+        framebuffer,
+        stride,
+        boards,
+        background_row,
+        wire,
+        occlusion,
+        &mut |_| {},
+    )
+}
+
+/// Observer changes phase before work; Idle ends the frame. Observers must not
+/// change scene state. Times are owned by the caller, not the portable library.
+pub fn raster_scene_observed(
+    framebuffer: &mut [u16],
+    stride: usize,
+    boards: &[SceneBillboard<'_>],
     mut background_row: impl FnMut(usize) -> [u16; 4],
     wire: bool,
     occlusion: &mut Occlusion<'_>,
+    observer: &mut impl FnMut(RasterPhase),
 ) -> Result<SceneStats, RasterError> {
     if stride < VIEWPORT_WIDTH as usize
         || stride
@@ -312,7 +343,9 @@ pub fn raster_scene(
         return Err(RasterError::InvalidOrder);
     }
     let mut stats = SceneStats::default();
+    observer(RasterPhase::Coverage);
     occlusion.prepare(boards, &mut stats);
+    observer(RasterPhase::Background);
     let tile = occlusion.tile.pixels();
     let columns = occlusion.columns();
     for y in 0..VIEWPORT_HEIGHT as usize {
@@ -347,6 +380,7 @@ pub fn raster_scene(
         }
     }
     for (index, board) in boards.iter().enumerate() {
+        observer(RasterPhase::Setup);
         let mask = (stats.opaque_tiles != 0 && occlusion.hides(board.projected.screen_rect, index))
             .then_some((&*occlusion, index));
         let result = raster_billboard_masked(
@@ -356,7 +390,7 @@ pub fn raster_scene(
             board.texture,
             board.region,
             wire,
-            mask,
+            (mask, observer),
         )?;
         if result.nearest_samples + result.bilinear_samples > 0 {
             stats.scaler_preparations += 1;
@@ -370,6 +404,7 @@ pub fn raster_scene(
             .bilinear_samples
             .saturating_add(result.bilinear_samples);
     }
+    observer(RasterPhase::Idle);
     Ok(stats)
 }
 

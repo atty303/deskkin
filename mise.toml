@@ -173,6 +173,10 @@ run = "python scripts/phase3_device.py run"
 description = "Run the fixed 60-second CoreS3 billboard world benchmark"
 run = "python scripts/phase3_device.py benchmark"
 
+[tasks."core-s3:raster-profile"]
+description = "Measure coherent per-frame raster phases without changing the scene"
+run = "python scripts/phase3_device.py raster-profile"
+
 [tasks."core-s3:recover"]
 description = "Erase CoreS3 storage and restore inert firmware after a live checkpoint"
 run = "python scripts/phase3_device.py recover"

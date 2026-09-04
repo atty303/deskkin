@@ -306,8 +306,8 @@ impl RateLimitedObservedYaw {
 
 mod occlusion;
 pub use occlusion::{
-    Coverage, Mask8, Occlusion, SceneBillboard, SceneStats, ScreenTile, build_opaque_mask,
-    raster_scene,
+    Coverage, Mask8, Occlusion, RasterPhase, SceneBillboard, SceneStats, ScreenTile,
+    build_opaque_mask, raster_scene, raster_scene_observed,
 };
 
 #[derive(Clone, Copy)]
@@ -404,7 +404,7 @@ fn raster_billboard_ordered(
         texture,
         region,
         big_endian,
-        None,
+        (None, &mut |_| {}),
     )
 }
 
@@ -415,8 +415,12 @@ fn raster_billboard_masked(
     texture: Texture<'_>,
     region: TextureRegion,
     big_endian: bool,
-    mask: Option<(&Occlusion<'_>, usize)>,
+    observation: (
+        Option<(&Occlusion<'_>, usize)>,
+        &mut impl FnMut(RasterPhase),
+    ),
 ) -> Result<RasterStats, RasterError> {
+    let (mask, observer) = observation;
     if stride < VIEWPORT_WIDTH as usize || framebuffer.len() < stride * VIEWPORT_HEIGHT as usize {
         return Err(RasterError::InvalidFramebuffer);
     }
@@ -477,7 +481,9 @@ fn raster_billboard_masked(
         y,
         region,
     };
+    observer(RasterPhase::Pixels);
     let samples = rows.dispatch_visible(framebuffer, texture, projected.filter, big_endian, mask);
+    observer(RasterPhase::Setup);
     Ok(match projected.filter {
         TextureFilter::Nearest => RasterStats {
             nearest_samples: samples,

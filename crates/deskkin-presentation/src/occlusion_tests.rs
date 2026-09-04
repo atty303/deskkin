@@ -54,6 +54,28 @@ fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
     )
     .unwrap();
     assert!(actual == expected, "16x16 output differs");
+    actual.fill(0xdead);
+    let mut phases = std::vec::Vec::new();
+    raster_scene_observed(
+        &mut actual,
+        stride,
+        boards,
+        |y| demo_world::background_row(y, 147),
+        wire,
+        &mut Occlusion::new(ScreenTile::Eight, &mut [0; 1200]).unwrap(),
+        &mut |phase| phases.push(phase),
+    )
+    .unwrap();
+    assert!(actual == expected, "observer changed output");
+    assert_eq!(phases.first(), Some(&RasterPhase::Coverage));
+    assert_eq!(phases.last(), Some(&RasterPhase::Idle));
+    assert_eq!(
+        phases
+            .iter()
+            .filter(|&&phase| phase == RasterPhase::Pixels)
+            .count(),
+        stats.scaler_preparations as usize
+    );
     stats
 }
 

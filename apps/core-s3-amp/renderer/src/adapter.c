@@ -245,6 +245,16 @@ void deskkin_shell_observe(uint8_t shell, uint8_t property_matches)
 	atomic_set(&shell_property_matches, property_matches);
 }
 
+void deskkin_raster_profile(const uint32_t *values)
+{
+	static uint32_t generation;
+	generation++;
+	if (generation == 0U) { generation = 1U; }
+	deskkin_shared_store(&AMP_SHARED->raster_profile_publication, 0U);
+	deskkin_shared_copy_to(AMP_SHARED->raster_profile, values, sizeof(AMP_SHARED->raster_profile));
+	deskkin_shared_store(&AMP_SHARED->raster_profile_publication, generation);
+}
+
 void *malloc(size_t size)
 {
 	if (!renderer_heap_ready) {

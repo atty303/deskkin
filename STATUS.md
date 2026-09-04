@@ -4,6 +4,38 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
+Paired-world telemetry now selects world fields correctly. An optional raster
+observer publishes coherent per-frame coverage/background/setup/pixel times and
+counts; `core-s3:raster-profile` samples the unchanged scene into bounded local
+aggregates. USB status and all service response buffers are 204 bytes. This
+slice adds measurement, not a renderer algorithm optimization.
+
+The measurement firmware is flashed, all AMP domain hashes verified (record
+`829abf63-4ea5-482d-949d-e58127656dac`). A 60.204-second live profile collected
+130 distinct frames (record `fca5cc6e-35cf-410e-9f80-4d6c62fb2bfe`):
+
+| Phase | Mean | Min-max |
+| --- | --- | --- |
+| Coverage | 1.180 ms | 0.189-1.757 ms |
+| Background | 10.342 ms | 9.891-11.893 ms |
+| Scaler setup | 1.551 ms | 0.735-3.234 ms |
+| Pixel raster | 25.655 ms | 19.481-29.862 ms |
+
+Mean counts were 226 coverage tests, 19 scaler preparations, 21,220 nearest
+samples and 13,097 bilinear samples. These are sampled-frame wall times from
+the existing approximate RC_SLOW clock, including preemption and instrumentation;
+they do not measure exclusive CPU time, PSRAM traffic or matched-scene speedup.
+Pixel raster plus background account for about 93% of the measured phase sum.
+Reducing repeated accesses in those paths is the next optimization candidate;
+memory bandwidth as the limiting cause remains unproven. No further renderer
+optimization is implemented by this measurement slice.
+
+Post-profile status remains Paired and fresh with 2,206 completed frames,
+44.093 ms last render, 32.501 ms last transfer, and zero renderer, allocation,
+transfer, stale-snapshot and touch-drop faults (record
+`c4f11e50-c0f5-4554-9809-6fd222aacae6`). Whole-thread stack high-water and matched
+device A/B performance remain unverified.
+
 The renderer keeps 8x8 source masks and screen tiles, but builds coverage once
 over board bounds and then renders in painter order. Scaler coordinates are
 prepared once per non-hidden board and reused across spans; unoccluded boards
@@ -22,19 +54,14 @@ non-opaque sprites. Opaque overlap took 20.159 ms painter / 2.900 ms 8x8 /
 3.859 ms 16x16; sparse opaque took 1.583 / 1.659 / 1.708 ms. These are host
 samples, not CoreS3 performance guarantees. The product retains 8x8 because
 16x16 saved coverage tests but lost enough occlusion to cost more in this test.
-`mise run fix`, strict Clippy and final `mise run test` passed, including all
-AMP domains and inert recovery (build record
-`ccdbe8db-5aac-46a3-8991-9b1cb73382d4`). APPCPU image size is 1,737,080 bytes.
-Generated raster and coverage-preparation stack frames are 2,816 and 528 bytes;
-these are not whole-thread high-water measurements. Independent review's
-test-isolation finding was fixed, the portable/simulator tests and strict
-Clippy passed again, and delta review found no remaining required changes.
-
-The currently flashed tile-row version is paired and advancing frames, with
-sampled render duration 46-50 ms and transfer about 33 ms, no renderer,
-allocation or transfer fault, and no stale snapshots (status run
-`70b918dd-f345-438a-83f5-71112acc6e3a`). The board-wise revision is not flashed;
-matched device performance and whole-thread stack high-water remain unverified.
+`mise run fix`, strict Clippy, portable/simulator tests and final `mise run test`
+passed. Independent review found a missing service response-buffer expansion;
+both C and Rust buffers were fixed before flash and a cross-boundary capacity
+regression test was added. The 51 device tooling tests pass (one optional age
+case skipped in the targeted invocation), delta review has no required changes,
+and the post-review clean `test:core-s3` build passed for all AMP domains and
+inert recovery (record `2e9991f1-248f-4b7e-a141-bb588074fae2`). APPCPU image size
+is 1,737,136 bytes.
 
 The paired world has a crisp, dark-green ground region below a muted sky.
 Its boundary follows the character's projected foot anchor using the same
@@ -61,13 +88,6 @@ The linker map places the 3,840-byte background table in `.flash.rodata` at
 0x3de8f5ac. Background drawing adds no heap allocation; demo card textures use
 190,400 bytes in PSRAM. Background time is included in world-raster and total
 render timing. The ground/portrait revision was flashed and visually accepted.
-
-The ground/portrait revision was flashed with all AMP domain hashes verified
-(record `ad6678d3-b386-42f9-9be6-39ed53bb9869`). Status record
-`5b833d7f-c562-4e37-a831-371370c3169e` showed Paired mode, 296 completed frames
-(up from 156), fresh progress, and zero renderer/allocation/transfer/stale/touch-drop
-faults. Its last render/transfer sample was 67,228/33,733 us (wall time, not CPU
-occupancy). The raster optimization is not in that live image.
 
 ## Previous qualified baseline
 
