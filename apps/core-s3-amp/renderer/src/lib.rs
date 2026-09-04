@@ -9,8 +9,8 @@ use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
 use deskkin_presentation::{
     BillboardId, CameraPose, PetAnimationState, PetAnimator, PixelFormat, ProjectedBillboard,
-    ScreenRect, SourceSize, Texture, TextureFilter, TextureId, TextureRegion, TouchYawAdapter,
-    UnwrappedAngle, WorldUnit,
+    ScreenRect, SourceSize, Texture, TextureFilter, TextureId, TextureRegion, UnwrappedAngle,
+    WorldUnit,
     demo_world::{self, DemoMotion},
     project_billboard, raster_billboard_be, raster_billboard_region_be, sort_far_to_near,
 };
@@ -491,10 +491,12 @@ fn capture_billboard(
     component: &RendererWindow,
     window: &MinimalSoftwareWindow,
     notice: bool,
+    demo: i32,
     text: &str,
     color: slint::Color,
 ) -> Result<BillboardTexture, RendererFault> {
     component.set_capture_notice(notice);
+    component.set_capture_demo(demo);
     component.set_capture_status_text(text.into());
     component.set_capture_status_color(color);
     component.set_capture_mode(true);
@@ -524,6 +526,7 @@ struct DecorationTexture {
 struct WorldTextures {
     availability: [Option<BillboardTexture>; 3],
     notice: Option<BillboardTexture>,
+    demo: [Option<BillboardTexture>; 3],
     decorations: [DecorationTexture; 4],
 }
 
@@ -539,6 +542,7 @@ fn new_world_textures() -> WorldTextures {
     WorldTextures {
         availability: [None, None, None],
         notice: None,
+        demo: [None, None, None],
         decorations: core::array::from_fn(|index| {
             let size = if index == 3 {
                 SourceSize {
@@ -596,7 +600,7 @@ fn ensure_world_textures(
                 2 => ("Unavailable", slint::Color::from_rgb_u8(0xf2, 0x5f, 0x5c)),
                 _ => ("Unknown", slint::Color::from_rgb_u8(0xf3, 0xb3, 0x3d)),
             };
-            match capture_billboard(component, window, false, text, color) {
+            match capture_billboard(component, window, false, -1, text, color) {
                 Ok(texture) => textures.availability[index] = Some(texture),
                 Err(error) => {
                     telemetry.cache_failures = telemetry.cache_failures.saturating_add(1);
@@ -614,10 +618,38 @@ fn ensure_world_textures(
                 component,
                 window,
                 true,
+                -1,
                 "Unknown",
                 slint::Color::from_rgb_u8(0xf3, 0xb3, 0x3d),
             ) {
                 Ok(texture) => textures.notice = Some(texture),
+                Err(error) => {
+                    telemetry.cache_failures = telemetry.cache_failures.saturating_add(1);
+                    return Err(error);
+                }
+            }
+        } else {
+            telemetry.cache_hits = telemetry.cache_hits.saturating_add(1);
+        }
+    }
+    for (index, needed) in [snapshot.availability == 0, snapshot.notice == 0, true]
+        .into_iter()
+        .enumerate()
+    {
+        if !needed {
+            continue;
+        }
+        if textures.demo[index].is_none() {
+            telemetry.cache_misses = telemetry.cache_misses.saturating_add(1);
+            match capture_billboard(
+                component,
+                window,
+                false,
+                index as i32,
+                "",
+                slint::Color::default(),
+            ) {
+                Ok(texture) => textures.demo[index] = Some(texture),
                 Err(error) => {
                     telemetry.cache_failures = telemetry.cache_failures.saturating_add(1);
                     return Err(error);
@@ -762,7 +794,7 @@ fn render_world(
                 },
             )
             .map_err(|_| RendererFault::RenderSkipped)?,
-            20 => raster_billboard_be(
+            20 | 40..=42 => raster_billboard_be(
                 pixels,
                 WIDTH,
                 value,
@@ -771,11 +803,14 @@ fn render_world(
                         width: 272,
                         height: 124,
                     },
-                    pixels: &textures
-                        .notice
-                        .as_ref()
-                        .ok_or(RendererFault::RenderSkipped)?
-                        .pixels,
+                    pixels: &(if value.source.0 == 20 {
+                        &textures.notice
+                    } else {
+                        &textures.demo[usize::from(value.source.0 - 40)]
+                    })
+                    .as_ref()
+                    .ok_or(RendererFault::RenderSkipped)?
+                    .pixels,
                     alpha: &[],
                     format: PixelFormat::OpaqueRgb565,
                 },
@@ -934,7 +969,8 @@ extern "C" fn rust_main() {
     component.on_cancel(|| unsafe { deskkin_publish_ui_command(3) });
     let mut display_enabled = false;
     let mut next_frame_at_us = unsafe { deskkin_uptime_us() }.saturating_add(50_000);
-    let mut touch = TouchYawAdapter::new(UnwrappedAngle::ZERO);
+    let mut touch = demo_world::DemoCamera::new(UnwrappedAngle::ZERO);
+    let mut camera_updated_us = unsafe { deskkin_uptime_us() };
     let mut touch_generation = 0_u32;
     let mut ui_pointer_pressed = false;
     let mut world_snapshot = WorldSnapshot::default();
@@ -948,8 +984,9 @@ extern "C" fn rust_main() {
         let snapshot_result = unsafe { deskkin_world_snapshot(&mut world_snapshot) };
         if snapshot_result > 0 {
             if !have_world_snapshot {
-                touch =
-                    TouchYawAdapter::new(UnwrappedAngle::from_units(world_snapshot.observed_yaw));
+                touch = demo_world::DemoCamera::new(UnwrappedAngle::from_units(
+                    world_snapshot.observed_yaw,
+                ));
             }
             have_world_snapshot = true;
         } else if snapshot_result < 0 && snapshot_result != -11 {
@@ -962,6 +999,13 @@ extern "C" fn rust_main() {
                 )
             };
             return;
+        }
+        let camera_now_us = unsafe { deskkin_uptime_us() };
+        let elapsed_ms = camera_now_us.saturating_sub(camera_updated_us) / 1000;
+        camera_updated_us += elapsed_ms * 1000;
+        if have_world_snapshot && world_snapshot.shell == 4 {
+            touch.advance(u32::try_from(elapsed_ms).unwrap_or(u32::MAX));
+            unsafe { deskkin_publish_target_yaw(touch.target().units()) };
         }
         unsafe { deskkin_renderer_progress(RendererProgress::Touch as u8) };
         loop {

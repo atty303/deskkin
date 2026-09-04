@@ -4,27 +4,31 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
-The paired world demo is now a small nocturnal floating garden, using generated
-transparent botanical and companion sprites, warm lanterns, and drifting lights.
-The continuous cylindrical coordinate model remains invisible, all geometry is
-camera-facing, and the solid background, existing semantic views, and AMP DMA/memory
-ownership are unchanged. Scene placement and deterministic motion are shared
-between simulator and firmware; decoration textures are converted once into APPCPU PSRAM.
-No new dependencies, provider behavior, physical servo, or remote publication.
-Headless Slint/world previews at front, quarter-turn, and half-turn have been
-inspected. Sprite storage is 83,187 bytes in the renderer heap. Host lint and
-targeted scene/simulator/benchmark tests pass, including the simulator's RGB565
-expansion overflow regression. Fresh review found no findings. Final
-`mise run test` passed, including all CoreS3 domains and inert recovery (build
-record `1d5f3342-5e59-4548-a436-4d9455506e26`). APPCPU image size is 1,667,296
-bytes within the existing 3 MiB slot. The garden scene was flashed with all AMP
-domain hashes verified (flash record `b4424fc2-0627-498d-8b7e-847d3f4bed51`).
-Post-reset status `dd6ae22b-0af2-4d67-bcc7-c60cc547ae6a` observed Paired world
-mode, boot stage 9, 974 completed frames (up from 169), fresh heartbeat, advancing
-renderer/display progress, and zero renderer, allocation, transfer, stale-state,
-and touch-drop faults. Last render/transfer times were 58.527/33.565 ms; these
-are individual samples, not a benchmark. Full live performance and user visual
-acceptance remain unqualified.
+The garden now has three persistent information-card slots with richer text.
+Availability and Notice retain their semantic meaning; absent views use labelled
+demo garden/field-note copy, and a third card is an exploration guide. The camera
+continuously advances 3 degrees/s (120 seconds/turn) in paired mode, composed with
+unwrapped drag through observed yaw and the existing 180 degrees/s rate limit.
+The decorative objects, invisible coordinate model, internal DMA framebuffers,
+PSRAM cache ownership and pairing UI are preserved. No new dependencies.
+
+Headless front and 60-second previews were inspected. Portable camera tests cover
+fractional time, multiple turns and gesture restart; simulator tests cover three
+cards, semantic expiry and texture reuse. `mise run fix`, lint and targeted tests
+passed. The one final `mise run test` exposed a pre-existing host capacity-test
+race: expected connection rejection could occur during write instead of read.
+Its error assertion was corrected without changing production host code, then
+`mise run test:host` passed in full. `mise run test:core-s3` passed all AMP domains
+and inert recovery (build record `b9518716-9d7d-4194-92b6-02d3bdf93cfd`). APPCPU
+image size is 1,676,324 bytes within the existing 3 MiB slot. Fresh feature review
+and a delta review of the test correction found no required changes.
+
+This three-card/automatic-camera revision is not flashed or live-qualified yet.
+The device still runs the preceding garden image, flashed with all domain hashes
+verified (record `b4424fc2-0627-498d-8b7e-847d3f4bed51`). Its status record
+`dd6ae22b-0af2-4d67-bcc7-c60cc547ae6a` showed Paired mode, 974 completed frames,
+fresh progress, and zero renderer/allocation/transfer/stale/touch-drop faults.
+The user liked its objects; these live results do not qualify the new revision.
 
 ## Previous qualified baseline
 
@@ -75,8 +79,8 @@ stable far-to-near painter sorting, direct RGB565 nearest/bilinear/A8 raster,
 horizontal touch mapping, and 0.5 turn/s observed-yaw limiting.
 
 The simulator and CoreS3 share an invisible cylindrical night-garden scene with
-up to 22 camera-facing billboards over solid `#16191d`: moving Character,
-Availability, optional Notice, a radially moving garden drone, three botanical
+23 camera-facing billboards over solid `#16191d`: moving Character,
+three information cards, a radially moving garden drone, three botanical
 terrariums, three lanterns, and twelve drifting lights. Availability and Notice
 use canonical 272x124 Slint captures; the custom renderer handles projection,
 scaling, clipping, sorting, and composition. Deterministic tests cover view
@@ -230,8 +234,10 @@ upstream-compatible startup path is verified.
 The previous four-entity demo passed user visual acceptance. The new garden
 scene still needs live visual acceptance for composition, parallax, continuous
 320 px turns without a seam jump, 180 degrees/s observed following, and intact
-pairing UI. Normal operation has 21 entities with Availability and without
-Notice; benchmark operation includes all 22.
+pairing UI. Both normal and benchmark operation have 23 entities: absent
+Availability/Notice slots use explicitly labelled demo cards, with a third
+exploration guide always present. Camera target drifts 3 degrees/s in addition
+to drag, through the existing observed-pose limiter.
 
 Physical servo power, neck actuation, and a neck pose sensor remain intentionally
 out of scope; observed yaw is virtual.

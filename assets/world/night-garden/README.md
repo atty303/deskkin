@@ -70,4 +70,5 @@ background scenery, text, logos or other objects.
 renderer, without a display server, host identity, or network. The output must
 not exist; failed writes are removed. Drag uses the same target/observed lag as
 the demo. For example, 80 pixels with 1000 ms yields a quarter-turn view.
-Unknown and Notice are synthetic fixture values, not live service status.
+The preview shows three explicitly labelled demo cards with no semantic views.
+Elapsed time advances the automatic 120-second camera orbit as well as objects.

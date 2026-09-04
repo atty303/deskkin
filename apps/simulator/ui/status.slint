@@ -14,6 +14,7 @@ export component StatusWindow inherits Window {
     in property <bool> world-mode: false;
     in property <bool> capture-mode: false;
     in property <bool> capture-notice: false;
+    in property <int> capture-demo: -1;
     callback yaw-sample(int, bool);
 
     background: #16191d;
@@ -29,6 +30,7 @@ export component StatusWindow inherits Window {
         notice-visible: root.capture-mode ? root.capture-notice : root.notice-visible;
         notice-text: root.notice-text;
         capture-only-notice: root.capture-mode && root.capture-notice;
+        demo-card: root.capture-mode ? root.capture-demo : -1;
     }
 
     Image {

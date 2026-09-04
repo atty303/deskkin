@@ -93,12 +93,15 @@ configuration.
 
 The cylinder is an invisible coordinate model. No cylinder surface, ring,
 floor, track, tangent-facing board, mesh, lighting, or z-buffer is rendered.
-The paired night-garden demo uses up to 22 camera-facing screen-axis-aligned
+The paired night-garden demo uses 23 camera-facing screen-axis-aligned
 billboards, with shared scene placement and motion in `demo_world.rs`:
 
 - Character at radius 2.2, moving +12 degrees/s with the existing QOI loops.
-- Availability at radius 1.2 and -45 degrees, above the character.
-- CompositionCheck Notice at radius 1.8 and +18 degrees when present.
+- Availability at radius 1.8 and -45 degrees, above the character, or a
+  labelled demo garden introduction when absent.
+- CompositionCheck Notice at radius 1.8 and +35 degrees when present, or
+  labelled demo field notes when absent.
+- A third demo exploration-guide card at radius 2.3 and +170 degrees.
 - A generated garden drone at +42 degrees, ping-ponging from radius 1.0 to
   2.5 at 0.25 unit/s while gently bobbing.
 - Three botanical terrariums and three warm lanterns distributed around the
@@ -106,9 +109,12 @@ billboards, with shared scene placement and motion in `demo_world.rs`:
 - Twelve small drifting lights. Their glow is baked alpha, not lighting.
 
 All autonomous motion uses bounded periodic integer phases. The render API
-still accepts caller-owned slices; the 22-entity capacity belongs only to this
+still accepts caller-owned slices; the 23-entity capacity belongs only to this
 demo, not to a global entity registry. The benchmark's expected entity count
-includes decorations and both semantic boards; normal operation omits Notice.
+includes decorations and three cards. Normal operation replaces absent semantic
+boards with demo copy; absence still remains explicit in ApplicationViews.
+The three additional canonical demo textures consume at most 202,368 bytes in
+APPCPU PSRAM and are generated only on first use.
 
 World coordinates are signed Q16.16 and azimuth is an unwrapped signed integer
 with 65,536 units per turn. Camera radius is 4.0, near plane 0.25, viewport
@@ -117,6 +123,10 @@ with 65,536 units per turn. Camera radius is 4.0, near plane 0.25, viewport
 device. Visible billboards are stably sorted far-to-near by actual depth, then
 by billboard ID.
 
+A continuous 3 degrees/s orbit adds one unwrapped target turn every 120 seconds.
+It runs only in paired world mode; APPCPU retains fractional milliseconds and
+publishes the combined orbit/touch target. A benchmark adds a persistent extra
+turn offset on PROCPU so subsequent live targets do not cancel it.
 A positive 320 px horizontal drag adds one target turn; vertical movement does
 not affect yaw and a new gesture does not normalize accumulated turns. The
 virtual observed yaw follows the unwrapped target at at most 0.5 turn/s without

@@ -91,8 +91,8 @@ bilinear sampling; Character and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
 
-The paired night-garden demo contains a moving Character, Availability board,
-optional Notice board, radially moving garden drone, three terrariums, three
+The paired night-garden demo contains a moving Character, three information cards,
+a radially moving garden drone, three terrariums, three
 lanterns, and twelve drifting lights. Generated artwork is normalized to three
 96x96 straight-alpha sprites, converted once to RGB565+A8 in the renderer's
 owned heap, and reused by repeated entities. The shared `demo_world` module
@@ -103,7 +103,12 @@ to 0..=3.0, the near plane is 0.25, horizontal FOV is 90 degrees, and focal
 length is 160 px. Touch maps each positive 320 px horizontal drag to one
 unwrapped target turn. Only observed yaw affects projection; it follows the
 unwrapped target without overshoot at at most 0.5 turn/s. Vertical drag has no
-yaw effect.
+yaw effect. A shared fractional-time camera adapter adds a slow 3 degrees/s
+unwrapped orbit to touch, without regenerating textures. APPCPU publishes this
+target and PROCPU owns observed following. The first two card slots display
+Availability and Notice when present, otherwise explicitly labelled demo prose;
+the third is a demo exploration guide. Semantic view absence is not fabricated
+as a real status or notice. Each closed demo texture is cached on first use.
 
 The simulator owns one hosted Slint window. It synchronously switches the same
 owner into capture mode to make missing canonical textures, restores world mode

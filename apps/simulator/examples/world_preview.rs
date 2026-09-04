@@ -1,7 +1,7 @@
 //! Deterministic art preview; no host identity, network, or diagnostic recording.
 use std::{fs::OpenOptions, io::Write, path::PathBuf, rc::Rc};
 
-use deskkin_application::{ApplicationViews, availability, synthetic_notice};
+use deskkin_application::ApplicationViews;
 use deskkin_simulator::StatusWindow;
 use slint::{
     ComponentHandle, PhysicalSize,
@@ -56,8 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     scene.tick(
         &ui,
         ApplicationViews {
-            availability: Some(availability::Surface::Unknown),
-            synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
+            availability: None,
+            synthetic_notice: None,
         },
         elapsed,
     )?;

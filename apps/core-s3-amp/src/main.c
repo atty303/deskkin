@@ -88,6 +88,7 @@ static atomic_t touch_pressed;
 static uint32_t world_generation;
 static int64_t observed_yaw;
 static int64_t target_yaw;
+static int64_t benchmark_yaw_offset;
 static uint32_t touch_generation;
 static uint16_t observed_rate_remainder;
 static uint32_t command_generation;
@@ -364,7 +365,9 @@ int deskkin_amp_world_benchmark_start(void)
 	if (deskkin_service_shell() != DESKKIN_SHELL_PAIRED) {
 		return -EACCES;
 	}
-	target_yaw = observed_yaw + 65536;
+	/* Keep the extra turn when the live orbit/touch producer publishes again. */
+	benchmark_yaw_offset += 65536;
+	target_yaw += 65536;
 	world_benchmark_started_generation = world_generation;
 	atomic_set(&world_benchmark_complete, 0);
 	atomic_set(&world_benchmark_active, 1);
@@ -380,7 +383,7 @@ static void update_observed_yaw(void)
 		const uint32_t after = deskkin_shared_load(&AMP_SHARED->target_yaw_publication);
 		if (before == after && target.generation == before &&
 		    target.schema == DESKKIN_CHANNEL_SCHEMA) {
-			target_yaw = target.value;
+			target_yaw = target.value + benchmark_yaw_offset;
 		} else if (before == after) {
 			set_boot_error(9);
 		}

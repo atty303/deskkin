@@ -6,6 +6,7 @@ import { StatusSurface } from "../../../../ui/status-surface.slint";
 export component RendererWindow inherits Window {
     in property <bool> capture-mode: false;
     in property <bool> capture-notice: false;
+    in property <int> capture-demo: -1;
     in property <string> capture-status-text: "Unknown";
     in property <color> capture-status-color: #f3b33d;
     width: capture-mode ? 272px : 320px;
@@ -108,5 +109,6 @@ export component RendererWindow inherits Window {
         notice-visible: root.capture-notice;
         notice-text: "Deskkin notice";
         capture-only-notice: root.capture-notice;
+        demo-card: root.capture-demo;
     }
 }

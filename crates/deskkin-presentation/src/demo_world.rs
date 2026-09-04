@@ -2,12 +2,12 @@
 //! Rendering primitives remain independent of this scene's entity budget.
 
 use crate::{
-    Billboard, BillboardId, CylindricalPose, SourceSize, TextureFilter, TextureId, UnwrappedAngle,
-    WorldUnit, sin_q15,
+    Billboard, BillboardId, CylindricalPose, SourceSize, TextureFilter, TextureId, TouchYawAdapter,
+    UnwrappedAngle, WorldUnit, sin_q15,
 };
 
 pub const BACKGROUND: u16 = 0x10c3;
-pub const CAPACITY: usize = 22;
+pub const CAPACITY: usize = 23;
 pub const SPRITE_SIZE: SourceSize = SourceSize {
     width: 96,
     height: 96,
@@ -17,6 +17,41 @@ pub const DRONE: TextureId = TextureId(30);
 pub const TERRARIUM: TextureId = TextureId(31);
 pub const LANTERN: TextureId = TextureId(32);
 pub const LIGHT: TextureId = TextureId(33);
+
+/// Unwrapped slow tour plus direct manipulation; fractional time is retained.
+#[derive(Clone, Copy, Debug)]
+pub struct DemoCamera {
+    touch: TouchYawAdapter,
+    orbit: i64,
+    remainder: u32,
+}
+
+impl DemoCamera {
+    #[must_use]
+    pub const fn new(initial: UnwrappedAngle) -> Self {
+        Self {
+            touch: TouchYawAdapter::new(initial),
+            orbit: 0,
+            remainder: 0,
+        }
+    }
+
+    pub fn sample(&mut self, x: i16, pressed: bool) -> UnwrappedAngle {
+        self.touch.sample(x, pressed);
+        self.target()
+    }
+
+    pub fn advance(&mut self, elapsed_ms: u32) {
+        let numerator = u64::from(elapsed_ms) * 65_536 + u64::from(self.remainder);
+        self.orbit = self.orbit.saturating_add((numerator / 120_000) as i64);
+        self.remainder = (numerator % 120_000) as u32;
+    }
+
+    #[must_use]
+    pub fn target(self) -> UnwrappedAngle {
+        UnwrappedAngle::from_units(self.touch.target().units().saturating_add(self.orbit))
+    }
+}
 
 /// Canonical straight-alpha RGBA8 artwork. Consumers convert once into their
 /// owned RGB565+A8 storage, never sample these flash-resident bytes per frame.
@@ -79,7 +114,7 @@ fn entity(
             },
             world_height: size,
             texture_id: texture,
-            filter: if matches!(texture.0, 10..=12 | 20) {
+            filter: if matches!(texture.0, 10..=12 | 20 | 40..=42) {
                 TextureFilter::Bilinear
             } else {
                 TextureFilter::Nearest
@@ -113,28 +148,33 @@ pub fn entities(
                 height: 156,
             },
         )),
-        availability.map(|texture| {
-            entity(
-                2,
-                texture,
-                WorldUnit::ratio(12, 10),
-                UnwrappedAngle::from_degrees(-45),
-                WorldUnit::ONE,
-                WorldUnit::ratio(8, 10),
-                board,
-            )
-        }),
-        notice.then(|| {
-            entity(
-                3,
-                TextureId(20),
-                WorldUnit::ratio(18, 10),
-                UnwrappedAngle::from_degrees(18),
-                WorldUnit::ratio(-11, 10),
-                WorldUnit::ratio(8, 10),
-                board,
-            )
-        }),
+        Some(entity(
+            2,
+            availability.unwrap_or(TextureId(40)),
+            WorldUnit::ratio(18, 10),
+            UnwrappedAngle::from_degrees(-45),
+            WorldUnit::ONE,
+            WorldUnit::ONE,
+            board,
+        )),
+        Some(entity(
+            3,
+            if notice { TextureId(20) } else { TextureId(41) },
+            WorldUnit::ratio(18, 10),
+            UnwrappedAngle::from_degrees(35),
+            WorldUnit::ratio(-11, 10),
+            WorldUnit::ONE,
+            board,
+        )),
+        Some(entity(
+            5,
+            TextureId(42),
+            WorldUnit::ratio(23, 10),
+            UnwrappedAngle::from_degrees(170),
+            WorldUnit::ratio(8, 10),
+            WorldUnit::ONE,
+            board,
+        )),
         Some(entity(
             4,
             DRONE,
@@ -213,6 +253,28 @@ mod tests {
     use crate::{CameraPose, project_billboard};
 
     #[test]
+    fn camera_tour_preserves_fractional_time_drag_and_multiple_turns() {
+        let mut whole = DemoCamera::new(UnwrappedAngle::ZERO);
+        let mut split = whole;
+        whole.advance(360_000);
+        for _ in 0..360_000 {
+            split.advance(1);
+        }
+        assert_eq!(whole.target(), split.target());
+        assert_eq!(whole.target().units(), 3 * 65_536);
+        split.sample(0, true);
+        split.sample(320, true);
+        split.sample(320, false);
+        split.advance(120_000);
+        split.sample(10, true);
+        assert_eq!(split.target().units(), 5 * 65_536);
+        split.sample(-310, true);
+        assert_eq!(split.target().units(), 4 * 65_536);
+        whole.advance(u32::MAX);
+        assert!(whole.target().units() > 3 * 65_536);
+    }
+
+    #[test]
     fn motion_is_chunk_independent_and_periodic() {
         let mut once = DemoMotion::default();
         let mut split = once;
@@ -239,14 +301,26 @@ mod tests {
         for _ in 0..120 {
             let full: std::vec::Vec<_> = entities(motion, Some(TextureId(10)), true).collect();
             assert_eq!(full.len(), CAPACITY);
-            assert_eq!(entities(motion, None, false).count(), CAPACITY - 2);
+            let demo: std::vec::Vec<_> = entities(motion, None, false).collect();
+            assert_eq!(demo.len(), CAPACITY);
+            assert_eq!(
+                demo.iter()
+                    .filter(|(b, _)| matches!(b.texture_id.0, 40..=42))
+                    .count(),
+                3
+            );
+            assert!(
+                !demo
+                    .iter()
+                    .any(|(b, _)| matches!(b.texture_id.0, 10..=12 | 20))
+            );
             for (index, (billboard, source)) in full.iter().enumerate() {
                 assert!(
                     !full[..index]
                         .iter()
                         .any(|(other, _)| other.id == billboard.id)
                 );
-                assert!(matches!(billboard.texture_id.0, 1 | 10 | 20 | 30..=33));
+                assert!(matches!(billboard.texture_id.0, 1 | 10 | 20 | 30..=33 | 42));
                 for degrees in (0..360).step_by(30) {
                     let camera = CameraPose {
                         radius: WorldUnit::from_int(4),

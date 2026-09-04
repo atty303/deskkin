@@ -1,8 +1,8 @@
 use deskkin_application::{ApplicationViews, availability, synthetic_notice};
 use deskkin_presentation::{
     BillboardId, CameraPose, PixelFormat, ProjectedBillboard, RateLimitedObservedYaw, SourceSize,
-    Texture, TextureFilter, TextureId, TouchYawAdapter, UnwrappedAngle, WorldUnit,
-    demo_world::{self, DemoMotion},
+    Texture, TextureFilter, TextureId, UnwrappedAngle, WorldUnit,
+    demo_world::{self, DemoCamera, DemoMotion},
     project_billboard, raster_billboard, sort_far_to_near,
 };
 use slint::{ComponentHandle, Image, Rgb8Pixel, SharedPixelBuffer};
@@ -35,11 +35,12 @@ struct OwnedTexture {
 }
 
 pub(crate) struct WorldScene {
-    touch: TouchYawAdapter,
+    touch: DemoCamera,
     observed: RateLimitedObservedYaw,
     motion: DemoMotion,
     availability_cache: [Option<OwnedTexture>; 3],
     notice_cache: Option<OwnedTexture>,
+    demo_cache: [Option<OwnedTexture>; 3],
     character: Vec<OwnedTexture>,
     character_frame: usize,
     character_frame_elapsed_ms: u32,
@@ -51,11 +52,12 @@ pub(crate) struct WorldScene {
 impl WorldScene {
     pub(crate) fn new() -> Self {
         Self {
-            touch: TouchYawAdapter::new(UnwrappedAngle::ZERO),
+            touch: DemoCamera::new(UnwrappedAngle::ZERO),
             observed: RateLimitedObservedYaw::new(UnwrappedAngle::ZERO),
             motion: DemoMotion::default(),
             availability_cache: [None, None, None],
             notice_cache: None,
+            demo_cache: [None, None, None],
             character: character_texture(),
             character_frame: 0,
             character_frame_elapsed_ms: 0,
@@ -156,6 +158,7 @@ impl WorldScene {
     }
 
     fn advance(&mut self, elapsed_ms: u32) {
+        self.touch.advance(elapsed_ms);
         self.observed.advance(self.touch.target(), elapsed_ms);
         self.motion.advance(elapsed_ms);
         self.character_frame_elapsed_ms =
@@ -176,7 +179,7 @@ impl WorldScene {
             if self.availability_cache[index].is_none() {
                 self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
                 self.availability_cache[index] =
-                    Some(capture_billboard(ui, false).inspect_err(|_error| {
+                    Some(capture_billboard(ui, false, -1).inspect_err(|_error| {
                         self.metrics.cache_failures = self.metrics.cache_failures.saturating_add(1);
                     })?);
                 self.metrics.view_generation = self.metrics.view_generation.wrapping_add(1).max(1);
@@ -187,9 +190,36 @@ impl WorldScene {
         if views.synthetic_notice == Some(synthetic_notice::NoticeKind::CompositionCheck) {
             if self.notice_cache.is_none() {
                 self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
-                self.notice_cache = Some(capture_billboard(ui, true).inspect_err(|_error| {
-                    self.metrics.cache_failures = self.metrics.cache_failures.saturating_add(1);
-                })?);
+                self.notice_cache =
+                    Some(capture_billboard(ui, true, -1).inspect_err(|_error| {
+                        self.metrics.cache_failures = self.metrics.cache_failures.saturating_add(1);
+                    })?);
+                self.metrics.view_generation = self.metrics.view_generation.wrapping_add(1).max(1);
+            } else {
+                self.metrics.cache_hits = self.metrics.cache_hits.saturating_add(1);
+            }
+        }
+        for (index, needed) in [
+            views.availability.is_none(),
+            views.synthetic_notice.is_none(),
+            true,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if !needed {
+                continue;
+            }
+            if self.demo_cache[index].is_none() {
+                self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
+                self.demo_cache[index] = Some(
+                    capture_billboard(ui, false, i32::try_from(index).unwrap_or(0)).inspect_err(
+                        |_| {
+                            self.metrics.cache_failures =
+                                self.metrics.cache_failures.saturating_add(1);
+                        },
+                    )?,
+                );
                 self.metrics.view_generation = self.metrics.view_generation.wrapping_add(1).max(1);
             } else {
                 self.metrics.cache_hits = self.metrics.cache_hits.saturating_add(1);
@@ -202,6 +232,9 @@ impl WorldScene {
         match id.0 {
             1 => Ok(&self.character[self.character_frame]),
             30..=33 => Ok(&self.decorations[usize::from(id.0 - 30)]),
+            40..=42 => self.demo_cache[usize::from(id.0 - 40)]
+                .as_ref()
+                .ok_or_else(|| "demo texture cache missing".into()),
             10..=12 => self.availability_cache[(id.0 - 10) as usize]
                 .as_ref()
                 .ok_or_else(|| "availability texture cache missing".into()),
@@ -222,9 +255,10 @@ fn availability_index(surface: availability::Surface) -> usize {
     }
 }
 
-fn capture_billboard(ui: &StatusWindow, notice: bool) -> Result<OwnedTexture, String> {
+fn capture_billboard(ui: &StatusWindow, notice: bool, demo: i32) -> Result<OwnedTexture, String> {
     ui.set_world_mode(false);
     ui.set_capture_notice(notice);
+    ui.set_capture_demo(demo);
     ui.set_capture_mode(true);
     let snapshot = ui
         .window()
@@ -394,7 +428,7 @@ mod tests {
             synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
         };
         scene.tick(&ui, views, 0).unwrap();
-        assert_eq!(scene.metrics.cache_misses, 2);
+        assert_eq!(scene.metrics.cache_misses, 3);
         assert_eq!(
             usize::from(scene.metrics.visible + scene.metrics.culled),
             demo_world::CAPACITY
@@ -406,16 +440,24 @@ mod tests {
         scene.touch_sample(320, true);
         scene.tick(&ui, views, 500).unwrap();
         assert_ne!(initial, scene.framebuffer);
-        assert_eq!(scene.metrics.cache_misses, 2);
-        assert_eq!(scene.metrics.cache_hits, 2);
+        assert_eq!(scene.metrics.cache_misses, 3);
+        assert_eq!(scene.metrics.cache_hits, 3);
         views.synthetic_notice = None;
         scene.tick(&ui, views, 500).unwrap();
         assert_eq!(
             usize::from(scene.metrics.visible + scene.metrics.culled),
-            demo_world::CAPACITY - 1
+            demo_world::CAPACITY
         );
         assert!(scene.metrics.bilinear_samples > 0);
-        assert_eq!(scene.metrics.cache_misses, 2);
+        assert_eq!(scene.metrics.cache_misses, 4);
+        views.availability = None;
+        scene.tick(&ui, views, 500).unwrap();
+        assert_eq!(scene.metrics.cache_misses, 5);
+        let misses = scene.metrics.cache_misses;
+        for _ in 0..10 {
+            scene.tick(&ui, views, 50).unwrap();
+        }
+        assert_eq!(scene.metrics.cache_misses, misses);
     }
 
     #[test]
