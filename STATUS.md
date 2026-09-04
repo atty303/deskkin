@@ -17,8 +17,14 @@ targeted scene/simulator/benchmark tests pass, including the simulator's RGB565
 expansion overflow regression. Fresh review found no findings. Final
 `mise run test` passed, including all CoreS3 domains and inert recovery (build
 record `1d5f3342-5e59-4548-a436-4d9455506e26`). APPCPU image size is 1,667,296
-bytes within the existing 3 MiB slot. The garden scene has not been flashed;
-live performance and user visual acceptance remain unqualified.
+bytes within the existing 3 MiB slot. The garden scene was flashed with all AMP
+domain hashes verified (flash record `b4424fc2-0627-498d-8b7e-847d3f4bed51`).
+Post-reset status `dd6ae22b-0af2-4d67-bcc7-c60cc547ae6a` observed Paired world
+mode, boot stage 9, 974 completed frames (up from 169), fresh heartbeat, advancing
+renderer/display progress, and zero renderer, allocation, transfer, stale-state,
+and touch-drop faults. Last render/transfer times were 58.527/33.565 ms; these
+are individual samples, not a benchmark. Full live performance and user visual
+acceptance remain unqualified.
 
 ## Previous qualified baseline
 
