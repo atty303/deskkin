@@ -1,9 +1,10 @@
 use deskkin_application::{ApplicationViews, availability, synthetic_notice};
 use deskkin_presentation::{
-    BillboardId, CameraPose, PixelFormat, ProjectedBillboard, RateLimitedObservedYaw, SourceSize,
-    Texture, TextureFilter, TextureId, UnwrappedAngle, WorldUnit,
+    BillboardId, CameraPose, Coverage, Mask8, ProjectedBillboard, RateLimitedObservedYaw,
+    SceneBillboard, SourceSize, Texture, TextureFilter, TextureId, TextureRegion, UnwrappedAngle,
+    WorldUnit, build_opaque_mask,
     demo_world::{self, DemoCamera, DemoMotion},
-    project_billboard, raster_billboard, sort_far_to_near,
+    project_billboard, raster_scene, sort_far_to_near,
 };
 use slint::{ComponentHandle, Image, Rgb8Pixel, SharedPixelBuffer};
 
@@ -29,8 +30,49 @@ pub(crate) struct WorldMetrics {
 struct OwnedTexture {
     size: SourceSize,
     pixels: Vec<u16>,
-    alpha: Vec<u8>,
-    format: PixelFormat,
+    coverage: OwnedCoverage,
+}
+
+enum OwnedCoverage {
+    Opaque,
+    Alpha8 {
+        alpha: Vec<u8>,
+        opaque_blocks: Vec<u8>,
+    },
+}
+
+impl OwnedTexture {
+    fn with_alpha(size: SourceSize, pixels: Vec<u16>, alpha: Vec<u8>) -> Self {
+        let mut opaque_blocks = vec![0; Mask8::bytes_for(size)];
+        build_opaque_mask(size, &alpha, &mut opaque_blocks)
+            .expect("generated alpha texture dimensions");
+        Self {
+            size,
+            pixels,
+            coverage: OwnedCoverage::Alpha8 {
+                alpha,
+                opaque_blocks,
+            },
+        }
+    }
+
+    fn borrow(&self) -> Texture<'_> {
+        Texture {
+            size: self.size,
+            pixels: &self.pixels,
+            coverage: match &self.coverage {
+                OwnedCoverage::Opaque => Coverage::Opaque,
+                OwnedCoverage::Alpha8 {
+                    alpha,
+                    opaque_blocks,
+                } => Coverage::Alpha8 {
+                    alpha,
+                    opaque_blocks: Mask8::new(self.size, opaque_blocks)
+                        .expect("generated mask dimensions"),
+                },
+            },
+        }
+    }
 }
 
 pub(crate) struct WorldScene {
@@ -110,47 +152,53 @@ impl WorldScene {
             }
         }
         sort_far_to_near(&mut projected[..count]);
-        demo_world::paint_background(&mut self.framebuffer, false, &projected[..count])
-            .map_err(|error| format!("world background: {error:?}"))?;
         self.metrics.visible = u16::try_from(count).unwrap_or(u16::MAX);
-        self.metrics.nearest_samples = 0;
-        self.metrics.bilinear_samples = 0;
         let mut framebuffer = core::mem::take(&mut self.framebuffer);
-        for value in projected[..count].iter().copied() {
-            let texture = match self.texture(value.source, views) {
-                Ok(texture) => texture,
-                Err(error) => {
-                    self.framebuffer = framebuffer;
-                    return Err(error);
-                }
+        let ground = usize::try_from(demo_world::ground_line(&projected[..count]))
+            .expect("ground line is clamped to the viewport");
+        let draw = (|| {
+            let resolve = |value: ProjectedBillboard| {
+                let texture = self.texture(value.source, views)?.borrow();
+                SceneBillboard::new(
+                    value,
+                    texture,
+                    TextureRegion {
+                        source_x: 0,
+                        source_y: 0,
+                        width: texture.size.width,
+                        height: texture.size.height,
+                        stride: texture.size.width,
+                    },
+                )
+                .map_err(|error| format!("world texture: {error:?}"))
             };
-            let stats = match raster_billboard(
+            if count == 0 {
+                return raster_scene(
+                    &mut framebuffer,
+                    WIDTH,
+                    &[],
+                    |y| demo_world::background_row(y, ground),
+                    false,
+                )
+                .map_err(|error| format!("world raster: {error:?}"));
+            }
+            let mut scene = [resolve(projected[0])?; demo_world::CAPACITY];
+            for (slot, value) in scene.iter_mut().zip(&projected[..count]) {
+                *slot = resolve(*value)?;
+            }
+            raster_scene(
                 &mut framebuffer,
                 WIDTH,
-                value,
-                Texture {
-                    size: texture.size,
-                    pixels: &texture.pixels,
-                    alpha: &texture.alpha,
-                    format: texture.format,
-                },
-            ) {
-                Ok(stats) => stats,
-                Err(error) => {
-                    self.framebuffer = framebuffer;
-                    return Err(format!("world raster: {error:?}"));
-                }
-            };
-            self.metrics.nearest_samples = self
-                .metrics
-                .nearest_samples
-                .saturating_add(stats.nearest_samples);
-            self.metrics.bilinear_samples = self
-                .metrics
-                .bilinear_samples
-                .saturating_add(stats.bilinear_samples);
-        }
+                &scene[..count],
+                |y| demo_world::background_row(y, ground),
+                false,
+            )
+            .map_err(|error| format!("world raster: {error:?}"))
+        })();
         self.framebuffer = framebuffer;
+        let stats = draw?;
+        self.metrics.nearest_samples = stats.raster.nearest_samples;
+        self.metrics.bilinear_samples = stats.raster.bilinear_samples;
         ui.set_world_frame(rgb565_image(&self.framebuffer));
         ui.set_world_mode(true);
         self.metrics.pose_generation = self.metrics.pose_generation.wrapping_add(1).max(1);
@@ -284,8 +332,7 @@ fn capture_billboard(ui: &StatusWindow, notice: bool, demo: i32) -> Result<Owned
     Ok(OwnedTexture {
         size,
         pixels,
-        alpha: Vec::new(),
-        format: PixelFormat::OpaqueRgb565,
+        coverage: OwnedCoverage::Opaque,
     })
 }
 
@@ -309,15 +356,14 @@ fn character_texture() -> Vec<OwnedTexture> {
                     alpha.push(pixel.a);
                 }
             }
-            OwnedTexture {
-                size: SourceSize {
+            OwnedTexture::with_alpha(
+                SourceSize {
                     width: 144,
                     height: 156,
                 },
                 pixels,
                 alpha,
-                format: PixelFormat::Rgb565A8,
-            }
+            )
         })
         .collect()
 }
@@ -357,12 +403,7 @@ fn generated_alpha_texture(
             alpha.push(opacity);
         }
     }
-    OwnedTexture {
-        size,
-        pixels,
-        alpha,
-        format: PixelFormat::Rgb565A8,
-    }
+    OwnedTexture::with_alpha(size, pixels, alpha)
 }
 
 fn rgb565_image(framebuffer: &[u16]) -> Image {
@@ -398,6 +439,36 @@ const fn empty_projected() -> ProjectedBillboard {
 mod tests {
     use super::*;
 
+    fn assert_painter_matches(scene: &WorldScene, views: ApplicationViews) {
+        let camera = CameraPose {
+            radius: WorldUnit::from_int(4),
+            observed_azimuth: scene.observed.observed(),
+            height: WorldUnit::ZERO,
+        };
+        let mut projected: Vec<_> = demo_world::entities(
+            scene.motion,
+            views
+                .availability
+                .map(|surface| TextureId(10 + u16::try_from(availability_index(surface)).unwrap())),
+            views.synthetic_notice.is_some(),
+        )
+        .filter_map(|(board, size)| project_billboard(board, size, camera).ok())
+        .collect();
+        sort_far_to_near(&mut projected);
+        let mut expected = vec![0; WIDTH * HEIGHT];
+        demo_world::paint_background(&mut expected, false, &projected).unwrap();
+        let mut samples = 0;
+        for value in projected {
+            let texture = scene.texture(value.source, views).unwrap().borrow();
+            let stats =
+                deskkin_presentation::raster_billboard(&mut expected, WIDTH, value, texture)
+                    .unwrap();
+            samples += stats.nearest_samples + stats.bilinear_samples;
+        }
+        assert!(expected == scene.framebuffer);
+        assert!(scene.metrics.nearest_samples + scene.metrics.bilinear_samples <= samples);
+    }
+
     #[test]
     fn rgb565_expansion_preserves_every_color() {
         let colors: Vec<u16> = (0..=u16::MAX).collect();
@@ -432,6 +503,7 @@ mod tests {
             synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
         };
         scene.tick(&ui, views, 0).unwrap();
+        assert_painter_matches(&scene, views);
         assert_eq!(scene.metrics.cache_misses, 3);
         let portrait = scene.demo_cache[2].as_ref().unwrap();
         assert_eq!(portrait.size, demo_world::PORTRAIT_CARD);
@@ -452,6 +524,7 @@ mod tests {
         scene.touch_sample(0, true);
         scene.touch_sample(320, true);
         scene.tick(&ui, views, 500).unwrap();
+        assert_painter_matches(&scene, views);
         assert_ne!(initial, scene.framebuffer);
         assert_eq!(scene.metrics.cache_misses, 3);
         assert_eq!(scene.metrics.cache_hits, 3);
@@ -471,6 +544,10 @@ mod tests {
             scene.tick(&ui, views, 50).unwrap();
         }
         assert_eq!(scene.metrics.cache_misses, misses);
+        for _ in 0..12 {
+            scene.tick(&ui, views, 10_000).unwrap();
+            assert_painter_matches(&scene, views);
+        }
     }
 
     #[test]

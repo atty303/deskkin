@@ -88,17 +88,23 @@ pub fn paint_background(
         .ok_or(RasterError::InvalidFramebuffer)?;
     let ground_y = ground_line(projected) as usize;
     for (y, row) in frame.chunks_exact_mut(VIEWPORT_WIDTH as usize).enumerate() {
-        let colors = &BACKGROUND_ROWS[if y < ground_y {
-            y
-        } else {
-            VIEWPORT_HEIGHT as usize + y - ground_y
-        }];
-        let colors = colors.map(|color| if wire_order { color.to_be() } else { color });
+        let colors =
+            background_row(y, ground_y).map(|color| if wire_order { color.to_be() } else { color });
         for span in row.chunks_exact_mut(4) {
             span.copy_from_slice(&colors);
         }
     }
     Ok(())
+}
+
+/// Native RGB565 pattern for a viewport row; ground boundary is in 0..=240.
+#[must_use]
+pub fn background_row(y: usize, ground_y: usize) -> [u16; 4] {
+    BACKGROUND_ROWS[if y < ground_y {
+        y
+    } else {
+        VIEWPORT_HEIGHT as usize + y - ground_y
+    }]
 }
 
 pub const CAPACITY: usize = 23;

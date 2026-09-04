@@ -83,13 +83,14 @@ fn reference(
             } else {
                 *destination
             };
-            let output = match texture.format {
-                PixelFormat::OpaqueRgb565 => color,
-                PixelFormat::Rgb565A8 => reference_mix(
+            let output = if texture.coverage.is_alpha() {
+                reference_mix(
                     background,
                     color,
-                    u32::from(texture.alpha[alpha_index]) * 257,
-                ),
+                    u32::from(texture.coverage.alpha()[alpha_index]) * 257,
+                )
+            } else {
+                color
             };
             *destination = if wire { output.to_be() } else { output };
         }
@@ -148,10 +149,16 @@ fn specialized_raster_matches_reference_pixels_stats_and_guards() {
             (-i32::MAX + 100, -i32::MAX + 100, i32::MAX, i32::MAX),
         ] {
             for filter in [TextureFilter::Nearest, TextureFilter::Bilinear] {
-                for format in [PixelFormat::OpaqueRgb565, PixelFormat::Rgb565A8] {
+                for format in [false, true] {
                     for wire in [false, true] {
                         for first_alpha in [0, 127, 255] {
                             alpha[0] = first_alpha;
+                            let size = SourceSize {
+                                width: 41,
+                                height: 29,
+                            };
+                            let mut bits = std::vec![0; Mask8::bytes_for(size)];
+                            build_opaque_mask(size, &alpha, &mut bits).unwrap();
                             let board = ProjectedBillboard {
                                 id: BillboardId(7),
                                 screen_rect: ScreenRect {
@@ -165,17 +172,16 @@ fn specialized_raster_matches_reference_pixels_stats_and_guards() {
                                 filter,
                             };
                             let texture = Texture {
-                                size: SourceSize {
-                                    width: 41,
-                                    height: 29,
-                                },
+                                size,
                                 pixels: &pixels,
-                                alpha: if format == PixelFormat::Rgb565A8 {
-                                    &alpha
+                                coverage: if format {
+                                    Coverage::Alpha8 {
+                                        alpha: &alpha,
+                                        opaque_blocks: Mask8::new(size, &bits).unwrap(),
+                                    }
                                 } else {
-                                    &[]
+                                    Coverage::Opaque
                                 },
-                                format,
                             };
                             expected.copy_from_slice(&initial);
                             actual.copy_from_slice(&initial);

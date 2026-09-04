@@ -4,24 +4,29 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
-The shared rasterizer now uses exact quotient/remainder coordinate stepping,
-alpha endpoint fast paths, row/column reuse and filter/format/byte-order kernels.
-RGB565 rounding, sampling counters and clipped output are preserved. Its
-2,560-byte column scratch uses the existing PSRAM renderer stack; internal-SRAM
-framebuffers, DMA and scheduler ownership are unchanged. The generated Xtensa
-raster function has a 2,752-byte stack frame, with division confined to setup.
-This is not a measurement of whole-thread stack high-water or runtime speed.
+The shared renderer integrates opaque/Alpha8 coverage with packed source masks.
+It finds a single full-tile opaque occluder, omits hidden background and farther
+samples, then retains painter order for remaining spans. Source masks total
+415 bytes for the active Character atlas and decorations, allocated in PSRAM
+once. Existing exact coordinate stepping and raster kernels remain in use;
+tile-row and scene scratch use the PSRAM renderer stack without per-frame heap
+allocation. Internal-SRAM double framebuffers, DMA and scheduler are unchanged.
 
-All 19 presentation tests pass, including 720 differential raster cases covering
-filters, formats, byte order, atlas regions, clipping and alpha endpoints.
-The host release differential sample took 76.03 ms for the direct reference and
-29.18 ms for the optimized kernel; this is neither an old-firmware comparison
-nor a CoreS3 performance result. `mise run fix`, strict Clippy and the final
-`mise run test` passed, including host/simulator and all AMP domains plus inert
-recovery (build record `e1fb4605-5fb9-4f84-8845-e7dc37c87a05`). Fresh independent
-review found no required changes. APPCPU image size is 1,736,656 bytes. The
-optimization is not flashed; real-device speed and stack high-water remain
-the next acceptance work.
+All 23 presentation tests and targeted simulator tests pass, including existing
+720 raster differential cases, tile/mask/clipping/byte-order cases and exact
+current-demo painter comparisons over camera motion. Strict Clippy and
+`mise run fix` pass. Host release samples for eight synthetic frames took
+1.555 ms painter / 1.729 ms tiles for sparse geometry, and 19.706 ms / 2.914 ms
+for overlapping geometry. These are not CoreS3 performance measurements;
+coverage checks can cost more than they save in sparse scenes. Final
+`mise run test` passed, including host/simulator, AMP domains and inert recovery
+(build record `8338b5c5-400d-407a-8035-6f770ca12863`). Fresh independent review
+found no required changes. APPCPU image size is 1,736,968 bytes; the raster
+kernel's generated stack frame is 2,752 bytes. This is not a whole-thread
+high-water measurement. This mask optimization has not been flashed;
+device performance and whole-thread stack high-water remain
+unverified. The previously flashed raster-kernel baseline was paired and
+advancing frames, with sampled render/transfer durations about 32 ms each.
 
 The paired world has a crisp, dark-green ground region below a muted sky.
 Its boundary follows the character's projected foot anchor using the same

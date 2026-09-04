@@ -95,8 +95,20 @@ The rasterizer preserves exact Q16 sampling with quotient/remainder stepping,
 reuses horizontal sample coordinates across rows, and selects filter/format/byte-order
 kernels before the pixel loop. Transparent samples skip color/background access;
 fully opaque samples skip blending and background reads. Bilinear interpolation
-retains its intermediate RGB565 rounding. Sampling counters count the clipped
-destination area, including transparent samples, independently of fast paths.
+retains its intermediate RGB565 rounding. Textures carry either implicit opaque
+coverage or A8 plus a packed one-bit-per-8x8-source-block mask, generated once
+from the alpha plane. Only blocks whose valid texels are all 255 have set bits;
+zero means unknown, not transparent. The mask is bound to the unchanged alpha
+plane and texture dimensions, including atlas regions.
+
+The screen is divided into 8x8 tiles. Each tile finds the nearest single billboard
+that guarantees full opaque coverage, then draws only it and nearer billboards
+in the existing far-to-near/ID order. Unknown and partially covered tiles remain
+conservative; several partial occluders are not combined. Adjacent eligible tiles
+are coalesced into horizontal spans to reduce scaler setup. Background is omitted
+only below guaranteed opaque tiles. No depth values or per-entity visibility
+buffers are stored. Sampling counters count visited destination samples after
+occlusion, including transparent samples; skipped samples are not counted.
 The background separates a muted sky gradient from darker green ground with a
 crisp boundary at the character's projected billboard bottom. It follows observed
 camera pose and character motion, not animation-frame alpha; the backdrop uses

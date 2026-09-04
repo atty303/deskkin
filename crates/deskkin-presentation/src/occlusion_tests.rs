@@ -1,0 +1,317 @@
+use super::*;
+use crate::{BillboardId, TextureId, WorldUnit, demo_world, raster_billboard_ordered};
+
+fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
+    let stride = 327;
+    let mut expected = std::vec![0xdead; stride * 240 + 19];
+    let mut actual = expected.clone();
+    for y in 0..240 {
+        let colors = demo_world::background_row(y, 147);
+        for x in 0..320 {
+            expected[y * stride + x] = if wire {
+                colors[x % 4].to_be()
+            } else {
+                colors[x % 4]
+            };
+        }
+    }
+    let mut baseline_samples = 0;
+    for board in boards {
+        let stats = raster_billboard_ordered(
+            &mut expected,
+            stride,
+            board.projected,
+            board.texture,
+            board.region,
+            wire,
+        )
+        .unwrap();
+        baseline_samples += stats.nearest_samples + stats.bilinear_samples;
+    }
+    let stats = raster_scene(
+        &mut actual,
+        stride,
+        boards,
+        |y| demo_world::background_row(y, 147),
+        wire,
+    )
+    .unwrap();
+    assert!(
+        actual == expected,
+        "tile output or framebuffer guards differ"
+    );
+    assert!(stats.raster.nearest_samples + stats.raster.bilinear_samples <= baseline_samples);
+    stats
+}
+
+fn board(
+    texture: Texture<'_>,
+    region: TextureRegion,
+    rect: ScreenRect,
+    depth: i32,
+    id: u16,
+    filter: TextureFilter,
+) -> SceneBillboard<'_> {
+    SceneBillboard::new(
+        ProjectedBillboard {
+            id: BillboardId(id),
+            screen_rect: rect,
+            depth: WorldUnit::from_int(depth.try_into().unwrap()),
+            source: TextureId(1),
+            filter,
+        },
+        texture,
+        region,
+    )
+    .unwrap()
+}
+
+#[test]
+fn mask_marks_only_completely_opaque_valid_texels() {
+    let size = SourceSize {
+        width: 17,
+        height: 9,
+    };
+    let mut alpha = std::vec![255; 17 * 9];
+    let mut bits = [0xff];
+    build_opaque_mask(size, &alpha, &mut bits).unwrap();
+    assert_eq!(bits, [0b0011_1111]);
+    alpha[8] = 254;
+    alpha[8 * 17 + 16] = 0;
+    build_opaque_mask(size, &alpha, &mut bits).unwrap();
+    assert_eq!(bits, [0b0001_1101]);
+    let unchanged = bits;
+    assert_eq!(
+        build_opaque_mask(size, &alpha[..5], &mut bits),
+        Err(RasterError::InvalidMask)
+    );
+    assert_eq!(bits, unchanged);
+    assert!(Mask8::new(size, &[]).is_err());
+    assert_eq!(
+        Mask8::bytes_for(SourceSize {
+            width: 96,
+            height: 96
+        }),
+        18
+    );
+}
+
+#[test]
+fn occlusion_matches_painter_across_scales_regions_holes_and_ties() {
+    let size = SourceSize {
+        width: 41,
+        height: 29,
+    };
+    let pixels: std::vec::Vec<u16> = (0..41 * 29)
+        .map(|i| (i as u16).wrapping_mul(4919))
+        .collect();
+    let mut alpha = std::vec![255; pixels.len()];
+    let mut bits = std::vec![0; Mask8::bytes_for(size)];
+    let region = TextureRegion {
+        source_x: 7,
+        source_y: 3,
+        width: 31,
+        height: 23,
+        stride: 41,
+    };
+    let opaque = Texture {
+        size,
+        pixels: &pixels,
+        coverage: Coverage::Opaque,
+    };
+    let full = ScreenRect {
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 240,
+    };
+    for hole in [None, Some(0), Some(127), Some(254)] {
+        alpha.fill(255);
+        if let Some(value) = hole {
+            for y in 9..17 {
+                for x in 9..17 {
+                    alpha[y * 41 + x] = value;
+                }
+            }
+        }
+        build_opaque_mask(size, &alpha, &mut bits).unwrap();
+        let alpha_texture = Texture {
+            coverage: Coverage::Alpha8 {
+                alpha: &alpha,
+                opaque_blocks: Mask8::new(size, &bits).unwrap(),
+            },
+            ..opaque
+        };
+        for rect in [
+            full,
+            ScreenRect {
+                x: 7,
+                y: 5,
+                width: 305,
+                height: 227,
+            },
+            ScreenRect {
+                x: -91,
+                y: -33,
+                width: 507,
+                height: 349,
+            },
+            ScreenRect {
+                x: 311,
+                y: 234,
+                width: 19,
+                height: 7,
+            },
+            ScreenRect {
+                x: 0,
+                y: 0,
+                width: 17,
+                height: 9,
+            },
+        ] {
+            for filter in [TextureFilter::Nearest, TextureFilter::Bilinear] {
+                let boards = [
+                    board(opaque, region, full, 3, 1, TextureFilter::Bilinear),
+                    board(alpha_texture, region, rect, 2, 2, filter),
+                    board(
+                        alpha_texture,
+                        region,
+                        ScreenRect {
+                            x: rect.x + 5,
+                            y: rect.y + 7,
+                            ..rect
+                        },
+                        2,
+                        3,
+                        TextureFilter::Nearest,
+                    ),
+                ];
+                for wire in [false, true] {
+                    compare(&boards, wire);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn opaque_front_removes_background_and_all_farther_samples() {
+    let size = SourceSize {
+        width: 1,
+        height: 1,
+    };
+    let texture = Texture {
+        size,
+        pixels: &[0xf800],
+        coverage: Coverage::Opaque,
+    };
+    let region = TextureRegion {
+        source_x: 0,
+        source_y: 0,
+        width: 1,
+        height: 1,
+        stride: 1,
+    };
+    let rect = ScreenRect {
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 240,
+    };
+    let back = board(texture, region, rect, 2, 1, TextureFilter::Bilinear);
+    let front = board(texture, region, rect, 1, 2, TextureFilter::Nearest);
+    let stats = compare(&[back, front], true);
+    assert_eq!(stats.opaque_tiles, 1200);
+    assert_eq!(stats.skipped_background_pixels, 76800);
+    assert_eq!(stats.raster.nearest_samples, 76800);
+    assert_eq!(stats.raster.bilinear_samples, 0);
+    let mut output = std::vec![0; 76800];
+    assert_eq!(
+        raster_scene(&mut output, 320, &[front, back], |_| [0; 4], false).unwrap_err(),
+        RasterError::InvalidOrder
+    );
+    assert!(output.iter().all(|&p| p == 0));
+    compare(&[], false);
+}
+
+#[test]
+fn sparse_and_overdraw_timing_samples() {
+    let size = SourceSize {
+        width: 32,
+        height: 32,
+    };
+    let pixels: std::vec::Vec<u16> = (0..1024).map(|i| (i as u16).wrapping_mul(4937)).collect();
+    let texture = Texture {
+        size,
+        pixels: &pixels,
+        coverage: Coverage::Opaque,
+    };
+    let region = TextureRegion {
+        source_x: 0,
+        source_y: 0,
+        width: 32,
+        height: 32,
+        stride: 32,
+    };
+    for overlap in [false, true] {
+        let boards: std::vec::Vec<_> = (0..12)
+            .map(|i| {
+                board(
+                    texture,
+                    region,
+                    if overlap {
+                        ScreenRect {
+                            x: i * 3,
+                            y: i * 2,
+                            width: 260,
+                            height: 180,
+                        }
+                    } else {
+                        ScreenRect {
+                            x: (i % 4) * 80,
+                            y: (i / 4) * 80,
+                            width: 60,
+                            height: 60,
+                        }
+                    },
+                    12 - i,
+                    i as u16,
+                    TextureFilter::Bilinear,
+                )
+            })
+            .collect();
+        compare(&boards, false);
+        let mut output = std::vec![0; 76800];
+        let start = std::time::Instant::now();
+        for _ in 0..8 {
+            for y in 0..240 {
+                let colors = demo_world::background_row(y, 147);
+                for row in output[y * 320..(y + 1) * 320].chunks_exact_mut(4) {
+                    row.copy_from_slice(&colors);
+                }
+            }
+            for b in &boards {
+                raster_billboard_ordered(&mut output, 320, b.projected, b.texture, b.region, false)
+                    .unwrap();
+            }
+            std::hint::black_box(&output);
+        }
+        let painter = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..8 {
+            raster_scene(
+                &mut output,
+                320,
+                &boards,
+                |y| demo_world::background_row(y, 147),
+                false,
+            )
+            .unwrap();
+            std::hint::black_box(&output);
+        }
+        std::println!(
+            "host scene sample overlap={overlap}: painter={painter:?}, tiles={:?}",
+            start.elapsed()
+        );
+    }
+}

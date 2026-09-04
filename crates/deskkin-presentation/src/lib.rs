@@ -304,18 +304,14 @@ impl RateLimitedObservedYaw {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PixelFormat {
-    OpaqueRgb565,
-    Rgb565A8,
-}
+mod occlusion;
+pub use occlusion::{Coverage, Mask8, SceneBillboard, SceneStats, build_opaque_mask, raster_scene};
 
 #[derive(Clone, Copy)]
 pub struct Texture<'a> {
     pub size: SourceSize,
     pub pixels: &'a [u16],
-    pub alpha: &'a [u8],
-    pub format: PixelFormat,
+    pub coverage: Coverage<'a>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -337,6 +333,8 @@ pub struct RasterStats {
 pub enum RasterError {
     InvalidFramebuffer,
     InvalidTexture,
+    InvalidMask,
+    InvalidOrder,
 }
 
 pub fn raster_billboard(
@@ -347,6 +345,24 @@ pub fn raster_billboard(
 ) -> Result<RasterStats, RasterError> {
     let region = full_texture_region(texture.size);
     raster_billboard_ordered(framebuffer, stride, projected, texture, region, false)
+}
+
+fn validate_texture(texture: Texture<'_>, region: TextureRegion) -> Result<(), RasterError> {
+    let right = usize::from(region.source_x) + usize::from(region.width);
+    let bottom = usize::from(region.source_y) + usize::from(region.height);
+    let required = bottom.saturating_sub(1) * usize::from(region.stride) + right;
+    if region.width == 0
+        || region.height == 0
+        || right > usize::from(region.stride)
+        || right > usize::from(texture.size.width)
+        || bottom > usize::from(texture.size.height)
+        || region.stride != texture.size.width
+        || texture.pixels.len() < required
+        || (texture.coverage.is_alpha() && texture.coverage.alpha().len() < required)
+    {
+        return Err(RasterError::InvalidTexture);
+    }
+    texture.coverage.validate(texture.size)
 }
 
 /// Renders into an RGB565 framebuffer whose words are stored in wire byte order.
@@ -378,39 +394,50 @@ fn raster_billboard_ordered(
     region: TextureRegion,
     big_endian: bool,
 ) -> Result<RasterStats, RasterError> {
+    raster_billboard_clipped(
+        framebuffer,
+        stride,
+        projected,
+        texture,
+        region,
+        big_endian,
+        ScreenRect {
+            x: 0,
+            y: 0,
+            width: VIEWPORT_WIDTH,
+            height: VIEWPORT_HEIGHT,
+        },
+    )
+}
+
+fn raster_billboard_clipped(
+    framebuffer: &mut [u16],
+    stride: usize,
+    projected: ProjectedBillboard,
+    texture: Texture<'_>,
+    region: TextureRegion,
+    big_endian: bool,
+    clip: ScreenRect,
+) -> Result<RasterStats, RasterError> {
     if stride < VIEWPORT_WIDTH as usize || framebuffer.len() < stride * VIEWPORT_HEIGHT as usize {
         return Err(RasterError::InvalidFramebuffer);
     }
-    let required = usize::from(
-        region
-            .source_y
-            .saturating_add(region.height)
-            .saturating_sub(1),
-    )
-    .saturating_mul(usize::from(region.stride))
-    .saturating_add(usize::from(region.source_x.saturating_add(region.width)));
-    if region.width == 0
-        || region.height == 0
-        || region.stride < region.source_x.saturating_add(region.width)
-        || texture.pixels.len() < required
-        || (texture.format == PixelFormat::Rgb565A8 && texture.alpha.len() < required)
-        || projected.screen_rect.width <= 0
-        || projected.screen_rect.height <= 0
-    {
+    validate_texture(texture, region)?;
+    if projected.screen_rect.width <= 0 || projected.screen_rect.height <= 0 {
         return Err(RasterError::InvalidTexture);
     }
-    let left = projected.screen_rect.x.max(0);
-    let top = projected.screen_rect.y.max(0);
+    let left = projected.screen_rect.x.max(clip.x);
+    let top = projected.screen_rect.y.max(clip.y);
     let right = projected
         .screen_rect
         .x
         .saturating_add(projected.screen_rect.width)
-        .min(VIEWPORT_WIDTH);
+        .min(clip.x + clip.width);
     let bottom = projected
         .screen_rect
         .y
         .saturating_add(projected.screen_rect.height)
-        .min(VIEWPORT_HEIGHT);
+        .min(clip.y + clip.height);
     if left >= right || top >= bottom {
         return Ok(RasterStats::default());
     }
@@ -519,29 +546,29 @@ impl RasterRows<'_> {
         filter: TextureFilter,
         big_endian: bool,
     ) {
-        match (filter, texture.format, big_endian) {
-            (TextureFilter::Nearest, PixelFormat::OpaqueRgb565, false) => {
+        match (filter, texture.coverage.is_alpha(), big_endian) {
+            (TextureFilter::Nearest, false, false) => {
                 self.draw::<false, false, false>(framebuffer, texture);
             }
-            (TextureFilter::Nearest, PixelFormat::OpaqueRgb565, true) => {
+            (TextureFilter::Nearest, false, true) => {
                 self.draw::<false, false, true>(framebuffer, texture);
             }
-            (TextureFilter::Nearest, PixelFormat::Rgb565A8, false) => {
+            (TextureFilter::Nearest, true, false) => {
                 self.draw::<false, true, false>(framebuffer, texture);
             }
-            (TextureFilter::Nearest, PixelFormat::Rgb565A8, true) => {
+            (TextureFilter::Nearest, true, true) => {
                 self.draw::<false, true, true>(framebuffer, texture);
             }
-            (TextureFilter::Bilinear, PixelFormat::OpaqueRgb565, false) => {
+            (TextureFilter::Bilinear, false, false) => {
                 self.draw::<true, false, false>(framebuffer, texture);
             }
-            (TextureFilter::Bilinear, PixelFormat::OpaqueRgb565, true) => {
+            (TextureFilter::Bilinear, false, true) => {
                 self.draw::<true, false, true>(framebuffer, texture);
             }
-            (TextureFilter::Bilinear, PixelFormat::Rgb565A8, false) => {
+            (TextureFilter::Bilinear, true, false) => {
                 self.draw::<true, true, false>(framebuffer, texture);
             }
-            (TextureFilter::Bilinear, PixelFormat::Rgb565A8, true) => {
+            (TextureFilter::Bilinear, true, true) => {
                 self.draw::<true, true, true>(framebuffer, texture);
             }
         }
@@ -569,7 +596,7 @@ impl RasterRows<'_> {
                 let source_index = first_row + usize::from(column.first);
                 // Bilinear+A8 retains the existing constant-alpha convention.
                 let alpha = if ALPHA {
-                    texture.alpha[if BILINEAR { 0 } else { source_index }]
+                    texture.coverage.alpha()[if BILINEAR { 0 } else { source_index }]
                 } else {
                     255
                 };
@@ -911,8 +938,17 @@ mod tests {
                     height: 1,
                 },
                 pixels: &[0xf800],
-                alpha: &[255],
-                format: PixelFormat::Rgb565A8,
+                coverage: Coverage::Alpha8 {
+                    alpha: &[255],
+                    opaque_blocks: Mask8::new(
+                        SourceSize {
+                            width: 1,
+                            height: 1,
+                        },
+                        &[1],
+                    )
+                    .unwrap(),
+                },
             },
         )
         .unwrap();
@@ -939,8 +975,7 @@ mod tests {
                     height: 2,
                 },
                 pixels: &[0, 0xffff, 0xffff, 0],
-                alpha: &[],
-                format: PixelFormat::OpaqueRgb565,
+                coverage: Coverage::Opaque,
             },
         )
         .unwrap();

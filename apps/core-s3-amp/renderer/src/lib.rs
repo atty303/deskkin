@@ -8,11 +8,11 @@ extern crate zephyr;
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
 use deskkin_presentation::{
-    BillboardId, CameraPose, PetAnimationState, PetAnimator, PixelFormat, ProjectedBillboard,
-    ScreenRect, SourceSize, Texture, TextureFilter, TextureId, TextureRegion, UnwrappedAngle,
-    WorldUnit,
+    BillboardId, CameraPose, Coverage, Mask8, PetAnimationState, PetAnimator, ProjectedBillboard,
+    SceneBillboard, ScreenRect, SourceSize, Texture, TextureFilter, TextureId, TextureRegion,
+    UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoMotion},
-    project_billboard, raster_billboard_be, raster_billboard_region_be, sort_far_to_near,
+    project_billboard, raster_scene, sort_far_to_near,
 };
 use qoi::{Channels, Decoder};
 use slint::platform::software_renderer::{
@@ -349,6 +349,7 @@ struct DecodedLoop {
     image: Image,
     pixels: Vec<u16>,
     alpha: Vec<u8>,
+    opaque_blocks: Vec<u8>,
     stride: u16,
 }
 
@@ -379,6 +380,13 @@ fn decode_loop(asset: LoopAsset) -> Result<DecodedLoop, RendererFault> {
     Ok(DecodedLoop {
         image: Image::from_rgba8(pixels),
         pixels: rgb565,
+        opaque_blocks: alpha_mask(
+            SourceSize {
+                width: header.width as u16,
+                height: header.height as u16,
+            },
+            &alpha,
+        ),
         alpha,
         stride: header
             .width
@@ -533,6 +541,7 @@ struct DecorationTexture {
     size: SourceSize,
     pixels: Vec<u16>,
     alpha: Vec<u8>,
+    opaque_blocks: Vec<u8>,
 }
 
 struct WorldTextures {
@@ -589,6 +598,7 @@ fn new_world_textures() -> WorldTextures {
             DecorationTexture {
                 size,
                 pixels,
+                opaque_blocks: alpha_mask(size, &alpha),
                 alpha,
             }
         }),
@@ -696,6 +706,82 @@ impl WorldMotion {
     }
 }
 
+fn alpha_mask(size: SourceSize, alpha: &[u8]) -> Vec<u8> {
+    let mut bits = vec![0; Mask8::bytes_for(size)];
+    build_opaque_mask(size, alpha, &mut bits).expect("validated alpha texture dimensions");
+    bits
+}
+
+fn world_billboard<'a>(
+    value: ProjectedBillboard,
+    decoded: &'a DecodedLoop,
+    frame_index: u8,
+    textures: &'a WorldTextures,
+) -> Result<SceneBillboard<'a>, RendererFault> {
+    let texture = match value.source.0 {
+        1 => {
+            let size = SourceSize {
+                width: decoded.stride,
+                height: PET_FRAME_HEIGHT as u16,
+            };
+            Texture {
+                size,
+                pixels: &decoded.pixels,
+                coverage: Coverage::Alpha8 {
+                    alpha: &decoded.alpha,
+                    opaque_blocks: Mask8::new(size, &decoded.opaque_blocks)
+                        .map_err(|_| RendererFault::RenderSkipped)?,
+                },
+            }
+        }
+        30..=33 => {
+            let texture = &textures.decorations[usize::from(value.source.0 - 30)];
+            Texture {
+                size: texture.size,
+                pixels: &texture.pixels,
+                coverage: Coverage::Alpha8 {
+                    alpha: &texture.alpha,
+                    opaque_blocks: Mask8::new(texture.size, &texture.opaque_blocks)
+                        .map_err(|_| RendererFault::RenderSkipped)?,
+                },
+            }
+        }
+        10..=12 | 20 | 40..=42 => {
+            let texture = match value.source.0 {
+                10..=12 => &textures.availability[usize::from(value.source.0 - 10)],
+                20 => &textures.notice,
+                _ => &textures.demo[usize::from(value.source.0 - 40)],
+            }
+            .as_ref()
+            .ok_or(RendererFault::RenderSkipped)?;
+            Texture {
+                size: texture.size,
+                pixels: &texture.pixels,
+                coverage: Coverage::Opaque,
+            }
+        }
+        _ => return Err(RendererFault::RenderSkipped),
+    };
+    let region = if value.source.0 == 1 {
+        TextureRegion {
+            source_x: u16::from(frame_index) * PET_FRAME_WIDTH as u16,
+            source_y: 0,
+            width: PET_FRAME_WIDTH as u16,
+            height: PET_FRAME_HEIGHT as u16,
+            stride: decoded.stride,
+        }
+    } else {
+        TextureRegion {
+            source_x: 0,
+            source_y: 0,
+            width: texture.size.width,
+            height: texture.size.height,
+            stride: texture.size.width,
+        }
+    };
+    SceneBillboard::new(value, texture, region).map_err(|_| RendererFault::RenderSkipped)
+}
+
 fn render_world(
     framebuffer: &mut Framebuffer,
     decoded: &DecodedLoop,
@@ -746,75 +832,32 @@ fn render_world(
     sort_far_to_near(&mut projected[..count]);
     let sort_us = elapsed_us(sort_started, unsafe { deskkin_uptime_us() });
     let raster_started = unsafe { deskkin_uptime_us() };
-    demo_world::paint_background(pixels, true, &projected[..count])
-        .map_err(|_| RendererFault::RenderSkipped)?;
-    let mut nearest_samples = 0_u32;
-    let mut bilinear_samples = 0_u32;
-    for value in projected[..count].iter().copied() {
-        let stats = match value.source.0 {
-            1 => raster_billboard_region_be(
-                pixels,
-                WIDTH,
-                value,
-                Texture {
-                    size: SourceSize {
-                        width: decoded.stride,
-                        height: PET_FRAME_HEIGHT as u16,
-                    },
-                    pixels: &decoded.pixels,
-                    alpha: &decoded.alpha,
-                    format: PixelFormat::Rgb565A8,
-                },
-                TextureRegion {
-                    source_x: u16::from(frame_index) * PET_FRAME_WIDTH as u16,
-                    source_y: 0,
-                    width: PET_FRAME_WIDTH as u16,
-                    height: PET_FRAME_HEIGHT as u16,
-                    stride: decoded.stride,
-                },
-            )
-            .map_err(|_| RendererFault::RenderSkipped)?,
-            30..=33 => {
-                let texture = &textures.decorations[usize::from(value.source.0 - 30)];
-                raster_billboard_be(
-                    pixels,
-                    WIDTH,
-                    value,
-                    Texture {
-                        size: texture.size,
-                        pixels: &texture.pixels,
-                        alpha: &texture.alpha,
-                        format: PixelFormat::Rgb565A8,
-                    },
-                )
-                .map_err(|_| RendererFault::RenderSkipped)?
-            }
-            10..=12 | 20 | 40..=42 => {
-                let texture = match value.source.0 {
-                    10..=12 => &textures.availability[usize::from(value.source.0 - 10)],
-                    20 => &textures.notice,
-                    _ => &textures.demo[usize::from(value.source.0 - 40)],
-                }
-                .as_ref()
-                .ok_or(RendererFault::RenderSkipped)?;
-                raster_billboard_be(
-                    pixels,
-                    WIDTH,
-                    value,
-                    Texture {
-                        size: texture.size,
-                        pixels: &texture.pixels,
-                        alpha: &[],
-                        format: PixelFormat::OpaqueRgb565,
-                    },
-                )
-                .map_err(|_| RendererFault::RenderSkipped)?
-            }
-            _ => return Err(RendererFault::RenderSkipped),
-        };
-        nearest_samples = nearest_samples.saturating_add(stats.nearest_samples);
-        bilinear_samples = bilinear_samples.saturating_add(stats.bilinear_samples);
+    let ground = demo_world::ground_line(&projected[..count]) as usize;
+    let stats = if count == 0 {
+        raster_scene(
+            pixels,
+            WIDTH,
+            &[],
+            |y| demo_world::background_row(y, ground),
+            true,
+        )
+    } else {
+        let mut scene =
+            [world_billboard(projected[0], decoded, frame_index, textures)?; demo_world::CAPACITY];
+        for (slot, value) in scene.iter_mut().zip(&projected[..count]) {
+            *slot = world_billboard(*value, decoded, frame_index, textures)?;
+        }
+        raster_scene(
+            pixels,
+            WIDTH,
+            &scene[..count],
+            |y| demo_world::background_row(y, ground),
+            true,
+        )
     }
+    .map_err(|_| RendererFault::RenderSkipped)?;
+    let nearest_samples = stats.raster.nearest_samples;
+    let bilinear_samples = stats.raster.bilinear_samples;
     let raster_us = elapsed_us(raster_started, unsafe { deskkin_uptime_us() });
     unsafe {
         deskkin_world_observe(

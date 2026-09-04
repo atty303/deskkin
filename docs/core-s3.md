@@ -157,7 +157,21 @@ nearest/bilinear, opaque/A8 and byte-order kernels. Its bounded 2,560-byte
 horizontal coordinate/weight scratch lives on the existing PSRAM renderer stack;
 no persistent allocation or internal-SRAM buffer is added. Per-pixel division
 and alpha-endpoint blending are avoided without changing RGB565 rounding or
-sample-counter semantics. Renderer/display priorities and DMA ownership are unchanged.
+sample-counter semantics within each drawn span. Renderer/display priorities and DMA ownership are unchanged.
+
+Opaque texture coverage has no alpha or mask allocation. A8 textures additionally
+keep packed 8x8-source-block opaque masks in PSRAM: 360 bytes for the active
+1152x156 Character atlas and 55 bytes for the three 96x96 decorations plus 9x9 light.
+Each bit certifies all valid texels are 255, not merely that some are nonzero.
+The renderer uses 8x8 screen-tile occlusion with conservative nearest-sample
+source-footprint checks; opaque RGB565 cards need only full rectangle coverage.
+Farther samples and background under a certified tile are omitted, while nearer
+A8 layers retain their painter order. Tile cutoffs are temporary for one screen
+tile row, with adjacent draw spans merged; there is no depth buffer or per-entity
+screen mask. Cutoff/scene scratch uses the existing PSRAM renderer stack and no
+per-frame heap allocation. The existing world-raster duration includes coverage
+testing and span setup; nearest/bilinear counters count only visited samples
+after occlusion (still including alpha-zero samples within visited spans).
 
 ## AMP memory and channels
 
