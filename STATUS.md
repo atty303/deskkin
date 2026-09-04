@@ -4,11 +4,73 @@ Updated: 2026-09-04
 
 ## Active work
 
-No active implementation slice. Generic opaque PIE blits are qualified; the
-measured faster scalar alpha path is retained. Grass-specific SIMD is outside
-this completed scope.
+Source alignment and opaque blit scratch removal are implemented and device-tested.
+Texture color/A8 planes use 16-byte-aligned offsets inside ordinary allocations
+and row strides padded to 16 pixels, generated directly at those offsets.
+Native and sampled spans expose complete backing slices plus offsets. Opaque
+PIE uses register funnels instead of per-span scratch copies; destination edges
+stay scalar. Grass composition/assets and alpha arithmetic are unchanged.
+Scaled sampling rows and q-register saves still cause memory traffic.
 
-## Current acceptance
+CoreS3 is connected. Only the command sandbox hides `/dev/ttyACM0`; physical
+commands run outside it. The previously flashed baseline was already stalled
+at 23,638 frames with stale heartbeat (status
+`b618b98a-7995-42cb-9d18-3e9f6264fd92`). USB reset restored progress. Baseline
+60-second runs `94692679-df22-4469-9d05-0050841f655c` and
+`80670b90-c709-45d3-9dbf-ad81319f097c` passed at 14.297 and 14.160 FPS.
+Third run `efbfa565-5221-4b78-a3f2-22ae1f124a55` stopped observing progress
+at about 51 seconds and is excluded. That pre-existing long-run stop remains
+unexplained; these two runs do not establish a three-run median.
+
+First candidate flash `d3bf1366-1fc7-4ca5-910e-fac441d951b7` verified all domain
+hashes but stopped during startup. APPCPU JTAG observed `arch_system_halt`
+at `0x403d794a`, reason 4, and the `rust_begin_unwind`/`rust_panic_wrap` call
+chain. The pinned Zephyr `alloc_impl.rs` rejects every layout alignment above
+8 bytes; the initial `Vec` of 16-byte-aligned blocks requested such a layout.
+The revised storage uses ordinary `Vec<u16>`/`Vec<u8>` and up to 15 spare bytes
+per plane, then generates at an aligned internal offset without relocating
+populated pixels. Corrected flash `13396fb7-0df6-4f39-a374-9900a64499a2`
+verified every domain hash and passed the 164,352-case startup kernel check.
+Status `a5a5a875-37d2-4505-9061-0baca1ef712c` observed advancing frames and
+a fresh heartbeat with no renderer fault.
+OpenOCD needs `espusbjtag caps_descriptor 0x2000`; AMP core-specific GDB
+inspection used a temporary copy of its existing target config without SMP
+grouping. All temporary GDB servers/configs were terminated/removed.
+
+Host texture layout tests and 5,259,264 vector-span boundary combinations pass.
+The final `mise run test` passed, including clean firmware builds
+(`83cda519-cb1e-433c-bca8-59ea2f89b8f1`). Fresh independent review of all nine
+files, including the pinned allocator constraint, found no actionable issue.
+Final test-built flash `693eb470-4f6e-4a0c-82aa-1877fd5cfb26` verified all
+domain hashes; status `6e447465-35f9-48fe-a9d8-17cabbf7e90b` confirmed
+startup checks completed and frames resumed with a fresh heartbeat and no fault.
+
+Corrected candidate 60-second runs passed at 14.184 / 14.222 / 14.115 FPS
+(median 14.184), each with 1,200 updates and no reported integrity fault:
+`60e1d1b2-d768-4580-9bf2-74764e4d10cd`,
+`6918e23b-aa57-4392-957e-1bda74f2d406`,
+`830fd980-b42b-4829-86b6-019ec1ee3522`.
+Normal profile `a92bab41-a852-46f3-aafc-8b71591bea90` passed for 120.193 seconds
+with 258 samples. Mean sampling/span, opaque blit and alpha blit times were
+30.276 / 0.679 / 22.789 ms; pixel raster was 53.746 ms. Mean opaque/alpha
+work was 13,740 / 163,915 pixels. The previous qualified opaque profile was
+0.870 ms at 13,719 pixels; this is a descriptive comparison of moving scenes,
+not an isolated instruction benchmark. Post-profile status
+`43546fe2-3c9a-48eb-abec-3bc58380f363` observed 8,148 frames, a fresh heartbeat
+and zero renderer/allocation/transfer faults. The current valid baseline runs
+span 14.160–14.297 FPS: no aggregate speed improvement is established.
+The required three-valid-run baseline median remains unavailable because of
+the pre-existing stop; source alignment qualification does not complete the
+broader alpha optimization or establish its arithmetic throughput.
+
+Padding adds 6,369 bytes of color/A8 contents for the current scene, plus at
+most 15 reserved bytes per plane and allocator overhead. There is no per-frame
+allocation. The 64-byte opaque scratch is removed; its assembly frame is now
+112 bytes. Previous alpha timings include staging, constant loads, register
+saves and different endpoint work, and do not establish that SIMD arithmetic
+itself is slower than scalar.
+
+## Previous qualified implementation
 
 The night garden retains 247 entities: 23 billboards and 224 particles, including
 176 grass clumps. Grass assets, 47-blade source groups, near/middle/far native

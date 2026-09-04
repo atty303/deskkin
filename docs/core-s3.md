@@ -366,27 +366,48 @@ renderer fault 18 (`BackgroundCheck`) and stops before frame presentation.
 
 ### Texture blits
 
-The portable `Blitter` interface accepts equal-length RGB565 source/destination
-slices, optional A8 and destination wire order. Native raster passes visible
-clipped/occlusion spans directly. Scaled raster preserves its existing sampler
-and uses reusable stack rows (640 bytes of colors and 320 bytes of alpha,
-16-byte aligned); there is no per-frame allocation.
+The portable `Blitter` interface accepts RGB565 source/destination slices,
+optional A8 and destination wire order. `blit` accepts equal lengths;
+`blit_from` accepts the complete readable backing slices and a source offset.
+Only the destination slice is writable. Native raster passes the texture backing
+storage after computing visible clipped/occlusion spans. Scaled raster preserves
+its sampler and uses reusable stack rows (640 bytes of colors and 320 bytes of
+alpha, 16-byte aligned); their initialized spare capacity is readable padding.
 
-CoreS3 copies opaque pixels eight at a time with PIE, including RGB565 byte
-swapping. Source and destination alignment are independent. Destination edges
-stay scalar; unaligned sources are copied within their valid span to a 64-byte scratch array aligned to 16 bytes. Each IRQ-locked call processes at most 32 pixels, saves
-and restores CPENABLE, and preserves q0/q1 in the lowest 32 bytes of a 64-byte
-assembly frame. Its upper 32 bytes remain reserved for windowed-ABI spills.
-No other PIE or shift register is changed by this copy kernel.
+CoreS3 prepares texture color/A8 planes at 16-byte-aligned offsets within
+ordinary allocations, with row strides rounded up to 16 pixels. The pinned
+Zephyr Rust allocator rejects layout alignment above 8 bytes, so each plane
+reserves up to 15 spare bytes and generates texels directly at the aligned
+offset; it does not copy an already-generated texture. Logical image dimensions and atlas frame
+positions remain separate from storage dimensions; padding is zero-filled at
+cache creation. No asset or grass composition changes are required.
+
+Opaque blits use eight-pixel PIE vectors with RGB565 byte swapping. Independently
+unaligned sources are assembled with `EE.SRC.Q.QUP` in registers, with no
+per-span memory scratch copy. Both enclosing loads must fit inside the supplied
+backing slice; otherwise the affected edge remains scalar. Destination edges
+stay scalar to avoid writing outside the clipped span. Every IRQ-locked call
+processes at most 32 pixels and restores CPENABLE. The 112-byte assembly frame
+preserves q0/q1 for aligned sources, plus q2/q3 and SAR_BYTE for unaligned
+sources. Its upper 32 bytes remain reserved for windowed-ABI spills. SAR and
+other PIE state are untouched. The funnel performs one additional vector load
+per call, and register saves still perform memory stores/loads.
 
 Generic alpha uses the scalar implementation. Four-bit component SIMD, packed
 scalar arithmetic with PIE transfers, and eight-bit component SIMD were measured
-on the unchanged grass scene; all were slower than opaque PIE plus scalar alpha.
+on the unchanged grass scene; their full paths were slower than opaque PIE
+plus scalar alpha. Those measurements include staging, constant loads,
+register saves and different endpoint work; they do not isolate SIMD arithmetic
+throughput. The source-alignment revision passed three 60-second device runs
+(median 14.184 FPS) and a 120-second normal profile. Its opaque blit mean was
+0.679 ms; aggregate FPS improvement over the prior implementation is not
+established. See `STATUS.md` for the incomplete baseline repetition and
+pre-existing long-run stop.
 Grass-specific binary-alpha classification is not implemented. Only the selected
 kernel remains in product code.
 
-Startup checks 82,176 source/destination halfword alignment, length 0–320,
-byte-order and alpha/no-alpha combinations against reference pixels and guards.
+Startup checks 164,352 source/destination halfword alignment, length 0–320,
+byte-order, alpha/no-alpha and padded/unpadded backing combinations against reference pixels and guards.
 A failed blit check publishes renderer fault 19 (`BlitCheck`) before presentation.
 The shared raster profile adds sampling/span overhead, opaque/alpha blit time,
 and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle

@@ -4,6 +4,26 @@ use crate::blend_rgb565;
 /// Slices have equal lengths. Implementations must not access outside them.
 pub trait Blitter {
     fn blit(&mut self, destination: &mut [u16], source: &[u16], alpha: Option<&[u8]>, wire: bool);
+
+    /// Draw `destination.len()` pixels starting at `offset`. The entire source
+    /// and optional alpha backing slices are readable, including padding;
+    /// only the destination slice is writable. The selected range must exist.
+    fn blit_from(
+        &mut self,
+        destination: &mut [u16],
+        source: &[u16],
+        offset: usize,
+        alpha: Option<&[u8]>,
+        wire: bool,
+    ) {
+        let end = offset.checked_add(destination.len()).expect("blit range");
+        self.blit(
+            destination,
+            &source[offset..end],
+            alpha.map(|a| &a[offset..end]),
+            wire,
+        );
+    }
 }
 
 pub struct ScalarBlitter;

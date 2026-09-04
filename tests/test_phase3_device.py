@@ -743,6 +743,32 @@ class Phase3DeviceTests(unittest.TestCase):
             )
             subprocess.run([str(executable)], check=True)
 
+    def test_amp_texture_storage_preserves_aligned_rows(self):
+        source = ROOT / "apps/core-s3-amp/renderer/src/texture_storage.rs"
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "texture_storage_test"
+            subprocess.run(
+                ["rustc", "--edition=2021", "--test", str(source), "-o", str(executable)],
+                check=True,
+            )
+            subprocess.run([str(executable)], check=True)
+
+    def test_amp_vector_span_bounds_include_only_backing_padding(self):
+        subprocess.run(
+            ["cargo", "build", "--locked", "-p", "deskkin-presentation", "--lib"],
+            cwd=ROOT, check=True,
+        )
+        source = ROOT / "apps/core-s3-amp/renderer/src/blit.rs"
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "blit_bounds_test"
+            subprocess.run(
+                ["rustc", "--edition=2021", "--test", str(source), "-o", str(executable),
+                 "--extern", f"deskkin_presentation={ROOT / 'target/debug/libdeskkin_presentation.rlib'}",
+                 "-L", f"dependency={ROOT / 'target/debug/deps'}"],
+                check=True,
+            )
+            subprocess.run([str(executable)], check=True)
+
     def test_profile_schema_is_exact_and_rfc1918(self):
         self.assertEqual(device.validate_profile(self.profile()), self.profile())
         for change in ({"extra": 1}, {"host_ipv4": "8.8.8.8"}, {"password": "short"}, {"schema_version": 2}):

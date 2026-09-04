@@ -609,13 +609,14 @@ fn raster_native(
                 source_row + usize::from(region.source_x) + (start as i32 - rect.x) as usize;
             let len = end - start;
             samples += len as u32;
-            blitter.blit(
+            blitter.blit_from(
                 &mut framebuffer[y * stride + start..y * stride + end],
-                &texture.pixels[source..source + len],
+                texture.pixels,
+                source,
                 texture
                     .coverage
                     .is_alpha()
-                    .then(|| &texture.coverage.alpha()[source..source + len]),
+                    .then(|| texture.coverage.alpha()),
                 big_endian,
             );
             x = end;
@@ -813,10 +814,11 @@ impl RasterRows<'_> {
                 };
                 colors.0[index] = color;
             }
-            blitter.blit(
+            blitter.blit_from(
                 &mut framebuffer[start..start + self.columns.len()],
-                &colors.0[..self.columns.len()],
-                ALPHA.then_some(&alphas.0[..self.columns.len()]),
+                &colors.0,
+                0,
+                ALPHA.then_some(&alphas.0),
                 BIG_ENDIAN,
             );
         }
