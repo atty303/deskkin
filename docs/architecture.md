@@ -93,8 +93,12 @@ and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor geometry, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
 The rasterizer preserves exact Q16 sampling with quotient/remainder stepping,
 reuses horizontal sample coordinates across rows, and selects filter/format/byte-order
-kernels before the pixel loop. Transparent samples skip color/background access;
-fully opaque samples skip blending and background reads. Bilinear interpolation
+kernels before the pixel loop. Native visible spans use a safe `Blitter` interface
+with native RGB565 source words, optional A8 and destination byte order. Scaled
+spans retain the coordinate sampler and gather into fixed 16-byte-aligned rows
+before blitting. The scalar default skips transparent destination access and
+fully opaque blending/background reads. CoreS3 accelerates opaque copies with
+PIE; measured generic alpha remains scalar. Bilinear interpolation
 retains its intermediate RGB565 rounding. Textures carry either implicit opaque
 coverage or A8 plus a packed one-bit-per-8x8-source-block mask, generated once
 from the alpha plane. Only blocks whose valid texels are all 255 have set bits;

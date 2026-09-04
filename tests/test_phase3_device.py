@@ -556,7 +556,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("const uint16_t nvs_failure = deskkin_nvs_last_failure();", supervisor)
         self.assertIn("response[65] = (uint8_t)(nvs_failure >> 8);", supervisor)
         self.assertIn("response[66] = (uint8_t)nvs_failure;", supervisor)
-        self.assertIn("#define STATUS_RESPONSE_SIZE 204", supervisor)
+        self.assertIn("#define STATUS_RESPONSE_SIZE 224", supervisor)
         self.assertIn("observe_renderer_stale(&renderer_stale_reported);", supervisor)
         self.assertIn("&AMP_SHARED->renderer_progress), &response[160]", supervisor)
         self.assertIn("&AMP_SHARED->display_progress), &response[164]", supervisor)

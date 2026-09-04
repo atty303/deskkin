@@ -45,7 +45,7 @@ WORLD_BENCHMARK_MIN_COVERAGE_MILLI = 800
 WORLD_BENCHMARK_MAX_STATUS_RESPONSE_MS = 1_000
 WORLD_BENCHMARK_MIN_STATUS_RESPONSES = 20
 WORLD_DEMO_ENTITY_COUNT = 247
-STATUS_RESPONSE_SIZE = 204
+STATUS_RESPONSE_SIZE = 224
 
 BOOT_ERRORS = {
     1: "boot_devices_unavailable",
@@ -784,13 +784,18 @@ def decode_world_status(status: bytes) -> dict[str, int]:
             "scaler_preparations": unsigned(192, 196),
             "profile_nearest_samples": unsigned(196, 200),
             "profile_bilinear_samples": unsigned(200, 204),
+            "sampling_us": unsigned(204, 208) if len(status) >= 224 else 0,
+            "opaque_blit_us": unsigned(208, 212) if len(status) >= 224 else 0,
+            "alpha_blit_us": unsigned(212, 216) if len(status) >= 224 else 0,
+            "opaque_blit_pixels": unsigned(216, 220) if len(status) >= 224 else 0,
+            "alpha_blit_pixels": unsigned(220, 224) if len(status) >= 224 else 0,
         }
     )
     return decoded
 
 
 PROFILE_FIELDS = ("coverage_us", "background_us", "scaler_setup_us", "pixel_raster_us",
-                  "coverage_tests", "scaler_preparations", "profile_nearest_samples", "profile_bilinear_samples")
+                  "coverage_tests", "scaler_preparations", "profile_nearest_samples", "profile_bilinear_samples", "sampling_us", "opaque_blit_us", "alpha_blit_us", "opaque_blit_pixels", "alpha_blit_pixels")
 
 
 def measure_raster(device_arg: str | None, duration: float) -> dict[str, object]:

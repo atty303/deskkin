@@ -12,7 +12,7 @@ use deskkin_presentation::{
     ProjectedBillboard, RasterPhase, SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture,
     TextureFilter, TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoMotion},
-    raster_scene_observed, sort_far_to_near,
+    raster_scene_with_blitter, sort_far_to_near,
 };
 use qoi::{Channels, Decoder};
 use slint::platform::software_renderer::{
@@ -24,6 +24,7 @@ use slint::{ComponentHandle, Image, LogicalPosition, PhysicalSize, Rgba8Pixel, S
 slint::include_modules!();
 
 mod background;
+mod blit;
 mod buffer_ownership;
 
 use buffer_ownership::BufferOwnership;
@@ -140,6 +141,7 @@ unsafe extern "C" {
     fn deskkin_deadline_missed();
     fn deskkin_shell_observe(shell: u8, property_matches: u8);
     fn deskkin_raster_profile(values: *const u32);
+    fn deskkin_blit_cycles() -> u32;
 }
 
 #[repr(u8)]
@@ -216,6 +218,7 @@ enum RendererFault {
     QoiDecode = 16,
     SharedSnapshot = 17,
     BackgroundCheck = 18,
+    BlitCheck = 19,
 }
 
 #[repr(u8)]
@@ -786,14 +789,15 @@ fn draw_world_scene(
     frame_index: u8,
     textures: &WorldTextures,
     occlusion: &mut Occlusion<'_>,
-    observer: &mut impl FnMut(RasterPhase),
+    context: (&mut impl FnMut(RasterPhase), &mut blit::PieBlitter),
 ) -> Result<deskkin_presentation::SceneStats, RendererFault> {
+    let (observer, blitter) = context;
     if projected.is_empty() {
-        raster_scene_observed(
+        raster_scene_with_blitter(
             pixels,
             WIDTH,
             &[],
-            background::PieBackground,
+            (background::PieBackground, blitter),
             true,
             occlusion,
             observer,
@@ -804,11 +808,11 @@ fn draw_world_scene(
         for (slot, value) in scene.iter_mut().zip(projected) {
             *slot = world_billboard(*value, decoded, frame_index, textures)?;
         }
-        raster_scene_observed(
+        raster_scene_with_blitter(
             pixels,
             WIDTH,
             &scene[..projected.len()],
-            background::PieBackground,
+            (background::PieBackground, blitter),
             true,
             occlusion,
             observer,
@@ -870,14 +874,15 @@ fn render_world(
     let raster_started = unsafe { deskkin_uptime_us() };
     let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut motion.cutoffs)
         .map_err(|_| RendererFault::RenderSkipped)?;
-    let mut profile = [0_u32; 8];
+    let mut profile = [0_u32; 13];
+    let mut blitter = blit::PieBlitter::default();
     let mut phase = RasterPhase::Idle;
-    let mut phase_started = unsafe { deskkin_uptime_us() };
+    let mut phase_started = unsafe { deskkin_blit_cycles() };
     let mut observer = |next: RasterPhase| {
-        let now = unsafe { deskkin_uptime_us() };
+        let now = unsafe { deskkin_blit_cycles() };
         if phase != RasterPhase::Idle {
             let index = phase as usize;
-            profile[index] = profile[index].saturating_add(elapsed_us(phase_started, now));
+            profile[index] = profile[index].saturating_add(now.wrapping_sub(phase_started) / 240);
         }
         phase = next;
         phase_started = now;
@@ -889,12 +894,15 @@ fn render_world(
         frame_index,
         textures,
         &mut occlusion,
-        &mut observer,
+        (&mut observer, &mut blitter),
     )?;
     profile[4] = stats.coverage_tests;
     profile[5] = stats.scaler_preparations;
     profile[6] = stats.raster.nearest_samples;
     profile[7] = stats.raster.bilinear_samples;
+    let blit_profile = blitter.profile();
+    profile[8] = profile[3].saturating_sub(blit_profile[0] + blit_profile[1]);
+    profile[9..13].copy_from_slice(&blit_profile);
     unsafe { deskkin_raster_profile(profile.as_ptr()) };
     let nearest_samples = stats.raster.nearest_samples;
     let bilinear_samples = stats.raster.bilinear_samples;
@@ -973,6 +981,17 @@ extern "C" fn rust_main() {
             deskkin_renderer_observe(
                 RendererStage::Failed as u8,
                 RendererFault::BackgroundCheck as u8,
+                0,
+                0,
+            )
+        };
+        return;
+    }
+    if !blit::self_test() {
+        unsafe {
+            deskkin_renderer_observe(
+                RendererStage::Failed as u8,
+                RendererFault::BlitCheck as u8,
                 0,
                 0,
             )

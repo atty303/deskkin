@@ -196,15 +196,15 @@ testing and span setup; nearest/bilinear counters count only visited samples
 after occlusion (still including alpha-zero samples within visited spans).
 Portable scene stats expose coverage-test and scaler-preparation counts. An
 optional phase observer separates coverage, background, scaler setup and pixel
-raster work without changing sampled pixels. APPCPU records wall-clock
-microseconds using the existing approximate RC_SLOW clock (including preemption
-and observer overhead), not CPU-exclusive time or PSRAM bus traffic. Setup
+raster work without changing sampled pixels. APPCPU derives phase microseconds
+from its 240 MHz cycle counter (including preemption and observer overhead),
+not CPU-exclusive time or PSRAM bus traffic. Setup
 includes validation, visibility selection and
 coordinate preparation; pixel raster includes span traversal and blending.
-Eight scalar values (four times, two counts and two sampled-pixel counts) are
+Thirteen scalar values (phase/blit times and operation/sample counts) are
 published together through a separate generation-checked shared slot. Only
 successful world frames publish; zero generation means unavailable. The USB
-status response is 204 bytes; the final 36 bytes carry this coherent record.
+status response is 224 bytes; the final 56 bytes carry this coherent record.
 Shell observation explicitly changes to Paired when entering world mode, so
 world sample/projection fields are not interpreted as setup-screen diagnostics.
 
@@ -363,3 +363,33 @@ exception after otherwise correct initial frames.
 At startup the same kernel is checked against expected pixels and guard words
 for all eight halfword alignments and lengths 0 through 320. Failure publishes
 renderer fault 18 (`BackgroundCheck`) and stops before frame presentation.
+
+### Texture blits
+
+The portable `Blitter` interface accepts equal-length RGB565 source/destination
+slices, optional A8 and destination wire order. Native raster passes visible
+clipped/occlusion spans directly. Scaled raster preserves its existing sampler
+and uses reusable stack rows (640 bytes of colors and 320 bytes of alpha,
+16-byte aligned); there is no per-frame allocation.
+
+CoreS3 copies opaque pixels eight at a time with PIE, including RGB565 byte
+swapping. Source and destination alignment are independent. Destination edges
+stay scalar; unaligned sources are copied within their valid span to a 64-byte scratch array aligned to 16 bytes. Each IRQ-locked call processes at most 32 pixels, saves
+and restores CPENABLE, and preserves q0/q1 in the lowest 32 bytes of a 64-byte
+assembly frame. Its upper 32 bytes remain reserved for windowed-ABI spills.
+No other PIE or shift register is changed by this copy kernel.
+
+Generic alpha uses the scalar implementation. Four-bit component SIMD, packed
+scalar arithmetic with PIE transfers, and eight-bit component SIMD were measured
+on the unchanged grass scene; all were slower than opaque PIE plus scalar alpha.
+Grass-specific binary-alpha classification is not implemented. Only the selected
+kernel remains in product code.
+
+Startup checks 82,176 source/destination halfword alignment, length 0–320,
+byte-order and alpha/no-alpha combinations against reference pixels and guards.
+A failed blit check publishes renderer fault 19 (`BlitCheck`) before presentation.
+The shared raster profile adds sampling/span overhead, opaque/alpha blit time,
+and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle
+counter, including elapsed preemption; sampling/span time is the pixel-phase
+residual after blits. This differs from older approximate RTC-based phase times.
+The USB status response is 224 bytes across supervisor, service and host decoder.

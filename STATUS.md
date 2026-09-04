@@ -2,80 +2,101 @@
 
 Updated: 2026-09-04
 
+## Active work
+
+No active implementation slice. Generic opaque PIE blits are qualified; the
+measured faster scalar alpha path is retained. Grass-specific SIMD is outside
+this completed scope.
+
 ## Current acceptance
 
-The night garden uses 247 entities: 23 billboards and 224 static particles.
-The added 176 grass clumps share three blade variants with native 96x48, 48x24
-and 6x3 px LODs. Planting favors the outer ground; larger near/middle LODs
-overlap into a denser foreground while the far LOD stays small. Each source
-group contains 47 fine blades and dense low growth with irregular edges.
-The existing six small-detail silhouettes retain
-12/6/3 px LODs. All particle foot anchors use ground height -1.0. Grass textures
-and masks add 52,041 bytes; all particle textures and masks total 55,461 bytes.
-Native-size raster retains binary alpha, clipping, painter order and tile
-occlusion without preparing scaler coordinates. Across a full camera turn,
-particle bounding boxes cover at most 222,408 pixels before clipping/occlusion.
+The night garden retains 247 entities: 23 billboards and 224 particles, including
+176 grass clumps. Grass assets, 47-blade source groups, near/middle/far native
+96x48/48x24/6x3 LODs, placement and density are unchanged. Application core,
+protocol and dependencies are unchanged. Grass-specific binary-alpha block
+classification is excluded.
 
-Projected entities and decoration descriptors use reusable renderer-owned PSRAM.
-The device scene array remains separate from recursive sorting. Its expanded
-renderer stack is 32 KiB (20 KiB additional PSRAM). ELF entry frames are
-18,144 bytes for draw_world_scene, 2,960 for raster_scene_observed,
-960 for render_world and 1,488 for rust_main. The background fill/wrapper/PIE
-frames add 80/32/48 bytes. These are selected ELF entry frames, not a measured
-whole-thread high-water mark. The desktop
-simulator allocates its scene list on the heap. No dependencies or protocol,
-persistence, pairing or framebuffer changes are included.
+Native clipped/occluded spans now use the safe portable `Blitter` interface.
+Scaled spans retain sampling coordinates and use fixed aligned color/A8 rows.
+The scalar default remains portable; the CoreS3 adapter copies opaque RGB565
+in eight-pixel vectors with byte swapping, independent source/destination
+alignment and scalar edges. Calls lock IRQs for at most 32 pixels and preserve
+q0/q1 and CPENABLE outside the windowed-ABI spill area. Generic alpha remains
+scalar because the measured SIMD/packed alternatives were slower. Unselected
+alpha kernels and comparison switches have been removed from product code.
 
-CoreS3 background spans now use 128-bit PIE stores with scalar alignment
-edges, preserving wire order, dither phase, coverage clipping and phase metrics.
-The portable background writer keeps its scalar default. Startup validates
-2,568 alignment/length cases against pixels and guard words before rendering.
-The leaf preserves q0 outside the windowed-ABI spill area; each at-most-320-pixel
-call locks interrupts and saves/restores CPENABLE. No dependencies were added.
+The unchanged background-PIE baseline measured 12.659, 12.433 and 12.551 FPS
+(median 12.551). All successful candidate benchmarks issued 1,200 updates and
+reported zero renderer, allocation, transfer, stale-state or atlas failures:
 
-Headless front, side and rear compositions were inspected for the grass baseline.
-Shared raster tests retain pixel equivalence in both byte orders, padded stride
-and occlusion cases. Strict Clippy and the full `mise run test` passed, including
-all AMP domains and inert recovery (build
-`58094e49-c54e-4bf3-9553-e3958e229194`). Fresh review and ABI delta review have
-no remaining actionable findings.
+| Candidate | 60-second FPS | Pixel mean | Alpha blit mean |
+| --- | ---: | ---: | ---: |
+| Background PIE baseline | 12.551 median | 62.315 ms* | unavailable |
+| Opaque PIE + scalar alpha (final) | 14.275 median | 53.309 ms | 22.705 ms |
+| Four-bit component SIMD | 11.554 | 70.298 ms | 40.808 ms |
+| Packed arithmetic + PIE copy | 11.529 | 70.627 ms | 41.047 ms |
+| Eight-bit component SIMD | 12.257 | 65.189 ms | 35.197 ms |
+| Eight-bit SIMD with PIE alpha expansion | 12.919 | 61.135 ms | 31.099 ms |
 
-Flash `04585cb4-0146-477f-a39c-bfc7bfd006c9` verified every AMP domain hash.
-The 60-second benchmark `e3fdaf8e-616b-497d-8b24-de45ebf1152e` observed 764
-completed frames over 59.917 seconds: 12.750 FPS, 1,203 deadline misses and all
-1,200 requested updates issued. Its final view contained all 247 entities.
-Last render/transfer was 77.112/33.768 ms, maximum render 91.637 ms. Renderer,
-allocation, transfer, stale-snapshot, touch-drop and cache faults remained zero.
-The same grass scene with scalar background measured 12.591 FPS in benchmark
-`4f5a5933-fd96-426d-906f-890942e2c8f1`. The soft 20 FPS target is still not met.
+*Baseline phase timings used approximate RTC conversion. Candidate phase/blit
+counters share the 240 MHz CCOUNT timebase. FPS uses the same benchmark clock.
+Profiles are 120-second normal-scene aggregates, not identical per-frame inputs.
+The 20 FPS goal remains unmet. Final selected-build benchmarks measured 14.275,
+14.188 and 14.332 FPS: median 14.275, a 13.7% gain over the baseline median.
+All three completed all 1,200 requested updates without integrity faults.
+Render maxima were 79.765–80.192 ms; the baseline maximum was 91.686 ms.
 
-Normal-scene profiling `854ced7b-e772-4ec4-a5d8-ce7d6ddc5c43` collected 260
-samples over 120 seconds. The scalar baseline profile
-`1ccb143a-b6f5-4701-811a-b3b91b74e1ca` used the same scene and duration:
+The final repository-wide `mise run test` passed, including host/portable tests,
+patch provenance and clean AMP/inert builds (`f90281e0-458e-4b30-8d90-c7d9509b01cc`).
+Fresh review of all 17 changed files found no actionable issue. Flash
+`c511847d-697e-4df1-86e7-c1d6a1431f57` verified every AMP domain hash.
+Final benchmark records are `20b8b165-4c7f-4909-ba80-445864842f6a`,
+`0b8ecfea-99b6-42b5-a97b-3ffb4efd2baa`, and
+`36f6dff3-399f-412f-8909-35f84ff5d775`.
+Final normal profile `5bdf88d4-ec97-4254-aa3d-9d40a9962621` collected 258 samples
+over 120.188 seconds. Mean coverage/background/setup/pixels were
+3.301/1.386/3.576/53.309 ms; sampling/span overhead, opaque blit and alpha blit
+were 29.733/0.870/22.705 ms. Mean opaque/alpha work was 13,719/163,904 pixels.
+Post-profile status `79860c99-196a-4354-ae59-d38ca40f3845` observed 5,211 completed
+frames, a fresh heartbeat, advancing renderer/display progress and zero
+renderer, allocation, transfer, stale-snapshot or touch-drop faults.
+Baseline benchmark records are `f5751f22-9626-4cee-96fe-a76fb0b26dd7`,
+`de723200-7232-44f3-8d36-c4039a42fd62`, and
+`0fa14a6b-3276-4c0c-b983-d0c922f94062`; baseline profile is
+`5d8aa986-3841-49ea-8292-e0e6b2215ed9`.
 
-| Phase | Scalar mean | PIE mean |
-| --- | --- | --- |
-| Coverage | 3.238 ms | 3.300 ms |
-| Background | 1.949 ms | 1.522 ms |
-| Scaler setup | 4.964 ms | 4.621 ms |
-| Pixel raster | 61.884 ms | 62.543 ms |
-| Sum | 72.035 ms | 71.986 ms |
+Benchmark/profile evidence, respectively:
 
-Background mean decreased about 22%, but these observational phase samples
-include preemption, instrumentation and scene motion; their total barely
-changed. A single FPS comparison does not establish a robust overall speedup.
-Pixel raster remains dominant. Post-measurement status
-`f33b8fb6-4e9f-452c-bec2-e560fc198da8` observed 2,887 completed frames, fresh
-Paired heartbeat, advancing renderer/display sequences and zero renderer,
-allocation, transfer, stale-snapshot or touch-drop faults.
+- Initial opaque screening: `c6060638-f6c0-4648-b582-9eb6efa4c093` /
+  `ba53dd78-1bca-45e7-8dcc-a7148c916897`.
+- Four-bit: `07e5ff66-8d15-4f7f-acef-090f528c95e8` /
+  `477fda46-712b-4740-8209-7b882b03a93a`.
+- Packed: `633adffd-a264-4846-bea9-46bd80ae2a50` /
+  `d19090fd-f917-41b7-93f4-cb5babe17736`.
+- Eight-bit: `c003e2be-da99-4825-9fd3-05267ef1bd64` /
+  `2dd73a7a-28d6-4724-8b70-c4719d2d0631`.
+- Eight-bit PIE expansion: `5a56178f-36e9-4fd9-b392-cd9ad9f04feb` /
+  `df9f2923-9320-422d-bb26-2fe19a1142ac`.
 
-The first PIE candidate stopped at 12 frames (failed benchmark
-`594d3c5c-46bf-4456-957b-262758e193ca`). JTAG found APPCPU in
-`_DoubleExceptionVector`, SP `0xffffff80`, EXCCAUSE 28, EXCVADDR `0x2c`, and
-DEPC in `_handle_excint`. Its q0 scratch overlapped the windowed-ABI base save
-area. Moving scratch to the lowest 16 bytes of a 48-byte frame was the only
-executable correction; the runs above then passed. Startup pixel correctness
-alone did not detect this register-spill corruption.
+Front/side/rear and enlarged translucent-region software images were inspected;
+none of the candidate arithmetic showed an obvious visual artifact. Component
+error statistics and amplified difference images are retained as local diagnostic
+artifacts, not acceptance thresholds. The actual SIMD candidate kernels passed
+on-device reference/guard checks across all halfword alignments, lengths 0–320
+and both byte orders. The selected startup check covers 82,176 combinations.
+LCD motion has not been visually observed through a camera in this task.
+
+New transient work areas are 960 bytes per scaled row, 64 bytes of copy scratch,
+a 64-byte assembly frame and a 16-byte blit counter object. Compiler frames and
+call nesting add overhead; these are buffer sizes, not a stack high-water mark.
+The renderer retains its existing 32 KiB PSRAM stack and does not add per-frame
+allocations. The shared profile grows by 20 bytes within existing reserved SRAM.
+
+A four-bit startup failure detected an inferred 32-bit constant table passed to
+a 16-bit SIMD ABI; explicit 16-bit constants passed the same hardware check.
+Earlier opaque runs stopped in fatal exception handling and were excluded.
+Qualified runs use direct CCOUNT reads and do not interrupt the CPU with JTAG;
+the exact cause of the earlier return/context failures was not established.
 
 ## Previous qualified baseline
 

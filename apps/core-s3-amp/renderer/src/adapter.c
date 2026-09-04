@@ -762,3 +762,22 @@ void deskkin_background_vectors(uint16_t *destination, const uint16_t *pattern,
     __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
     irq_unlock(key);
 }
+
+uint32_t deskkin_blit_cycles(void)
+{
+    uint32_t cycles;
+    __asm__ volatile("rsr.ccount %0" : "=r"(cycles));
+    return cycles;
+}
+extern void deskkin_copy_pie(uint16_t *, const uint16_t *, size_t, uint32_t);
+void deskkin_copy_vectors(uint16_t *dst, const uint16_t *src, size_t vectors, uint32_t wire)
+{
+    unsigned int key = irq_lock();
+    uint32_t saved;
+    __asm__ volatile("rsr.cpenable %0" : "=r"(saved));
+    uint32_t enabled = saved | (1U << 3);
+    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(enabled) : "memory");
+    deskkin_copy_pie(dst, src, vectors, wire);
+    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
+    irq_unlock(key);
+}

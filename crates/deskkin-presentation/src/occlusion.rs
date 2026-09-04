@@ -1,6 +1,7 @@
 use super::{
-    ProjectedBillboard, RasterError, RasterStats, ScreenRect, SourceSize, Texture, TextureFilter,
-    TextureRegion, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, raster_billboard_masked, validate_texture,
+    Blitter, ProjectedBillboard, RasterError, RasterStats, ScalarBlitter, ScreenRect, SourceSize,
+    Texture, TextureFilter, TextureRegion, VIEWPORT_HEIGHT, VIEWPORT_WIDTH,
+    raster_billboard_masked, validate_texture,
 };
 
 const TILE: usize = 8;
@@ -343,11 +344,33 @@ pub fn raster_scene_observed(
     framebuffer: &mut [u16],
     stride: usize,
     boards: &[SceneBillboard<'_>],
-    mut background_row: impl Background,
+    background_row: impl Background,
     wire: bool,
     occlusion: &mut Occlusion<'_>,
     observer: &mut impl FnMut(RasterPhase),
 ) -> Result<SceneStats, RasterError> {
+    raster_scene_with_blitter(
+        framebuffer,
+        stride,
+        boards,
+        (background_row, &mut ScalarBlitter),
+        wire,
+        occlusion,
+        observer,
+    )
+}
+
+/// Render with a caller-owned span blitter; clipping and sampling stay portable.
+pub fn raster_scene_with_blitter(
+    framebuffer: &mut [u16],
+    stride: usize,
+    boards: &[SceneBillboard<'_>],
+    backend: (impl Background, &mut impl Blitter),
+    wire: bool,
+    occlusion: &mut Occlusion<'_>,
+    observer: &mut impl FnMut(RasterPhase),
+) -> Result<SceneStats, RasterError> {
+    let (mut background_row, blitter) = backend;
     if stride < VIEWPORT_WIDTH as usize
         || stride
             .checked_mul(VIEWPORT_HEIGHT as usize)
@@ -419,7 +442,7 @@ pub fn raster_scene_observed(
             board.texture,
             board.region,
             wire,
-            (mask, observer),
+            (mask, observer, blitter),
         )?;
         let native = board.projected.filter == TextureFilter::Nearest
             && board.projected.screen_rect.width == i32::from(board.region.width)

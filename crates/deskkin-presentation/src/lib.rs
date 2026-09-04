@@ -13,7 +13,9 @@ extern crate std;
 
 include!(concat!(env!("OUT_DIR"), "/trig_table.rs"));
 
+mod blit;
 pub mod demo_world;
+pub use blit::{Blitter, ScalarBlitter};
 
 pub const TURN_UNITS: i64 = 65_536;
 pub const VIEWPORT_WIDTH: i32 = 320;
@@ -362,7 +364,7 @@ impl RateLimitedObservedYaw {
 mod occlusion;
 pub use occlusion::{
     Background, Coverage, Mask8, Occlusion, RasterPhase, SceneBillboard, SceneStats, ScreenTile,
-    build_opaque_mask, raster_scene, raster_scene_observed,
+    build_opaque_mask, raster_scene, raster_scene_observed, raster_scene_with_blitter,
 };
 
 #[derive(Clone, Copy)]
@@ -459,7 +461,7 @@ fn raster_billboard_ordered(
         texture,
         region,
         big_endian,
-        (None, &mut |_| {}),
+        (None, &mut |_| {}, &mut ScalarBlitter),
     )
 }
 
@@ -473,9 +475,10 @@ fn raster_billboard_masked(
     observation: (
         Option<(&Occlusion<'_>, usize)>,
         &mut impl FnMut(RasterPhase),
+        &mut impl Blitter,
     ),
 ) -> Result<RasterStats, RasterError> {
-    let (mask, observer) = observation;
+    let (mask, observer, blitter) = observation;
     if stride < VIEWPORT_WIDTH as usize || framebuffer.len() < stride * VIEWPORT_HEIGHT as usize {
         return Err(RasterError::InvalidFramebuffer);
     }
@@ -518,7 +521,7 @@ fn raster_billboard_masked(
             texture,
             region,
             big_endian,
-            mask,
+            (mask, blitter),
         );
         observer(RasterPhase::Setup);
         return Ok(RasterStats {
@@ -557,7 +560,13 @@ fn raster_billboard_masked(
         region,
     };
     observer(RasterPhase::Pixels);
-    let samples = rows.dispatch_visible(framebuffer, texture, projected.filter, big_endian, mask);
+    let samples = rows.dispatch_visible(
+        framebuffer,
+        texture,
+        projected.filter,
+        big_endian,
+        (mask, blitter),
+    );
     observer(RasterPhase::Setup);
     Ok(match projected.filter {
         TextureFilter::Nearest => RasterStats {
@@ -578,8 +587,9 @@ fn raster_native(
     texture: Texture<'_>,
     region: TextureRegion,
     big_endian: bool,
-    mask: Option<(&Occlusion<'_>, usize)>,
+    context: (Option<(&Occlusion<'_>, usize)>, &mut impl Blitter),
 ) -> u32 {
+    let (mask, blitter) = context;
     let rect = projected.screen_rect;
     let left = rect.x.max(0) as usize;
     let right = rect.x.saturating_add(rect.width).min(VIEWPORT_WIDTH) as usize;
@@ -595,35 +605,19 @@ fn raster_native(
                 map.visible_span(y, x, right, index)
             });
             let Some((start, end)) = span else { break };
-            for column in start..end {
-                let source =
-                    source_row + usize::from(region.source_x) + (column as i32 - rect.x) as usize;
-                let alpha = if texture.coverage.is_alpha() {
-                    texture.coverage.alpha()[source]
-                } else {
-                    255
-                };
-                samples += 1;
-                if alpha == 0 {
-                    continue;
-                }
-                let destination = &mut framebuffer[y * stride + column];
-                let color = texture.pixels[source];
-                let color = if alpha == 255 {
-                    color
-                } else {
-                    blend_rgb565(
-                        if big_endian {
-                            u16::from_be(*destination)
-                        } else {
-                            *destination
-                        },
-                        color,
-                        alpha,
-                    )
-                };
-                *destination = if big_endian { color.to_be() } else { color };
-            }
+            let source =
+                source_row + usize::from(region.source_x) + (start as i32 - rect.x) as usize;
+            let len = end - start;
+            samples += len as u32;
+            blitter.blit(
+                &mut framebuffer[y * stride + start..y * stride + end],
+                &texture.pixels[source..source + len],
+                texture
+                    .coverage
+                    .is_alpha()
+                    .then(|| &texture.coverage.alpha()[source..source + len]),
+                big_endian,
+            );
             x = end;
         }
     }
@@ -674,6 +668,9 @@ struct ColumnSample {
     fraction: u32,
 }
 
+#[repr(align(16))]
+struct SampleRow<T>(T);
+
 struct RasterRows<'a> {
     stride: usize,
     left: usize,
@@ -691,8 +688,9 @@ impl RasterRows<'_> {
         texture: Texture<'_>,
         filter: TextureFilter,
         big_endian: bool,
-        mask: Option<(&Occlusion<'_>, usize)>,
+        context: (Option<(&Occlusion<'_>, usize)>, &mut impl Blitter),
     ) -> u32 {
+        let (mask, blitter) = context;
         let total = (self.columns.len() * (self.bottom - self.top)) as u32;
         if let Some((map, index)) = mask {
             let mut samples = 0;
@@ -713,7 +711,13 @@ impl RasterRows<'_> {
                         y,
                         region: self.region,
                     }
-                    .dispatch(framebuffer, texture, filter, big_endian);
+                    .dispatch(
+                        framebuffer,
+                        texture,
+                        filter,
+                        big_endian,
+                        blitter,
+                    );
                     samples += ((end - start) * (row_end - row)) as u32;
                     x = end;
                 }
@@ -724,7 +728,7 @@ impl RasterRows<'_> {
             }
             samples
         } else {
-            self.dispatch(framebuffer, texture, filter, big_endian);
+            self.dispatch(framebuffer, texture, filter, big_endian, blitter);
             total
         }
     }
@@ -735,31 +739,32 @@ impl RasterRows<'_> {
         texture: Texture<'_>,
         filter: TextureFilter,
         big_endian: bool,
+        blitter: &mut impl Blitter,
     ) {
         match (filter, texture.coverage.is_alpha(), big_endian) {
             (TextureFilter::Nearest, false, false) => {
-                self.draw::<false, false, false>(framebuffer, texture);
+                self.draw::<false, false, false>(framebuffer, texture, blitter);
             }
             (TextureFilter::Nearest, false, true) => {
-                self.draw::<false, false, true>(framebuffer, texture);
+                self.draw::<false, false, true>(framebuffer, texture, blitter);
             }
             (TextureFilter::Nearest, true, false) => {
-                self.draw::<false, true, false>(framebuffer, texture);
+                self.draw::<false, true, false>(framebuffer, texture, blitter);
             }
             (TextureFilter::Nearest, true, true) => {
-                self.draw::<false, true, true>(framebuffer, texture);
+                self.draw::<false, true, true>(framebuffer, texture, blitter);
             }
             (TextureFilter::Bilinear, false, false) => {
-                self.draw::<true, false, false>(framebuffer, texture);
+                self.draw::<true, false, false>(framebuffer, texture, blitter);
             }
             (TextureFilter::Bilinear, false, true) => {
-                self.draw::<true, false, true>(framebuffer, texture);
+                self.draw::<true, false, true>(framebuffer, texture, blitter);
             }
             (TextureFilter::Bilinear, true, false) => {
-                self.draw::<true, true, false>(framebuffer, texture);
+                self.draw::<true, true, false>(framebuffer, texture, blitter);
             }
             (TextureFilter::Bilinear, true, true) => {
-                self.draw::<true, true, true>(framebuffer, texture);
+                self.draw::<true, true, true>(framebuffer, texture, blitter);
             }
         }
     }
@@ -768,7 +773,10 @@ impl RasterRows<'_> {
         mut self,
         framebuffer: &mut [u16],
         texture: Texture<'_>,
+        blitter: &mut impl Blitter,
     ) {
+        let mut colors = SampleRow([0u16; VIEWPORT_WIDTH as usize]);
+        let mut alphas = SampleRow([0u8; VIEWPORT_WIDTH as usize]);
         for destination_y in self.top..self.bottom {
             let coordinate = self.y.take();
             let sy = (coordinate >> 16) as usize;
@@ -779,10 +787,7 @@ impl RasterRows<'_> {
                 * usize::from(self.region.stride);
             let fraction_y = coordinate & 0xffff;
             let start = destination_y * self.stride + self.left;
-            for (destination, column) in framebuffer[start..start + self.columns.len()]
-                .iter_mut()
-                .zip(self.columns)
-            {
+            for (index, column) in self.columns.iter().enumerate() {
                 let source_index = first_row + usize::from(column.first);
                 // Bilinear+A8 retains the existing constant-alpha convention.
                 let alpha = if ALPHA {
@@ -790,9 +795,7 @@ impl RasterRows<'_> {
                 } else {
                     255
                 };
-                if alpha == 0 {
-                    continue;
-                }
+                alphas.0[index] = alpha;
                 let color = if BILINEAR {
                     let first = interpolate_rgb565(
                         texture.pixels[source_index],
@@ -808,18 +811,14 @@ impl RasterRows<'_> {
                 } else {
                     texture.pixels[source_index]
                 };
-                let color = if ALPHA && alpha != 255 {
-                    let background = if BIG_ENDIAN {
-                        u16::from_be(*destination)
-                    } else {
-                        *destination
-                    };
-                    blend_rgb565(background, color, alpha)
-                } else {
-                    color
-                };
-                *destination = if BIG_ENDIAN { color.to_be() } else { color };
+                colors.0[index] = color;
             }
+            blitter.blit(
+                &mut framebuffer[start..start + self.columns.len()],
+                &colors.0[..self.columns.len()],
+                ALPHA.then_some(&alphas.0[..self.columns.len()]),
+                BIG_ENDIAN,
+            );
         }
     }
 }
