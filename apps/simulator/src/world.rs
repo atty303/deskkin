@@ -11,7 +11,6 @@ use crate::StatusWindow;
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
-const BACKGROUND: u16 = demo_world::BACKGROUND;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct WorldMetrics {
@@ -62,7 +61,7 @@ impl WorldScene {
             character_frame: 0,
             character_frame_elapsed_ms: 0,
             decorations: decoration_textures(),
-            framebuffer: vec![BACKGROUND; WIDTH * HEIGHT],
+            framebuffer: vec![0; WIDTH * HEIGHT],
             metrics: WorldMetrics::default(),
         }
     }
@@ -84,7 +83,8 @@ impl WorldScene {
     ) -> Result<(), String> {
         self.advance(elapsed_ms);
         self.ensure_textures(ui, views)?;
-        self.framebuffer.fill(BACKGROUND);
+        demo_world::paint_background(&mut self.framebuffer, false)
+            .map_err(|error| format!("world background: {error:?}"))?;
 
         let entities = demo_world::entities(
             self.motion,

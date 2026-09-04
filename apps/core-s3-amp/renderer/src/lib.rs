@@ -706,7 +706,7 @@ fn render_world(
     unsafe { deskkin_renderer_progress(RendererProgress::Raster as u8) };
     motion.advance(started);
     let pixels = framebuffer.words_mut(index);
-    pixels.fill(demo_world::BACKGROUND.to_be());
+    demo_world::paint_background(pixels, true).map_err(|_| RendererFault::RenderSkipped)?;
     let camera = CameraPose {
         radius: WorldUnit::from_int(4),
         observed_azimuth: UnwrappedAngle::from_units(snapshot.observed_yaw),

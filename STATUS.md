@@ -4,6 +4,12 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
+The paired world's solid clear is replaced by a shared, allocation-free RGB565
+sky-to-ground gradient. Muted sage near the foreground character's feet suggests
+ground without floor geometry; navy above and deep green below keep the night
+garden's contrast. Fixed 4x4 dithering softens RGB565 banding without temporal
+noise. The existing back buffer is filled directly before billboard composition.
+
 The garden now has three persistent information-card slots with richer text.
 Availability and Notice retain their semantic meaning; absent views use labelled
 demo garden/field-note copy, and a third card is an exploration guide. The camera
@@ -12,23 +18,22 @@ unwrapped drag through observed yaw and the existing 180 degrees/s rate limit.
 The decorative objects, invisible coordinate model, internal DMA framebuffers,
 PSRAM cache ownership and pairing UI are preserved. No new dependencies.
 
-Headless front and 60-second previews were inspected. Portable camera tests cover
-fractional time, multiple turns and gesture restart; simulator tests cover three
-cards, semantic expiry and texture reuse. `mise run fix`, lint and targeted tests
-passed. The one final `mise run test` exposed a pre-existing host capacity-test
-race: expected connection rejection could occur during write instead of read.
-Its error assertion was corrected without changing production host code, then
-`mise run test:host` passed in full. `mise run test:core-s3` passed all AMP domains
-and inert recovery (build record `b9518716-9d7d-4194-92b6-02d3bdf93cfd`). APPCPU
-image size is 1,676,324 bytes within the existing 3 MiB slot. Fresh feature review
-and a delta review of the test correction found no required changes.
+Headless front and 60-second gradient previews were inspected. Background tests
+cover complete overwrite, invalid-buffer non-mutation, trailing guards, repeatability
+and native/wire byte-order equivalence. Existing scene and simulator tests pass.
+`mise run fix`, lint, targeted tests and the final `mise run test` passed, including
+all AMP domains and inert recovery (build record
+`e1ecb2b8-45e9-44ee-a625-37326e1b9d6c`). APPCPU image size is 1,678,244 bytes;
+the linker map places the 1,920-byte background table in `.flash.rodata` at
+0x3de8fcf8. No extra framebuffer or heap allocation is introduced. Fresh review
+found no required changes. The gradient is not flashed or live-qualified yet;
+LCD dark-tone/dither appearance and render timing remain live acceptance items.
 
-This three-card/automatic-camera revision is not flashed or live-qualified yet.
-The device still runs the preceding garden image, flashed with all domain hashes
-verified (record `b4424fc2-0627-498d-8b7e-847d3f4bed51`). Its status record
-`dd6ae22b-0af2-4d67-bcc7-c60cc547ae6a` showed Paired mode, 974 completed frames,
-fresh progress, and zero renderer/allocation/transfer/stale/touch-drop faults.
-The user liked its objects; these live results do not qualify the new revision.
+The three-card/automatic-camera revision was flashed with all AMP domain hashes
+verified (record `18092542-53ba-4f2d-8150-5d7e6e478959`). Status record
+`4af4f20a-f836-40b1-9a91-58a6bb8714d1` showed Paired mode, 632 completed frames
+(up from 147), fresh progress, and zero renderer/allocation/transfer/stale/touch-drop
+faults. The requested gradient is not part of that live image yet.
 
 ## Previous qualified baseline
 
@@ -79,7 +84,7 @@ stable far-to-near painter sorting, direct RGB565 nearest/bilinear/A8 raster,
 horizontal touch mapping, and 0.5 turn/s observed-yaw limiting.
 
 The simulator and CoreS3 share an invisible cylindrical night-garden scene with
-23 camera-facing billboards over solid `#16191d`: moving Character,
+23 camera-facing billboards over a dithered night-sky/ground gradient: moving Character,
 three information cards, a radially moving garden drone, three botanical
 terrariums, three lanterns, and twelve drifting lights. Availability and Notice
 use canonical 272x124 Slint captures; the custom renderer handles projection,

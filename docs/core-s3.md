@@ -140,8 +140,13 @@ active Character QOI loop is converted once to RGB565+A8. Three canonical
 in PSRAM (82,944 bytes total), plus a 243-byte light texture. Source provenance
 and prompts are in `assets/world/night-garden/README.md`. The custom rasterizer
 writes directly into the clipped final framebuffer: nearest+A8 for Character
-and decoration sprites, fixed-point bilinear for opaque information boards. Background is
-solid `#16191d`.
+and decoration sprites, fixed-point bilinear for opaque information boards.
+Solid clear is replaced by a shared static sky-to-ground RGB565 gradient with
+4x4 ordered dithering. A 1,920-byte flash-resident row table is copied directly
+into the owned internal framebuffer in wire byte order; no extra framebuffer,
+heap allocation, floor geometry, or per-pixel gradient calculation is needed.
+Its time is included in the existing total render duration, not billboard sampling
+counters. It remains unchanged by yaw, so continuous turns cannot create a seam.
 
 ## AMP memory and channels
 

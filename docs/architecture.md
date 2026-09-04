@@ -84,12 +84,17 @@ Slint remains the shared declarative UI, with exactly one owner per instance.
 The unpaired Setup/Pair/Confirm/Cancel shell is a full-screen Slint component.
 In paired mode, Availability and CompositionCheck are rendered from a reusable
 272×124 Slint billboard template into opaque canonical RGB565 textures. Camera
-movement never redraws those templates. A custom renderer clears to `#16191d`,
+movement never redraws those templates. A custom renderer replaces solid clear
+with a shared RGB565 night-sky/ground gradient,
 projects and sorts billboards, and writes clipped scaled pixels directly into
 the final 320×240 RGB565 framebuffer. Information textures use fixed-point
 bilinear sampling; Character and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
-floor, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
+floor geometry, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
+The background is a static screen-space gradient: dark blue above, a muted sage
+glow near the character's foreground feet, and deep green below. A compile-time
+four-pixel ordered-dither pattern per row avoids a full background texture and
+per-pixel gradient arithmetic. The same painter supports native and wire byte order.
 
 The paired night-garden demo contains a moving Character, three information cards,
 a radially moving garden drone, three terrariums, three

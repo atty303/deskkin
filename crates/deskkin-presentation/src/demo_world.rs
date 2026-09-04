@@ -2,11 +2,72 @@
 //! Rendering primitives remain independent of this scene's entity budget.
 
 use crate::{
-    Billboard, BillboardId, CylindricalPose, SourceSize, TextureFilter, TextureId, TouchYawAdapter,
-    UnwrappedAngle, WorldUnit, sin_q15,
+    Billboard, BillboardId, CylindricalPose, RasterError, SourceSize, TextureFilter, TextureId,
+    TouchYawAdapter, UnwrappedAngle, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, WorldUnit, sin_q15,
 };
 
-pub const BACKGROUND: u16 = 0x10c3;
+// One four-pixel dither period per row: 1,920 flash bytes, not a third framebuffer.
+static BACKGROUND_ROWS: [[u16; 4]; VIEWPORT_HEIGHT as usize] = background_rows();
+
+const fn background_rows() -> [[u16; 4]; VIEWPORT_HEIGHT as usize] {
+    let stops = [
+        (0, [20, 38, 56]),
+        (112, [48, 68, 74]),
+        (174, [71, 80, 74]),
+        (239, [36, 46, 41]),
+    ];
+    let bayer = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    let mut rows = [[0; 4]; VIEWPORT_HEIGHT as usize];
+    let mut y = 0;
+    let mut segment = 0;
+    while y < rows.len() {
+        if y > stops[segment + 1].0 {
+            segment += 1;
+        }
+        let (start_y, start) = stops[segment];
+        let (end_y, end) = stops[segment + 1];
+        let span = (end_y - start_y) as u32;
+        let offset = (y - start_y) as u32;
+        let mut x = 0;
+        while x < 4 {
+            let mut color = 0;
+            let mut channel = 0;
+            while channel < 3 {
+                let bits = if channel == 1 { 6 } else { 5 };
+                let shift = [11, 5, 0][channel];
+                let value_q8 =
+                    (start[channel] * (span - offset) + end[channel] * offset) * 256 / span;
+                let quantized = (value_q8 * ((1 << bits) - 1) + bayer[y % 4][x] * 4080) / 65_280;
+                color |= (quantized as u16) << shift;
+                channel += 1;
+            }
+            rows[y][x] = color;
+            x += 1;
+        }
+        y += 1;
+    }
+    rows
+}
+
+/// Replaces clear for the demo's packed 320x240 framebuffer. A static vertical
+/// gradient suggests ground without geometry or yaw-dependent seams. Wire order
+/// matches the `CoreS3` rasterizer; extra trailing storage is left untouched.
+pub fn paint_background(pixels: &mut [u16], wire_order: bool) -> Result<(), RasterError> {
+    let frame = pixels
+        .get_mut(..(VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize)
+        .ok_or(RasterError::InvalidFramebuffer)?;
+    for (row, colors) in frame
+        .chunks_exact_mut(VIEWPORT_WIDTH as usize)
+        .zip(&BACKGROUND_ROWS)
+    {
+        let colors = colors.map(|color| if wire_order { color.to_be() } else { color });
+        for span in row.chunks_exact_mut(4) {
+            span.copy_from_slice(&colors);
+        }
+    }
+    Ok(())
+}
+
 pub const CAPACITY: usize = 23;
 pub const SPRITE_SIZE: SourceSize = SourceSize {
     width: 96,
@@ -251,6 +312,47 @@ pub fn light_pixel(x: i32, y: i32) -> (u16, u8) {
 mod tests {
     use super::*;
     use crate::{CameraPose, project_billboard};
+
+    #[test]
+    fn background_covers_frame_preserves_guards_and_matches_wire_order() {
+        let length = (VIEWPORT_WIDTH * VIEWPORT_HEIGHT) as usize;
+        let mut native = std::vec![0xffff; length + 4];
+        let mut wire = native.clone();
+        paint_background(&mut native[..length - 1], false).unwrap_err();
+        assert!(native.iter().all(|&pixel| pixel == 0xffff));
+        paint_background(&mut native, false).unwrap();
+        paint_background(&mut wire, true).unwrap();
+        assert_eq!(&native[length..], &[0xffff; 4]);
+        assert_eq!(&wire[length..], &[0xffff; 4]);
+        assert!(
+            native[..length]
+                .iter()
+                .all(|&pixel| pixel != 0xffff && pixel != 0)
+        );
+        for (native, wire) in native[..length].iter().zip(&wire[..length]) {
+            assert_eq!(*native, u16::from_be(*wire));
+        }
+        let before = native.clone();
+        paint_background(&mut native, false).unwrap();
+        assert_eq!(native, before);
+        for row in native[..length].chunks_exact(VIEWPORT_WIDTH as usize) {
+            assert!(row.chunks_exact(4).all(|span| span == &row[..4]));
+        }
+        let channels = |color: u16| {
+            [
+                (color >> 11) * 255 / 31,
+                ((color >> 5) & 63) * 255 / 63,
+                (color & 31) * 255 / 31,
+            ]
+        };
+        let top = channels(native[0]);
+        let ground = channels(native[174 * VIEWPORT_WIDTH as usize]);
+        let bottom = channels(native[length - VIEWPORT_WIDTH as usize]);
+        assert!(top[2] > top[0]);
+        assert!(bottom[1] > bottom[0] && bottom[1] > bottom[2]);
+        assert!(ground.iter().sum::<u16>() > top.iter().sum::<u16>());
+        assert!(ground.iter().sum::<u16>() > bottom.iter().sum::<u16>());
+    }
 
     #[test]
     fn camera_tour_preserves_fractional_time_drag_and_multiple_turns() {
