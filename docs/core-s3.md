@@ -393,21 +393,27 @@ sources. Its upper 32 bytes remain reserved for windowed-ABI spills. SAR and
 other PIE state are untouched. The funnel performs one additional vector load
 per call, and register saves still perform memory stores/loads.
 
-Generic alpha uses the scalar implementation. Four-bit component SIMD, packed
-scalar arithmetic with PIE transfers, and eight-bit component SIMD were measured
-on the unchanged grass scene; their full paths were slower than opaque PIE
-plus scalar alpha. Those measurements include staging, constant loads,
-register saves and different endpoint work; they do not isolate SIMD arithmetic
-throughput. The source-alignment revision passed three 60-second device runs
-(median 14.184 FPS) and a 120-second normal profile. Its opaque blit mean was
-0.679 ms; aggregate FPS improvement over the prior implementation is not
-established. See `STATUS.md` for the incomplete baseline repetition and
-pre-existing long-run stop.
-Grass-specific binary-alpha classification is not implemented. Only the selected
-kernel remains in product code.
+Generic alpha reads A8 directly and expands eight values into 16-bit lanes in
+registers. It uses `weight = a8 + (a8 >> 7)` and
+`dst + ((src - dst) * weight >> 8)` for each RGB component, with exact transparent
+and opaque endpoints. This floor approximation can differ from the previous rounded
+interpolation. No alpha expansion buffer or per-span color copy is used. Complete
+zero-alpha vectors skip blending and destination access; fully opaque vectors
+copy source words without reading destination. Other vectors use the same
+generic arithmetic. There is no grass-specific binary mask kernel.
 
-Startup checks 164,352 source/destination halfword alignment, length 0–320,
-byte-order, alpha/no-alpha and padded/unpadded backing combinations against reference pixels and guards.
+Independent source/A8 alignment and enclosing loads are bounded by the supplied
+backing slices. Destination prefixes/tails use the same approximation in scalar
+code. Consecutive unaligned RGB565 vectors reuse the previous loaded vector.
+Each IRQ-locked alpha call handles at most 32 pixels and preserves q0..q7 in a
+192-byte internal SRAM state/mask object, with SAR and SAR_BYTE in a 64-byte
+assembly frame. The upper 32 frame bytes remain reserved for ABI spills.
+The sole renderer owns the state and IRQ exclusion serializes its use.
+Saved-register traffic remains; this is not a zero-memory-overhead SIMD call.
+
+Startup checks 328,704 source/destination alignment, length 0–320, byte-order,
+alpha/no-alpha and padded/unpadded backing combinations plus 12,800 RGB extreme
+and alpha cases against the candidate arithmetic and guards.
 A failed blit check publishes renderer fault 19 (`BlitCheck`) before presentation.
 The shared raster profile adds sampling/span overhead, opaque/alpha blit time,
 and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle

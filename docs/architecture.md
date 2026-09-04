@@ -98,7 +98,9 @@ with native RGB565 source words, optional A8 and destination byte order. Scaled
 spans retain the coordinate sampler and gather into fixed 16-byte-aligned rows
 before blitting. The scalar default skips transparent destination access and
 fully opaque blending/background reads. CoreS3 accelerates opaque copies with
-PIE; measured generic alpha remains scalar. Bilinear interpolation
+PIE and directly expands A8 into eight 16-bit lanes for approximate generic
+alpha composition. Whole transparent/opaque vectors skip composition, and
+scalar edges use the same approximation. Bilinear interpolation
 retains its intermediate RGB565 rounding. Textures carry either implicit opaque
 coverage or A8 plus a packed one-bit-per-8x8-source-block mask, generated once
 from the alpha plane. Only blocks whose valid texels are all 255 have set bits;

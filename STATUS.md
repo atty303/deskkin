@@ -4,195 +4,90 @@ Updated: 2026-09-04
 
 ## Active work
 
-Source alignment and opaque blit scratch removal are implemented and device-tested.
-Texture color/A8 planes use 16-byte-aligned offsets inside ordinary allocations
-and row strides padded to 16 pixels, generated directly at those offsets.
-Native and sampled spans expose complete backing slices plus offsets. Opaque
-PIE uses register funnels instead of per-span scratch copies; destination edges
-stay scalar. Grass composition/assets and alpha arithmetic are unchanged.
-Scaled sampling rows and q-register saves still cause memory traffic.
+Generic alpha SIMD qualification is complete; the selected implementation keeps
+source-aligned padded texture rows and opaque register funnels from `bd4d5bea`.
+A8 expands directly into 16-bit lanes; difference-form /256 interpolation keeps
+exact alpha endpoints. Entire transparent vectors skip destination access and
+entire opaque vectors copy directly. Remaining vectors use the generic blend;
+there is no grass-specific binary mixed-mask kernel. Grass assets, placement,
+density, size and LOD, application core, protocol and dependencies are unchanged.
 
-CoreS3 is connected. Only the command sandbox hides `/dev/ttyACM0`; physical
-commands run outside it. The previously flashed baseline was already stalled
-at 23,638 frames with stale heartbeat (status
-`b618b98a-7995-42cb-9d18-3e9f6264fd92`). USB reset restored progress. Baseline
-60-second runs `94692679-df22-4469-9d05-0050841f655c` and
-`80670b90-c709-45d3-9dbf-ad81319f097c` passed at 14.297 and 14.160 FPS.
-Third run `efbfa565-5221-4b78-a3f2-22ae1f124a55` stopped observing progress
-at about 51 seconds and is excluded. That pre-existing long-run stop remains
-unexplained; these two runs do not establish a three-run median.
+The alpha adapter uses 192 bytes of internal SRAM for q-state and masks and a
+64-byte assembly frame, preserving q0..q7, SAR, SAR_BYTE and CPENABLE with
+IRQ-locked calls of at most 32 pixels. There is no alpha expansion scratch or
+per-span source copy. Scaled sample rows and register-state traffic remain.
 
-First candidate flash `d3bf1366-1fc7-4ca5-910e-fac441d951b7` verified all domain
-hashes but stopped during startup. APPCPU JTAG observed `arch_system_halt`
-at `0x403d794a`, reason 4, and the `rust_begin_unwind`/`rust_panic_wrap` call
-chain. The pinned Zephyr `alloc_impl.rs` rejects every layout alignment above
-8 bytes; the initial `Vec` of 16-byte-aligned blocks requested such a layout.
-The revised storage uses ordinary `Vec<u16>`/`Vec<u8>` and up to 15 spare bytes
-per plane, then generates at an aligned internal offset without relocating
-populated pixels. Corrected flash `13396fb7-0df6-4f39-a374-9900a64499a2`
-verified every domain hash and passed the 164,352-case startup kernel check.
-Status `a5a5a875-37d2-4505-9061-0baca1ef712c` observed advancing frames and
-a fresh heartbeat with no renderer fault.
-OpenOCD needs `espusbjtag caps_descriptor 0x2000`; AMP core-specific GDB
-inspection used a temporary copy of its existing target config without SMP
-grouping. All temporary GDB servers/configs were terminated/removed.
+## Performance findings
 
-Host texture layout tests and 5,259,264 vector-span boundary combinations pass.
-The final `mise run test` passed, including clean firmware builds
-(`83cda519-cb1e-433c-bca8-59ea2f89b8f1`). Fresh independent review of all nine
-files, including the pinned allocator constraint, found no actionable issue.
-Final test-built flash `693eb470-4f6e-4a0c-82aa-1877fd5cfb26` verified all
-domain hashes; status `6e447465-35f9-48fe-a9d8-17cabbf7e90b` confirmed
-startup checks completed and frames resumed with a fresh heartbeat and no fault.
+All completed candidate screenings passed 60 seconds with 1,200 updates and
+zero reported integrity faults, followed by 120-second normal profiles:
 
-Corrected candidate 60-second runs passed at 14.184 / 14.222 / 14.115 FPS
-(median 14.184), each with 1,200 updates and no reported integrity fault:
-`60e1d1b2-d768-4580-9bf2-74764e4d10cd`,
-`6918e23b-aa57-4392-957e-1bda74f2d406`,
-`830fd980-b42b-4829-86b6-019ec1ee3522`.
-Normal profile `a92bab41-a852-46f3-aafc-8b71591bea90` passed for 120.193 seconds
-with 258 samples. Mean sampling/span, opaque blit and alpha blit times were
-30.276 / 0.679 / 22.789 ms; pixel raster was 53.746 ms. Mean opaque/alpha
-work was 13,740 / 163,915 pixels. The previous qualified opaque profile was
-0.870 ms at 13,719 pixels; this is a descriptive comparison of moving scenes,
-not an isolated instruction benchmark. Post-profile status
-`43546fe2-3c9a-48eb-abec-3bc58380f363` observed 8,148 frames, a fresh heartbeat
-and zero renderer/allocation/transfer faults. The current valid baseline runs
-span 14.160–14.297 FPS: no aggregate speed improvement is established.
-The required three-valid-run baseline median remains unavailable because of
-the pre-existing stop; source alignment qualification does not complete the
-broader alpha optimization or establish its arithmetic throughput.
-
-Padding adds 6,369 bytes of color/A8 contents for the current scene, plus at
-most 15 reserved bytes per plane and allocator overhead. There is no per-frame
-allocation. The 64-byte opaque scratch is removed; its assembly frame is now
-112 bytes. Previous alpha timings include staging, constant loads, register
-saves and different endpoint work, and do not establish that SIMD arithmetic
-itself is slower than scalar.
-
-## Previous qualified implementation
-
-The night garden retains 247 entities: 23 billboards and 224 particles, including
-176 grass clumps. Grass assets, 47-blade source groups, near/middle/far native
-96x48/48x24/6x3 LODs, placement and density are unchanged. Application core,
-protocol and dependencies are unchanged. Grass-specific binary-alpha block
-classification is excluded.
-
-Native clipped/occluded spans now use the safe portable `Blitter` interface.
-Scaled spans retain sampling coordinates and use fixed aligned color/A8 rows.
-The scalar default remains portable; the CoreS3 adapter copies opaque RGB565
-in eight-pixel vectors with byte swapping, independent source/destination
-alignment and scalar edges. Calls lock IRQs for at most 32 pixels and preserve
-q0/q1 and CPENABLE outside the windowed-ABI spill area. Generic alpha remains
-scalar because the measured SIMD/packed alternatives were slower. Unselected
-alpha kernels and comparison switches have been removed from product code.
-
-The unchanged background-PIE baseline measured 12.659, 12.433 and 12.551 FPS
-(median 12.551). All successful candidate benchmarks issued 1,200 updates and
-reported zero renderer, allocation, transfer, stale-state or atlas failures:
-
-| Candidate | 60-second FPS | Pixel mean | Alpha blit mean |
+| Candidate | FPS | Mean alpha blit | Mean pixel phase |
 | --- | ---: | ---: | ---: |
-| Background PIE baseline | 12.551 median | 62.315 ms* | unavailable |
-| Opaque PIE + scalar alpha (final) | 14.275 median | 53.309 ms | 22.705 ms |
-| Four-bit component SIMD | 11.554 | 70.298 ms | 40.808 ms |
-| Packed arithmetic + PIE copy | 11.529 | 70.627 ms | 41.047 ms |
-| Eight-bit component SIMD | 12.257 | 65.189 ms | 35.197 ms |
-| Eight-bit SIMD with PIE alpha expansion | 12.919 | 61.135 ms | 31.099 ms |
+| Padded-source scalar baseline (`bd4d5bea`) | 14.184 median | 22.789 ms | 53.746 ms |
+| Direct A8 SIMD, SRAM q-state | 14.297 | 21.396 ms | 53.481 ms |
+| Same arithmetic, PSRAM q-state | 14.336 | 21.562 ms | 53.754 ms |
+| SRAM with source vector reuse | 14.319 | 21.689 ms | 53.555 ms |
+| Plus all-transparent vector skip | 14.376 | 21.170 ms | 53.141 ms |
+| Plus all-opaque vector copy | 14.486 | 19.955 ms | 52.067 ms |
 
-*Baseline phase timings used approximate RTC conversion. Candidate phase/blit
-counters share the 240 MHz CCOUNT timebase. FPS uses the same benchmark clock.
-Profiles are 120-second normal-scene aggregates, not identical per-frame inputs.
-The 20 FPS goal remains unmet. Final selected-build benchmarks measured 14.275,
-14.188 and 14.332 FPS: median 14.275, a 13.7% gain over the baseline median.
-All three completed all 1,200 requested updates without integrity faults.
-Render maxima were 79.765–80.192 ms; the baseline maximum was 91.686 ms.
+Candidate ordering above is one-factor screening, not repeated-run medians.
+Final selected-version runs were 14.549 / 14.530 / 14.389 FPS (median 14.530),
+versus baseline 14.184 / 14.222 / 14.115 FPS (median 14.184): +2.44%. This exceeds
+the agreed 2% selection threshold, so the generic endpoint-aware SIMD path is
+retained. The 20 FPS guideline is not met. Source padding adds 6,369 bytes
+of scene color/A8 contents, plus at most 15 alignment bytes per plane.
 
-The final repository-wide `mise run test` passed, including host/portable tests,
-patch provenance and clean AMP/inert builds (`f90281e0-458e-4b30-8d90-c7d9509b01cc`).
-Fresh review of all 17 changed files found no actionable issue. Flash
-`c511847d-697e-4df1-86e7-c1d6a1431f57` verified every AMP domain hash.
-Final benchmark records are `20b8b165-4c7f-4909-ba80-445864842f6a`,
-`0b8ecfea-99b6-42b5-a97b-3ffb4efd2baa`, and
-`36f6dff3-399f-412f-8909-35f84ff5d775`.
-Final normal profile `5bdf88d4-ec97-4254-aa3d-9d40a9962621` collected 258 samples
-over 120.188 seconds. Mean coverage/background/setup/pixels were
-3.301/1.386/3.576/53.309 ms; sampling/span overhead, opaque blit and alpha blit
-were 29.733/0.870/22.705 ms. Mean opaque/alpha work was 13,719/163,904 pixels.
-Post-profile status `79860c99-196a-4354-ae59-d38ca40f3845` observed 5,211 completed
-frames, a fresh heartbeat, advancing renderer/display progress and zero
-renderer, allocation, transfer, stale-snapshot or touch-drop faults.
-Baseline benchmark records are `f5751f22-9626-4cee-96fe-a76fb0b26dd7`,
-`de723200-7232-44f3-8d36-c4039a42fd62`, and
-`0fa14a6b-3276-4c0c-b983-d0c922f94062`; baseline profile is
-`5d8aa986-3841-49ea-8292-e0e6b2215ed9`.
+A deterministic host preview at front/side/rear camera positions measured
+47–48% transparent, 46–49% opaque and only 3.1–6.3% intermediate-alpha pixels.
+For the front view, 166,458 alpha pixels form 3,571 spans; the padded alignment
+model predicts 6,046 bounded PIE calls. Thus scalar usually skips multiplication,
+source reads for zero alpha, and destination reads for opaque alpha. Assembly
+inspection confirms those skips. Unconditionally vectorizing the blend does
+more work than that baseline. Changing q-state memory alone had little effect.
 
-Benchmark/profile evidence, respectively:
+A temporary on-device counter probe captured one completed frame: 5,612 calls,
+141,720 vector pixels, 10.062 ms inside the assembly call, 11.460 ms including
+C-side IRQ/CPENABLE handling, and 18.519 ms total alpha blit. Remaining alpha
+time includes scalar edges, Rust span handling and call/preemption overhead;
+these are not separately attributed. The probe was removed from product code.
+JTAG acquisition was followed by a stop in `arch_system_halt` with reason 0;
+three reads returned the same frame. Do not treat them as independent samples
+or include the probe in performance qualification. Earlier normal profiles
+completed without JTAG. The older baseline's long-run stop remains unexplained.
 
-- Initial opaque screening: `c6060638-f6c0-4648-b582-9eb6efa4c093` /
-  `ba53dd78-1bca-45e7-8dcc-a7148c916897`.
-- Four-bit: `07e5ff66-8d15-4f7f-acef-090f528c95e8` /
-  `477fda46-712b-4740-8209-7b882b03a93a`.
-- Packed: `633adffd-a264-4846-bea9-46bd80ae2a50` /
-  `d19090fd-f917-41b7-93f4-cb5babe17736`.
-- Eight-bit: `c003e2be-da99-4825-9fd3-05267ef1bd64` /
-  `2dd73a7a-28d6-4724-8b70-c4719d2d0631`.
-- Eight-bit PIE expansion: `5a56178f-36e9-4fd9-b392-cd9ad9f04feb` /
-  `df9f2923-9320-422d-bb26-2fe19a1142ac`.
+The reported sampling field is pixel-phase time minus opaque/alpha blit time;
+it includes native span/occlusion and other overhead, not just sampling.
+CCOUNT durations include preemption. Renderer and display share APPCPU at equal
+priority with 1 ms time slices; the active SPI driver busy-polls DMA completion.
+The contribution of that CPU contention is not isolated by these measurements.
 
-Front/side/rear and enlarged translucent-region software images were inspected;
-none of the candidate arithmetic showed an obvious visual artifact. Component
-error statistics and amplified difference images are retained as local diagnostic
-artifacts, not acceptance thresholds. The actual SIMD candidate kernels passed
-on-device reference/guard checks across all halfword alignments, lengths 0–320
-and both byte orders. The selected startup check covers 82,176 combinations.
-LCD motion has not been visually observed through a camera in this task.
+Evidence and diagnostic source/images are retained locally under
+`.deskkin/experiments/alpha-direct/` (runs.json, alpha-distribution.json,
+kernel-probe.json, comparison PNGs and candidate source snapshots). Component
+RGB8 error maxima across the three rendered views were 17 / 9 / 17, with
+channel means below 0.84. Visual comparison and enlarged translucent regions
+showed no clear artifact; differences are diagnostic, not acceptance thresholds.
+LCD motion has not been observed through a camera.
 
-New transient work areas are 960 bytes per scaled row, 64 bytes of copy scratch,
-a 64-byte assembly frame and a 16-byte blit counter object. Compiler frames and
-call nesting add overhead; these are buffer sizes, not a stack high-water mark.
-The renderer retains its existing 32 KiB PSRAM stack and does not add per-frame
-allocations. The shared profile grows by 20 bytes within existing reserved SRAM.
+## Verification state
 
-A four-bit startup failure detected an inferred 32-bit constant table passed to
-a 16-bit SIMD ABI; explicit 16-bit constants passed the same hardware check.
-Earlier opaque runs stopped in fatal exception handling and were excluded.
-Qualified runs use direct CCOUNT reads and do not interrupt the CPU with JTAG;
-the exact cause of the earlier return/context failures was not established.
-
-## Previous qualified baseline
-
-CoreS3 builds inherit the caller's Cargo network policy instead of forcing an
-offline cache prerequisite. Both AMP manifests pass locked dependency fetching
-from an empty temporary Cargo cache; regression tests cover absent, enabled, and
-disabled caller offline settings. Fresh review and the final repository-wide
-`mise run test` pass (build record
-`383d0226-56eb-4a06-9d3f-45e55030e906`).
-
-The user has completed visual acceptance of the world scene. All 16 dependency
-patches pass the host unified-diff parser regression, and isolated replay from
-their pinned pristine source files matches the installed patched trees byte for
-byte. SPI patch hunk metadata now matches the source after sleep removal.
-
-The intermittent APPCPU display stop is fixed and qualified by a physical
-60-second benchmark. JTAG captured both frozen runs in Xtensa's permanent
-`_DoubleExceptionVector`: the exception handler tried to restore a context
-through a null base pointer in a state consistent with an interrupt-return
-collision.
-APPCPU had only the 1 kHz level-3 timer and one level-1 shared interrupt enabled;
-the latter contained only GDMA RX0/TX0 EOF sources. Zephyr enabled those EOF
-interrupts on every DMA start even though SPI supplied no completion callback
-and polled the SPI HAL instead. Removing that implicated but unused level-1
-interrupt eliminated the observed failure in two consecutive physical
-qualification runs; no interrupt-history trace was available to establish the
-exact collision sequence.
-
-The pinned GDMA patch now enables peripheral completion interrupts only when a
-callback exists. Memory-to-memory DMA and callback-backed DMA retain their
-interrupt behavior. The SPI completion loop uses timeout-aware busy polling
-without an extra tick sleep. Display and renderer stay equal priority and each
-has a one-tick, 1 ms per-thread slice. Direct GDMA from the two internal-SRAM
-framebuffers and all PSRAM ownership remain unchanged.
+Host guards cover 5,259,264 opaque and 5,259,264 independent color/A8 span
+combinations, plus alpha endpoint/component arithmetic. Hardware startup covers
+328,704 alignment/length/order/backing combinations and 12,800 endpoint/color
+extremes. The full-endpoint candidate passed startup and its initial live runs.
+The final `mise run test` passed (build record
+`a2e454f1-2130-4c0d-b456-3c04fee1d156`). Fresh independent review of all six
+changed files found no actionable issues. The selected source was flashed as
+`6ae4e869-ca20-4057-b42d-23f52c603216`; all three final 60-second benchmarks
+completed 1,200 updates, with no allocation/transfer failures or stale
+snapshots. They also verified continued rendering across more than 180 seconds.
+Their run IDs and results are retained in `alpha-direct/runs.json`. A final
+status read confirmed 4,341 completed frames, fresh heartbeat and renderer
+fault 0 (`38c92438-ae26-4ba2-9ffb-42047409cd82`).
+The first benchmark after flash overlapped startup self-tests and measured only
+34.637 seconds, so it is excluded rather than counted as a performance run.
+No remote publication is authorized.
 
 ## Current baseline
 
@@ -272,89 +167,6 @@ and timings are measurements; typed faults, stale shared state, zero completed
 frames, allocation/transfer failure, and incomplete observation are integrity
 failures. The diagnostic writer applies a closed field allowlist before any
 local record is persisted.
-
-## Verification state
-
-The current clean MCUboot/PROCPU/APPCPU build succeeds with strict
-PROCPU/APPCPU separation. The PROCPU static image ends at `0x3fce4650`, its
-libc heap ends at the APPCPU origin `0x3fce4c00`, and the APPCPU image begins
-at that same address. The device completes AP startup, publishes the main-stack
-handoff, creates the 9,216-byte phase heap, and completes `esp_wifi_init`, its
-mode setup, and the boot coordinator join. The pinned Zephyr patch series also
-applies from a clean upstream HEAD and passes the normal bootstrap verifier.
-
-Three independent failures were separated during live bring-up. PROCPU
-NVS/flash work initially disabled the shared instruction cache while APPCPU
-executed from IROM. AP-image loading then exposed a PROCPU heap panic when it
-ran on a PSRAM stack during cache-disabled flash reads. Finally, the
-independently loaded APPCPU inherited window state and the first entry
-trampoline placed its stack pointer 16 bytes beyond the Zephyr interrupt-stack
-allocation. Its first call8 spill therefore repeated indefinitely. AP loading
-now runs on the PROCPU internal main stack. The APPCPU entry clears inherited
-window state, establishes the reset window, uses the exact end of the first
-2 KiB Zephyr interrupt stack, and tail-jumps into normal C startup. Runtime NVS
-remains serialized and stalls core 1 only for an actual cache-disabled NVS
-interval. APPCPU whole-stack initialization is disabled because it overwrote
-that active pre-kernel stack; its terminated main stack is still zeroized and
-reclaimed, but its boot high-water value remains unavailable.
-
-The APPCPU entry trampoline is part of the repository's ordered, digest-checked
-Zephyr patch series. Product builds no longer rewrite the shared pinned Zephyr
-checkout around each invocation. Touch-ring loss is accumulated from the
-generations actually skipped by the APPCPU consumer and remains visible in
-later heartbeat publications.
-
-The encrypted Wi-Fi profile was provisioned through the authorized local
-profile path, and device-only confirmation completed pairing with the configured
-desktop host. The previously qualified AMP product was flashed to every domain through
-`/dev/ttyACM0`; every write passed hash verification and reset (flash record
-`b65187a8-c44a-4d89-a945-0e5a077f613d`). USB status record
-`bee223e9-79dc-4cc7-aab3-636a1d0ec91e` reports paired shell 4,
-`heartbeat_freshness=1`, `renderer_stage=4`, `renderer_fault=0`,
-`boot_stage=9`, 40 MHz display SPI, progressing frames, and no allocation,
-transfer, stale-state, touch-drop, or boot fault.
-
-A 60-second USB push-stream observation crossed two real service disconnect and
-reconnect sequences. Shell publication remained 4 throughout; the former
-paired `4 -> 2 -> 4` transition that briefly rendered Setup required was not
-observed, and no diagnostic event was dropped. Physical world benchmark record
-`01ed62d0-5736-4210-a125-3943b71c0a96` completed all 1,200 requested updates
-with 1,205 frames at 20.132 measured FPS, zero deadline misses, four simultaneous
-billboards, and zero allocation, transfer, stale-snapshot, and atlas-cache
-failures. The five-batch 40 MHz full-frame transfer measured 31.780 ms last and
-33.789 ms maximum, restored from the prior 46--61 ms range while rendering
-continued concurrently. The benchmark runner retains the benchmark-scene
-sample separately from the terminal post-benchmark sample, so removal of the
-synthetic Notice after completion cannot incorrectly fail the four-billboard
-integrity check.
-
-An APPCPU-only 2 kHz trial did not complete AMP startup, so the product retains
-the verified 1 kHz system tick. Display and renderer each use a one-tick slice,
-meeting the 1 ms worker-interleaving contract without changing the global tick.
-
-For the current source, `mise run fix`, the device-tool suite, patch provenance
-verification, and a clean MCUboot plus PROCPU plus APPCPU sysbuild pass (build
-record `57ac7a0a-90d9-4518-84f6-23bcf342f896`). Flash record
-`08b847cb-a10a-4a43-863c-aac64cc35e6d` verified all three domains and reset.
-Physical benchmark `165bbc51-900e-4a4b-8972-f34ff8d45409` completed all 1,200
-updates over 59.94 measured seconds with 1,165 frames at 19.436 FPS. It reported
-456 measured deadline misses, four visible billboards, a 32.102 ms last and
-38.934 ms maximum five-batch transfer, and zero renderer, stale-snapshot,
-allocation, transfer, touch-drop, or atlas-cache fault. A later status record
-`8f6b50e3-e0cd-4348-bf66-8de43c9c8891` observed 1,686 completed frames with a
-fresh heartbeat and both renderer/display progress sequences still advancing.
-A consecutive second benchmark
-`dd9eaf51-9558-43a0-a265-ad264e5057d6` again completed all 1,200 updates and
-1,165 frames over 59.913 seconds at 19.444 FPS with all integrity-fault counts
-zero. Its last transfer was 31.689 ms; the boot-lifetime maximum remained
-38.934 ms. Post-benchmark status
-`ea74da0a-f154-4955-a3d4-fa348d10210f` observed 4,230 completed frames, a fresh
-heartbeat, and advancing renderer/display progress. The repository-wide final
-test passed, including host/portable suites, patch provenance, and clean
-MCUboot, PROCPU, APPCPU, and inert-recovery builds (build record
-`97a0a03c-9e76-4d1e-869c-45fefb98e7ea`). Fresh review found no code issue; its
-one documentation finding was resolved by separating direct JTAG observations
-from the inferred interrupt sequence.
 
 ## Next work
 

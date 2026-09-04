@@ -781,3 +781,31 @@ void deskkin_copy_vectors(uint16_t *dst, const uint16_t *src, size_t vectors, ui
     __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
     irq_unlock(key);
 }
+
+/* Single renderer owner; access is serialized by the bounded IRQ lock. The
+ * ordinary data section is internal SRAM, unlike the renderer's PSRAM stack. */
+static struct {
+    uint32_t saved_q[32];
+    uint16_t masks[4][8];
+} __attribute__((aligned(16))) alpha_pie_state = {
+    .masks = {
+        {1, 1, 1, 1, 1, 1, 1, 1},
+        {31, 31, 31, 31, 31, 31, 31, 31},
+        {0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0},
+        {0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00},
+    },
+};
+extern void deskkin_alpha_pie(uint16_t *, const uint16_t *, const uint8_t *, size_t,
+                              uint32_t, void *);
+void deskkin_alpha_vectors(uint16_t *dst, const uint16_t *src, const uint8_t *alpha,
+                           size_t vectors, uint32_t wire)
+{
+    unsigned int key = irq_lock();
+    uint32_t saved;
+    __asm__ volatile("rsr.cpenable %0" : "=r"(saved));
+    uint32_t enabled = saved | (1U << 3);
+    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(enabled) : "memory");
+    deskkin_alpha_pie(dst, src, alpha, vectors, wire, &alpha_pie_state);
+    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
+    irq_unlock(key);
+}

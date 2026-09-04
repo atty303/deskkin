@@ -6,6 +6,13 @@ use deskkin_presentation::{Blitter, ScalarBlitter};
 struct Aligned<T>(T);
 extern "C" {
     fn deskkin_blit_cycles() -> u32;
+    fn deskkin_alpha_vectors(
+        dst: *mut u16,
+        src: *const u16,
+        alpha: *const u8,
+        vectors: usize,
+        wire: u32,
+    );
     fn deskkin_copy_vectors(dst: *mut u16, src: *const u16, vectors: usize, wire: u32);
 }
 
@@ -41,11 +48,40 @@ impl Blitter for PieBlitter {
     ) {
         let end = start.checked_add(dst.len()).expect("blit range");
         let src = &source[start..end];
+        let alpha_backing = alpha;
         let alpha = alpha.map(|a| &a[start..end]);
         let started = unsafe { deskkin_blit_cycles() };
         let kind = usize::from(alpha.is_some());
         if let Some(alpha) = alpha {
-            ScalarBlitter.blit(dst, src, Some(alpha), wire);
+            let backing = alpha_backing.unwrap();
+            let (prefix, bulk) = alpha_span(
+                dst.as_ptr() as usize,
+                source.as_ptr() as usize,
+                source.len(),
+                backing.as_ptr() as usize,
+                backing.len(),
+                start,
+                dst.len(),
+            );
+            alpha_scalar(&mut dst[..prefix], &src[..prefix], &alpha[..prefix], wire);
+            for offset in (prefix..prefix + bulk).step_by(32) {
+                let len = (prefix + bulk - offset).min(32);
+                unsafe {
+                    deskkin_alpha_vectors(
+                        dst[offset..].as_mut_ptr(),
+                        source.as_ptr().add(start + offset),
+                        backing.as_ptr().add(start + offset),
+                        len / 8,
+                        u32::from(wire),
+                    );
+                }
+            }
+            alpha_scalar(
+                &mut dst[prefix + bulk..],
+                &src[prefix + bulk..],
+                &alpha[prefix + bulk..],
+                wire,
+            );
         } else {
             let (prefix, bulk) = vector_span(
                 dst.as_ptr() as usize,
@@ -72,6 +108,53 @@ impl Blitter for PieBlitter {
             self.cycles[kind].wrapping_add(unsafe { deskkin_blit_cycles() }.wrapping_sub(started));
         self.pixels[kind] += dst.len() as u32;
     }
+}
+
+fn alpha_pixel(dst: u16, src: u16, alpha: u8) -> u16 {
+    let weight = i32::from(alpha) + i32::from(alpha >> 7);
+    let channel = |shift: u32, mask: u16| {
+        let d = i32::from((dst >> shift) & mask);
+        let s = i32::from((src >> shift) & mask);
+        (d + (((s - d) * weight) >> 8)) as u16
+    };
+    (channel(11, 31) << 11) | (channel(5, 63) << 5) | channel(0, 31)
+}
+
+fn alpha_scalar(dst: &mut [u16], src: &[u16], alpha: &[u8], wire: bool) {
+    for ((d, &s), &a) in dst.iter_mut().zip(src).zip(alpha) {
+        if a == 0 {
+            continue;
+        }
+        let color = if a == 255 {
+            s
+        } else {
+            alpha_pixel(if wire { u16::from_be(*d) } else { *d }, s, a)
+        };
+        *d = if wire { color.to_be() } else { color };
+    }
+}
+
+fn alpha_span(
+    dst: usize,
+    source: usize,
+    source_len: usize,
+    alpha: usize,
+    alpha_len: usize,
+    start: usize,
+    len: usize,
+) -> (usize, usize) {
+    let (mut prefix, _) = vector_span(dst, source, source_len, start, len);
+    while prefix < len && ((alpha + start + prefix) & !15) < alpha {
+        prefix = (prefix + 8).min(len);
+    }
+    let mut bulk = (len - prefix) / 8 * 8;
+    while bulk > 0
+        && ((source + 2 * (start + prefix + bulk)).div_ceil(16) * 16 > source + source_len * 2
+            || (alpha + start + prefix + bulk).div_ceil(16) * 16 > alpha + alpha_len)
+    {
+        bulk -= 8;
+    }
+    (prefix, bulk)
 }
 
 fn vector_span(
@@ -102,7 +185,7 @@ pub fn self_test() -> bool {
     for (i, pixel) in src.0.iter_mut().enumerate() {
         *pixel = (i as u16).wrapping_mul(31337);
     }
-    for source_offset in 0..8 {
+    for source_offset in 0..16 {
         for destination_offset in 0..8 {
             for len in 0..=320 {
                 for (wire, has_alpha, padded) in [
@@ -139,7 +222,7 @@ pub fn self_test() -> bool {
                             let c = src.0[si];
                             let c = if has_alpha {
                                 let mut d = [0xa55a];
-                                ScalarBlitter.blit(&mut d, &[c], Some(&[alpha[si]]), wire);
+                                alpha_scalar(&mut d, &[c], &[alpha[si]], wire);
                                 if wire { u16::from_be(d[0]) } else { d[0] }
                             } else {
                                 c
@@ -156,12 +239,93 @@ pub fn self_test() -> bool {
             }
         }
     }
+    let mut endpoint_alpha = Aligned([0u8; 16]);
+    for destination in [0u16, 0xffff, 0xf800, 0x07e0, 0x001f] {
+        for source in [0, 0xffff, 0xf800, 0x07e0, 0x001f] {
+            src.0.fill(source);
+            for alpha in 0..=255u8 {
+                endpoint_alpha.0.fill(alpha);
+                for wire in [false, true] {
+                    dst.0.fill(0xa55a);
+                    let d = if wire {
+                        destination.to_be()
+                    } else {
+                        destination
+                    };
+                    dst.0[8..16].fill(d);
+                    PieBlitter::default().blit_from(
+                        &mut dst.0[8..16],
+                        &src.0,
+                        0,
+                        Some(&endpoint_alpha.0),
+                        wire,
+                    );
+                    let expected = alpha_pixel(destination, source, alpha);
+                    let expected = if wire { expected.to_be() } else { expected };
+                    if dst.0[8..16].iter().any(|&p| p != expected)
+                        || dst.0[..8].iter().chain(&dst.0[16..]).any(|&p| p != 0xa55a)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
     true
 }
 
 #[cfg(test)]
 mod tests {
-    use super::vector_span;
+    use super::{alpha_pixel, alpha_span, vector_span};
+
+    #[test]
+    fn alpha_endpoints_and_component_bounds() {
+        for d in 0..64u16 {
+            for s in 0..64u16 {
+                for a in 0..=255u8 {
+                    let pixel = alpha_pixel(d << 5, s << 5, a);
+                    assert_eq!(pixel & !0x07e0, 0);
+                    assert!((d.min(s)..=d.max(s)).contains(&(pixel >> 5)));
+                    if a == 0 {
+                        assert_eq!(pixel, d << 5);
+                    }
+                    if a == 255 {
+                        assert_eq!(pixel, s << 5);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alpha_vector_reads_stay_in_independent_backings() {
+        for sp in (0..16).step_by(2) {
+            for dp in (0..16).step_by(2) {
+                for ap in 0..16 {
+                    for len in 0..=320 {
+                        for before in [0, 1, 7, 15] {
+                            for after in [0, 1, 7, 15] {
+                                let size = before + len + after;
+                                let (prefix, bulk) =
+                                    alpha_span(64 + dp, 64 + sp, size, 64 + ap, size, before, len);
+                                assert!(prefix + bulk <= len);
+                                assert_eq!(bulk % 8, 0);
+                                if bulk > 0 {
+                                    assert_eq!((64 + dp + prefix * 2) % 16, 0);
+                                    for (base, scale) in [(64 + sp, 2), (64 + ap, 1)] {
+                                        let first = base + (before + prefix) * scale;
+                                        let end = first + bulk * scale;
+                                        assert!(first & !15 >= base);
+                                        assert!(end.div_ceil(16) * 16 <= base + size * scale);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn vector_reads_and_writes_stay_in_backing_slices() {
