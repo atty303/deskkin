@@ -4,64 +4,57 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
-Paired-world telemetry now selects world fields correctly. An optional raster
-observer publishes coherent per-frame coverage/background/setup/pixel times and
-counts; `core-s3:raster-profile` samples the unchanged scene into bounded local
-aggregates. USB status and all service response buffers are 204 bytes. This
-slice adds measurement, not a renderer algorithm optimization.
+Background composition scans the cutoff map once per tile band, retaining at
+most 20 visible spans in 80 bytes of PSRAM-stack scratch, then reuses those
+spans across the 8 or 16 rows. Four-pixel pattern stores replace per-pixel
+pattern indexing. Each row's background callback still runs once in order.
+The product retains 8x8 tiles, conservative opaque coverage and painter order.
+The existing scaler coordinate table, textures, internal-SRAM double
+framebuffers, DMA and scheduling remain unchanged; no dependency, persistent
+allocation or diagnostic schema is added.
 
-The measurement firmware is flashed, all AMP domain hashes verified (record
-`829abf63-4ea5-482d-949d-e58127656dac`). A 60.204-second live profile collected
-130 distinct frames (record `fca5cc6e-35cf-410e-9f80-4d6c62fb2bfe`):
+The final image is flashed with all AMP domain hashes verified (record
+`764900b5-14a0-4dd2-b769-2dbc7c4c5ef3`). Normal-scene 120-second profiles before
+and after sampled 259 and 260 distinct frames respectively:
 
-| Phase | Mean | Min-max |
+| Phase | Before mean | Final mean |
 | --- | --- | --- |
-| Coverage | 1.180 ms | 0.189-1.757 ms |
-| Background | 10.342 ms | 9.891-11.893 ms |
-| Scaler setup | 1.551 ms | 0.735-3.234 ms |
-| Pixel raster | 25.655 ms | 19.481-29.862 ms |
+| Coverage | 1.064 ms | 1.147 ms |
+| Background | 10.259 ms | 2.126 ms |
+| Scaler setup | 1.643 ms | 1.538 ms |
+| Pixel raster | 28.604 ms | 28.718 ms |
+| Sum | 41.570 ms | 33.529 ms |
 
-Mean counts were 226 coverage tests, 19 scaler preparations, 21,220 nearest
-samples and 13,097 bilinear samples. These are sampled-frame wall times from
-the existing approximate RC_SLOW clock, including preemption and instrumentation;
-they do not measure exclusive CPU time, PSRAM traffic or matched-scene speedup.
-Pixel raster plus background account for about 93% of the measured phase sum.
-Reducing repeated accesses in those paths is the next optimization candidate;
-memory bandwidth as the limiting cause remains unproven. No further renderer
-optimization is implemented by this measurement slice.
+Profile records are `1c5c381a-aebf-48de-a24d-5011868fb033` and
+`7baa79b4-9f4c-4e5d-ace8-bca57ea7c2bb`. Background is about 79% shorter and
+the measured phase sum about 19% shorter. Mean nearest/bilinear sample counts
+were 20,499/14,256 before and 20,465/14,271 after. Times use the existing
+approximate RC_SLOW wall clock and include preemption and instrumentation.
+These are comparable full-camera-turn samples, not frame-locked replay,
+exclusive CPU time, measured PSRAM traffic or an FPS improvement guarantee.
 
-Post-profile status remains Paired and fresh with 2,206 completed frames,
-44.093 ms last render, 32.501 ms last transfer, and zero renderer, allocation,
-transfer, stale-snapshot and touch-drop faults (record
-`c4f11e50-c0f5-4554-9809-6fd222aacae6`). Whole-thread stack high-water and matched
-device A/B performance remain unverified.
+A separately flashed arithmetic-coordinate candidate was not retained: its
+pixel/setup means were 30.498/0.739 ms versus 28.718/1.538 ms with the original
+coordinate table and the same background optimization (profile
+`57d98bcc-6140-4023-9e91-658641825561`). Reducing table reads by recomputing
+coordinates did not improve combined pixel/setup time in this trial.
 
-The renderer keeps 8x8 source masks and screen tiles, but builds coverage once
-over board bounds and then renders in painter order. Scaler coordinates are
-prepared once per non-hidden board and reused across spans; unoccluded boards
-use continuous loops. Masks without opaque blocks bypass coverage testing,
-and frames without coverage use continuous background writes. A caller-owned
-u16 cutoff table uses 2,400 bytes allocated once in APPCPU PSRAM. Source masks
-still total 415 bytes. Internal-SRAM double framebuffers, DMA and scheduling
-are unchanged; per-frame heap allocation is not added.
+Post-profile status is Paired and fresh, with 3,201 completed frames, last
+render/transfer 32.578/32.445 ms and zero renderer, allocation, transfer,
+stale-snapshot and touch-drop faults (record
+`3653d948-8faa-43e0-b388-87f0dd689eef`). Whole-thread stack high-water and
+frame-locked device A/B remain unverified.
 
-Targeted portable/simulator tests preserve exact painter pixels for both 8x8 and
-16x16 tiles, source atlas offsets, clipping, alpha holes, wire order and camera
-motion. Tests also check scratch reuse and one scaler preparation per drawn
-board. Host release samples (eight frames, 12 boards) took 0.568 ms painter /
-0.575 ms 8x8 for sparse non-opaque sprites, and 7.274 / 7.280 ms for overlapping
-non-opaque sprites. Opaque overlap took 20.159 ms painter / 2.900 ms 8x8 /
-3.859 ms 16x16; sparse opaque took 1.583 / 1.659 / 1.708 ms. These are host
-samples, not CoreS3 performance guarantees. The product retains 8x8 because
-16x16 saved coverage tests but lost enough occlusion to cost more in this test.
-`mise run fix`, strict Clippy, portable/simulator tests and final `mise run test`
-passed. Independent review found a missing service response-buffer expansion;
-both C and Rust buffers were fixed before flash and a cross-boundary capacity
-regression test was added. The 51 device tooling tests pass (one optional age
-case skipped in the targeted invocation), delta review has no required changes,
-and the post-review clean `test:core-s3` build passed for all AMP domains and
-inert recovery (record `2e9991f1-248f-4b7e-a141-bb588074fae2`). APPCPU image size
-is 1,737,136 bytes.
+`mise run fix`, strict Clippy, portable/simulator checks and the once-run full
+`mise run test` passed. After rejecting the coordinate candidate, the 24
+presentation tests and strict Clippy passed again, and all AMP domains plus
+inert recovery rebuilt successfully (record
+`ef04d4a6-5bf3-4809-8056-e1223bb70571`). APPCPU image size is 1,737,340 bytes.
+Tests compare exact pixels and framebuffer guards with the independent raster
+oracle and painter output, including clipping, atlas regions, alpha holes,
+wire order, both tile sizes, empty coverage and maximum alternating background
+spans. Fresh review's architecture-document mismatch was corrected; delta
+review has no remaining required changes.
 
 The paired world has a crisp, dark-green ground region below a muted sky.
 Its boundary follows the character's projected foot anchor using the same
@@ -84,8 +77,8 @@ cover complete overwrite, invalid-buffer non-mutation, trailing guards, repeatab
 and native/wire byte-order equivalence, plus foot tracking across depth, camera
 height, turn seams and viewport extremes. Simulator tests verify full-height
 portrait capture and scene tests verify exactly one portrait among three cards.
-The linker map places the 3,840-byte background table in `.flash.rodata` at
-0x3de8f5ac. Background drawing adds no heap allocation; demo card textures use
+The 3,840-byte background table remains flash-resident. Background drawing
+adds no heap allocation; demo card textures use
 190,400 bytes in PSRAM. Background time is included in world-raster and total
 render timing. The ground/portrait revision was flashed and visually accepted.
 

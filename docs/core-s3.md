@@ -170,7 +170,9 @@ Farther samples and background under a certified tile are omitted, while nearer
 A8 layers retain their painter order. A reusable 2,400-byte u16 screen cutoff
 table is allocated once in PSRAM. It is built over board bounds before drawing;
 scaler coordinates are prepared once per non-hidden board and reused across
-spans. Boards without occlusion retain continuous raster loops. Source footprint
+spans. Background visible spans are scanned once per tile band into 80 bytes of
+stack scratch and reused across its rows, with four-pixel pattern stores.
+Boards without occlusion retain continuous raster loops. Source footprint
 coordinates are reused per tile column/row, and wholly non-opaque masks bypass
 coverage testing. The portable API also supports 16x16 screen tiles with 600
 bytes of storage, independently of the unchanged 8x8 source masks. There is no

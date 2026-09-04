@@ -110,8 +110,10 @@ are reused by row and column; masks with no opaque block are excluded. Drawing
 then visits boards in painter order, preparing scaler coordinates once per
 non-hidden board and reusing them across tile spans. Unoccluded boards use one
 continuous raster call. Background is omitted only below guaranteed opaque
-tiles; frames without any coverage use continuous background writes. A reusable
-caller-owned u16 cutoff table stores painter index + 1 (zero means no occluder),
+tiles; visible background spans are scanned once per tile band and reused across
+its rows with four-pixel pattern stores. Frames without any coverage use continuous
+background writes. A reusable caller-owned u16 cutoff table stores painter
+index + 1 (zero means no occluder),
 with an explicit limit of 65,535 boards. There is no depth or per-entity visibility
 buffer. Screen tiles can be 8x8 or 16x16 independently of the source mask;
 the product uses 8x8. Sampling counters count visited destination samples after

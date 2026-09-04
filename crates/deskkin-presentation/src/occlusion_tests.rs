@@ -102,6 +102,47 @@ fn board(
 }
 
 #[test]
+fn alternating_opaque_columns_preserve_every_background_span() {
+    let texture = Texture {
+        size: SourceSize {
+            width: 1,
+            height: 1,
+        },
+        pixels: &[0xf81f],
+        coverage: Coverage::Opaque,
+    };
+    let region = TextureRegion {
+        source_x: 0,
+        source_y: 0,
+        width: 1,
+        height: 1,
+        stride: 1,
+    };
+    for offset in [0, 8] {
+        let boards: std::vec::Vec<_> = (0..20)
+            .map(|i| {
+                board(
+                    texture,
+                    region,
+                    ScreenRect {
+                        x: i * 16 + offset,
+                        y: 0,
+                        width: 8,
+                        height: 240,
+                    },
+                    1,
+                    i as u16,
+                    TextureFilter::Nearest,
+                )
+            })
+            .collect();
+        for wire in [false, true] {
+            compare(&boards, wire);
+        }
+    }
+}
+
+#[test]
 fn mask_marks_only_completely_opaque_valid_texels() {
     let size = SourceSize {
         width: 17,

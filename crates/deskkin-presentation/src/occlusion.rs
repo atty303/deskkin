@@ -348,34 +348,39 @@ pub fn raster_scene_observed(
     observer(RasterPhase::Background);
     let tile = occlusion.tile.pixels();
     let columns = occlusion.columns();
-    for y in 0..VIEWPORT_HEIGHT as usize {
-        let colors = background_row(y).map(|c| if wire { c.to_be() } else { c });
+    // At most 20 alternating visible spans in the 40-column 8-pixel grid.
+    let mut spans = [[0_u16; 2]; VIEWPORT_WIDTH as usize / 16];
+    for band in (0..VIEWPORT_HEIGHT as usize).step_by(tile) {
+        let mut count = 0;
         if stats.opaque_tiles == 0 {
-            for chunk in
-                framebuffer[y * stride..y * stride + VIEWPORT_WIDTH as usize].chunks_exact_mut(4)
-            {
-                chunk.copy_from_slice(&colors);
+            spans[0] = [0, VIEWPORT_WIDTH as u16];
+            count = 1;
+        } else {
+            let cutoffs = &occlusion.cutoffs[band / tile * columns..][..columns];
+            let mut column = 0;
+            while column < columns {
+                if cutoffs[column] != 0 {
+                    column += 1;
+                    continue;
+                }
+                let start = column;
+                column += 1;
+                while column < columns && cutoffs[column] == 0 {
+                    column += 1;
+                }
+                spans[count] = [(start * tile) as u16, (column * tile) as u16];
+                count += 1;
             }
-            continue;
         }
-        let mut x = 0;
-        while x < VIEWPORT_WIDTH as usize {
-            if occlusion.cutoffs[y / tile * columns + x / tile] != 0 {
-                x += tile;
-                continue;
-            }
-            let start = x;
-            x += tile;
-            while x < VIEWPORT_WIDTH as usize
-                && occlusion.cutoffs[y / tile * columns + x / tile] == 0
-            {
-                x += tile;
-            }
-            for (i, pixel) in framebuffer[y * stride + start..y * stride + x]
-                .iter_mut()
-                .enumerate()
-            {
-                *pixel = colors[i % 4];
+        for y in band..(band + tile).min(VIEWPORT_HEIGHT as usize) {
+            let colors = background_row(y).map(|c| if wire { c.to_be() } else { c });
+            for &[start, end] in &spans[..count] {
+                for chunk in framebuffer
+                    [y * stride + usize::from(start)..y * stride + usize::from(end)]
+                    .chunks_exact_mut(4)
+                {
+                    chunk.copy_from_slice(&colors);
+                }
             }
         }
     }
