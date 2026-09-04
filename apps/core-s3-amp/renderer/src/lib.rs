@@ -8,9 +8,9 @@ extern crate zephyr;
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::{cell::RefCell, ffi::c_int, marker::PhantomData, ptr::NonNull, time::Duration};
 use deskkin_presentation::{
-    BillboardId, CameraPose, Coverage, Mask8, PetAnimationState, PetAnimator, ProjectedBillboard,
-    SceneBillboard, ScreenRect, SourceSize, Texture, TextureFilter, TextureId, TextureRegion,
-    UnwrappedAngle, WorldUnit, build_opaque_mask,
+    BillboardId, CameraPose, Coverage, Mask8, Occlusion, PetAnimationState, PetAnimator,
+    ProjectedBillboard, SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture, TextureFilter,
+    TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoMotion},
     project_billboard, raster_scene, sort_far_to_near,
 };
@@ -688,6 +688,7 @@ fn ensure_world_textures(
 struct WorldMotion {
     scene: DemoMotion,
     updated_at_us: u64,
+    cutoffs: Vec<u16>,
 }
 
 impl WorldMotion {
@@ -695,6 +696,7 @@ impl WorldMotion {
         Self {
             scene: DemoMotion::default(),
             updated_at_us: now_us,
+            cutoffs: vec![0; ScreenTile::Eight.cells()],
         }
     }
 
@@ -833,6 +835,8 @@ fn render_world(
     let sort_us = elapsed_us(sort_started, unsafe { deskkin_uptime_us() });
     let raster_started = unsafe { deskkin_uptime_us() };
     let ground = demo_world::ground_line(&projected[..count]) as usize;
+    let mut occlusion = Occlusion::new(ScreenTile::Eight, &mut motion.cutoffs)
+        .map_err(|_| RendererFault::RenderSkipped)?;
     let stats = if count == 0 {
         raster_scene(
             pixels,
@@ -840,6 +844,7 @@ fn render_world(
             &[],
             |y| demo_world::background_row(y, ground),
             true,
+            &mut occlusion,
         )
     } else {
         let mut scene =
@@ -853,6 +858,7 @@ fn render_world(
             &scene[..count],
             |y| demo_world::background_row(y, ground),
             true,
+            &mut occlusion,
         )
     }
     .map_err(|_| RendererFault::RenderSkipped)?;

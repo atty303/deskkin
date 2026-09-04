@@ -104,10 +104,17 @@ plane and texture dimensions, including atlas regions.
 The screen is divided into 8x8 tiles. Each tile finds the nearest single billboard
 that guarantees full opaque coverage, then draws only it and nearer billboards
 in the existing far-to-near/ID order. Unknown and partially covered tiles remain
-conservative; several partial occluders are not combined. Adjacent eligible tiles
-are coalesced into horizontal spans to reduce scaler setup. Background is omitted
-only below guaranteed opaque tiles. No depth values or per-entity visibility
-buffers are stored. Sampling counters count visited destination samples after
+conservative; several partial occluders are not combined. Coverage is prepared
+front-to-back over each board's complete-tile bounds. Source footprint endpoints
+are reused by row and column; masks with no opaque block are excluded. Drawing
+then visits boards in painter order, preparing scaler coordinates once per
+non-hidden board and reusing them across tile spans. Unoccluded boards use one
+continuous raster call. Background is omitted only below guaranteed opaque
+tiles; frames without any coverage use continuous background writes. A reusable
+caller-owned u16 cutoff table stores painter index + 1 (zero means no occluder),
+with an explicit limit of 65,535 boards. There is no depth or per-entity visibility
+buffer. Screen tiles can be 8x8 or 16x16 independently of the source mask;
+the product uses 8x8. Sampling counters count visited destination samples after
 occlusion, including transparent samples; skipped samples are not counted.
 The background separates a muted sky gradient from darker green ground with a
 crisp boundary at the character's projected billboard bottom. It follows observed

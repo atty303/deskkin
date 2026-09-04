@@ -166,12 +166,20 @@ Each bit certifies all valid texels are 255, not merely that some are nonzero.
 The renderer uses 8x8 screen-tile occlusion with conservative nearest-sample
 source-footprint checks; opaque RGB565 cards need only full rectangle coverage.
 Farther samples and background under a certified tile are omitted, while nearer
-A8 layers retain their painter order. Tile cutoffs are temporary for one screen
-tile row, with adjacent draw spans merged; there is no depth buffer or per-entity
-screen mask. Cutoff/scene scratch uses the existing PSRAM renderer stack and no
-per-frame heap allocation. The existing world-raster duration includes coverage
+A8 layers retain their painter order. A reusable 2,400-byte u16 screen cutoff
+table is allocated once in PSRAM. It is built over board bounds before drawing;
+scaler coordinates are prepared once per non-hidden board and reused across
+spans. Boards without occlusion retain continuous raster loops. Source footprint
+coordinates are reused per tile column/row, and wholly non-opaque masks bypass
+coverage testing. The portable API also supports 16x16 screen tiles with 600
+bytes of storage, independently of the unchanged 8x8 source masks. There is no
+depth buffer or per-entity screen mask. Scene/coordinate scratch uses the existing
+PSRAM renderer stack; no per-frame heap allocation is added. The existing world-raster duration includes coverage
 testing and span setup; nearest/bilinear counters count only visited samples
 after occlusion (still including alpha-zero samples within visited spans).
+Portable scene stats additionally expose coverage-test and scaler-preparation
+counts for deterministic conformance and timing samples; no new per-frame log
+or USB schema is introduced.
 
 ## AMP memory and channels
 

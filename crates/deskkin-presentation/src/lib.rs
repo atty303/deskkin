@@ -305,7 +305,10 @@ impl RateLimitedObservedYaw {
 }
 
 mod occlusion;
-pub use occlusion::{Coverage, Mask8, SceneBillboard, SceneStats, build_opaque_mask, raster_scene};
+pub use occlusion::{
+    Coverage, Mask8, Occlusion, SceneBillboard, SceneStats, ScreenTile, build_opaque_mask,
+    raster_scene,
+};
 
 #[derive(Clone, Copy)]
 pub struct Texture<'a> {
@@ -394,30 +397,25 @@ fn raster_billboard_ordered(
     region: TextureRegion,
     big_endian: bool,
 ) -> Result<RasterStats, RasterError> {
-    raster_billboard_clipped(
+    raster_billboard_masked(
         framebuffer,
         stride,
         projected,
         texture,
         region,
         big_endian,
-        ScreenRect {
-            x: 0,
-            y: 0,
-            width: VIEWPORT_WIDTH,
-            height: VIEWPORT_HEIGHT,
-        },
+        None,
     )
 }
 
-fn raster_billboard_clipped(
+fn raster_billboard_masked(
     framebuffer: &mut [u16],
     stride: usize,
     projected: ProjectedBillboard,
     texture: Texture<'_>,
     region: TextureRegion,
     big_endian: bool,
-    clip: ScreenRect,
+    mask: Option<(&Occlusion<'_>, usize)>,
 ) -> Result<RasterStats, RasterError> {
     if stride < VIEWPORT_WIDTH as usize || framebuffer.len() < stride * VIEWPORT_HEIGHT as usize {
         return Err(RasterError::InvalidFramebuffer);
@@ -426,19 +424,27 @@ fn raster_billboard_clipped(
     if projected.screen_rect.width <= 0 || projected.screen_rect.height <= 0 {
         return Err(RasterError::InvalidTexture);
     }
-    let left = projected.screen_rect.x.max(clip.x);
-    let top = projected.screen_rect.y.max(clip.y);
+    let left = projected.screen_rect.x.max(0);
+    let top = projected.screen_rect.y.max(0);
     let right = projected
         .screen_rect
         .x
         .saturating_add(projected.screen_rect.width)
-        .min(clip.x + clip.width);
+        .min(VIEWPORT_WIDTH);
     let bottom = projected
         .screen_rect
         .y
         .saturating_add(projected.screen_rect.height)
-        .min(clip.y + clip.height);
+        .min(VIEWPORT_HEIGHT);
     if left >= right || top >= bottom {
+        return Ok(RasterStats::default());
+    }
+    if let Some((map, index)) = mask
+        && (top as usize..bottom as usize).all(|y| {
+            map.visible_span(y, left as usize, right as usize, index)
+                .is_none()
+        })
+    {
         return Ok(RasterStats::default());
     }
     let mut x = AxisStepper::new(
@@ -471,8 +477,7 @@ fn raster_billboard_clipped(
         y,
         region,
     };
-    rows.dispatch(framebuffer, texture, projected.filter, big_endian);
-    let samples = ((right - left) * (bottom - top)) as u32;
+    let samples = rows.dispatch_visible(framebuffer, texture, projected.filter, big_endian, mask);
     Ok(match projected.filter {
         TextureFilter::Nearest => RasterStats {
             nearest_samples: samples,
@@ -487,6 +492,7 @@ fn raster_billboard_clipped(
 
 // Carrying the division remainder preserves floor(offset * source / destination)
 // exactly, including clipped starts and non-integral scale factors.
+#[derive(Clone, Copy)]
 struct AxisStepper {
     coordinate: u32,
     step: u32,
@@ -539,6 +545,50 @@ struct RasterRows<'a> {
 }
 
 impl RasterRows<'_> {
+    fn dispatch_visible(
+        self,
+        framebuffer: &mut [u16],
+        texture: Texture<'_>,
+        filter: TextureFilter,
+        big_endian: bool,
+        mask: Option<(&Occlusion<'_>, usize)>,
+    ) -> u32 {
+        let total = (self.columns.len() * (self.bottom - self.top)) as u32;
+        if let Some((map, index)) = mask {
+            let mut samples = 0;
+            let mut y = self.y;
+            let mut row = self.top;
+            while row < self.bottom {
+                let row_end = map.row_end(row, self.bottom);
+                let mut x = self.left;
+                while let Some((start, end)) =
+                    map.visible_span(row, x, self.left + self.columns.len(), index)
+                {
+                    RasterRows {
+                        stride: self.stride,
+                        left: start,
+                        top: row,
+                        bottom: row_end,
+                        columns: &self.columns[start - self.left..end - self.left],
+                        y,
+                        region: self.region,
+                    }
+                    .dispatch(framebuffer, texture, filter, big_endian);
+                    samples += ((end - start) * (row_end - row)) as u32;
+                    x = end;
+                }
+                for _ in row..row_end {
+                    y.take();
+                }
+                row = row_end;
+            }
+            samples
+        } else {
+            self.dispatch(framebuffer, texture, filter, big_endian);
+            total
+        }
+    }
+
     fn dispatch(
         self,
         framebuffer: &mut [u16],

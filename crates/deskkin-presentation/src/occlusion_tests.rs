@@ -34,6 +34,7 @@ fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
         boards,
         |y| demo_world::background_row(y, 147),
         wire,
+        &mut Occlusion::new(ScreenTile::Eight, &mut [0; 1200]).unwrap(),
     )
     .unwrap();
     assert!(
@@ -41,6 +42,18 @@ fn compare(boards: &[SceneBillboard<'_>], wire: bool) -> SceneStats {
         "tile output or framebuffer guards differ"
     );
     assert!(stats.raster.nearest_samples + stats.raster.bilinear_samples <= baseline_samples);
+    assert!(stats.scaler_preparations as usize <= boards.len());
+    actual.fill(0xdead);
+    raster_scene(
+        &mut actual,
+        stride,
+        boards,
+        |y| demo_world::background_row(y, 147),
+        wire,
+        &mut Occlusion::new(ScreenTile::Sixteen, &mut [0; 300]).unwrap(),
+    )
+    .unwrap();
+    assert!(actual == expected, "16x16 output differs");
     stats
 }
 
@@ -225,9 +238,34 @@ fn opaque_front_removes_background_and_all_farther_samples() {
     assert_eq!(stats.skipped_background_pixels, 76800);
     assert_eq!(stats.raster.nearest_samples, 76800);
     assert_eq!(stats.raster.bilinear_samples, 0);
+    assert_eq!(stats.scaler_preparations, 1);
+    let mut storage = [0; 1200];
+    let mut map = Occlusion::new(ScreenTile::Eight, &mut storage).unwrap();
+    let mut reused = std::vec![0; 76800];
+    raster_scene(
+        &mut reused,
+        320,
+        &[back, front],
+        |_| [123; 4],
+        false,
+        &mut map,
+    )
+    .unwrap();
+    let empty = raster_scene(&mut reused, 320, &[], |_| [123; 4], false, &mut map).unwrap();
+    assert_eq!(empty.opaque_tiles, 0);
+    assert!(reused.iter().all(|&pixel| pixel == 123));
+    assert!(Occlusion::new(ScreenTile::Sixteen, &mut storage).is_err());
     let mut output = std::vec![0; 76800];
     assert_eq!(
-        raster_scene(&mut output, 320, &[front, back], |_| [0; 4], false).unwrap_err(),
+        raster_scene(
+            &mut output,
+            320,
+            &[front, back],
+            |_| [0; 4],
+            false,
+            &mut Occlusion::new(ScreenTile::Eight, &mut [0; 1200]).unwrap()
+        )
+        .unwrap_err(),
         RasterError::InvalidOrder
     );
     assert!(output.iter().all(|&p| p == 0));
@@ -241,76 +279,104 @@ fn sparse_and_overdraw_timing_samples() {
         height: 32,
     };
     let pixels: std::vec::Vec<u16> = (0..1024).map(|i| (i as u16).wrapping_mul(4937)).collect();
-    let texture = Texture {
-        size,
-        pixels: &pixels,
-        coverage: Coverage::Opaque,
-    };
-    let region = TextureRegion {
-        source_x: 0,
-        source_y: 0,
-        width: 32,
-        height: 32,
-        stride: 32,
-    };
-    for overlap in [false, true] {
-        let boards: std::vec::Vec<_> = (0..12)
-            .map(|i| {
-                board(
-                    texture,
-                    region,
-                    if overlap {
-                        ScreenRect {
-                            x: i * 3,
-                            y: i * 2,
-                            width: 260,
-                            height: 180,
-                        }
-                    } else {
-                        ScreenRect {
-                            x: (i % 4) * 80,
-                            y: (i / 4) * 80,
-                            width: 60,
-                            height: 60,
-                        }
-                    },
-                    12 - i,
-                    i as u16,
-                    TextureFilter::Bilinear,
-                )
-            })
-            .collect();
-        compare(&boards, false);
-        let mut output = std::vec![0; 76800];
-        let start = std::time::Instant::now();
-        for _ in 0..8 {
-            for y in 0..240 {
-                let colors = demo_world::background_row(y, 147);
-                for row in output[y * 320..(y + 1) * 320].chunks_exact_mut(4) {
-                    row.copy_from_slice(&colors);
+    let alpha_plane: std::vec::Vec<u8> = (0..1024)
+        .map(|i| if i % 5 == 0 { 0 } else { 192 })
+        .collect();
+    let mut bits = std::vec![0; Mask8::bytes_for(size)];
+    build_opaque_mask(size, &alpha_plane, &mut bits).unwrap();
+    for alpha in [false, true] {
+        let texture = Texture {
+            size,
+            pixels: &pixels,
+            coverage: if alpha {
+                Coverage::Alpha8 {
+                    alpha: &alpha_plane,
+                    opaque_blocks: Mask8::new(size, &bits).unwrap(),
                 }
-            }
-            for b in &boards {
-                raster_billboard_ordered(&mut output, 320, b.projected, b.texture, b.region, false)
-                    .unwrap();
-            }
-            std::hint::black_box(&output);
+            } else {
+                Coverage::Opaque
+            },
+        };
+        let region = TextureRegion {
+            source_x: 0,
+            source_y: 0,
+            width: 32,
+            height: 32,
+            stride: 32,
+        };
+        for overlap in [false, true] {
+            let boards: std::vec::Vec<_> = (0..12)
+                .map(|i| {
+                    board(
+                        texture,
+                        region,
+                        if overlap {
+                            ScreenRect {
+                                x: i * 3,
+                                y: i * 2,
+                                width: 260,
+                                height: 180,
+                            }
+                        } else {
+                            ScreenRect {
+                                x: (i % 4) * 80,
+                                y: (i / 4) * 80,
+                                width: 60,
+                                height: 60,
+                            }
+                        },
+                        12 - i,
+                        i as u16,
+                        if alpha {
+                            TextureFilter::Nearest
+                        } else {
+                            TextureFilter::Bilinear
+                        },
+                    )
+                })
+                .collect();
+            measure_scene(&boards, overlap, alpha);
         }
-        let painter = start.elapsed();
+    }
+}
+
+fn measure_scene(boards: &[SceneBillboard<'_>], overlap: bool, alpha: bool) {
+    compare(boards, false);
+    let mut output = std::vec![0; 76800];
+    let start = std::time::Instant::now();
+    for _ in 0..8 {
+        for y in 0..240 {
+            let colors = demo_world::background_row(y, 147);
+            for row in output[y * 320..(y + 1) * 320].chunks_exact_mut(4) {
+                row.copy_from_slice(&colors);
+            }
+        }
+        for b in boards {
+            raster_billboard_ordered(&mut output, 320, b.projected, b.texture, b.region, false)
+                .unwrap();
+        }
+        std::hint::black_box(&output);
+    }
+    let painter = start.elapsed();
+    for tile in [ScreenTile::Eight, ScreenTile::Sixteen] {
+        let mut storage = std::vec![0; tile.cells()];
+        let mut occlusion = Occlusion::new(tile, &mut storage).unwrap();
         let start = std::time::Instant::now();
+        let mut stats = SceneStats::default();
         for _ in 0..8 {
-            raster_scene(
+            stats = raster_scene(
                 &mut output,
                 320,
-                &boards,
+                boards,
                 |y| demo_world::background_row(y, 147),
                 false,
+                &mut occlusion,
             )
             .unwrap();
             std::hint::black_box(&output);
         }
         std::println!(
-            "host scene sample overlap={overlap}: painter={painter:?}, tiles={:?}",
+            "host scene sample overlap={overlap} alpha={alpha} tile={tile:?}: painter={painter:?}, tiles={:?}, stats={stats:?}",
             start.elapsed()
         );
     }

@@ -1,10 +1,9 @@
 use super::{
     ProjectedBillboard, RasterError, RasterStats, ScreenRect, SourceSize, Texture, TextureFilter,
-    TextureRegion, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, raster_billboard_clipped, validate_texture,
+    TextureRegion, VIEWPORT_HEIGHT, VIEWPORT_WIDTH, raster_billboard_masked, validate_texture,
 };
 
 const TILE: usize = 8;
-const COLUMNS: usize = VIEWPORT_WIDTH as usize / TILE;
 
 #[cfg(test)]
 #[path = "occlusion_tests.rs"]
@@ -130,46 +129,148 @@ impl<'a> SceneBillboard<'a> {
             region,
         })
     }
+}
 
-    fn intersects(self, tile: ScreenRect) -> bool {
-        let r = self.projected.screen_rect;
-        r.x < tile.x + tile.width
-            && r.y < tile.y + tile.height
-            && r.x.saturating_add(r.width) > tile.x
-            && r.y.saturating_add(r.height) > tile.y
+#[derive(Clone, Copy, Debug)]
+pub enum ScreenTile {
+    Eight,
+    Sixteen,
+}
+
+impl ScreenTile {
+    #[must_use]
+    pub const fn pixels(self) -> usize {
+        match self {
+            Self::Eight => 8,
+            Self::Sixteen => 16,
+        }
+    }
+    #[must_use]
+    pub const fn cells(self) -> usize {
+        (VIEWPORT_WIDTH as usize / self.pixels()) * (VIEWPORT_HEIGHT as usize / self.pixels())
+    }
+}
+
+/// Caller-owned reusable storage. Each u16 encodes painter index + 1; zero
+/// means no occluder. At most 65,535 boards; scratch must match the tile size.
+pub struct Occlusion<'a> {
+    tile: ScreenTile,
+    cutoffs: &'a mut [u16],
+}
+
+impl<'a> Occlusion<'a> {
+    pub fn new(tile: ScreenTile, cutoffs: &'a mut [u16]) -> Result<Self, RasterError> {
+        if cutoffs.len() != tile.cells() {
+            return Err(RasterError::InvalidMask);
+        }
+        Ok(Self { tile, cutoffs })
     }
 
-    fn covers(self, tile: ScreenRect) -> bool {
-        let r = self.projected.screen_rect;
-        if r.x > tile.x
-            || r.y > tile.y
-            || r.x.saturating_add(r.width) < tile.x + tile.width
-            || r.y.saturating_add(r.height) < tile.y + tile.height
-        {
-            return false;
-        }
-        match self.texture.coverage {
-            Coverage::Opaque => true,
-            Coverage::Alpha8 { opaque_blocks, .. } => {
-                // Alpha textures use nearest sampling in the world. Do not
-                // infer bilinear coverage from a nearest sampling footprint.
-                if self.projected.filter != TextureFilter::Nearest {
-                    return false;
+    fn columns(&self) -> usize {
+        VIEWPORT_WIDTH as usize / self.tile.pixels()
+    }
+
+    pub(super) fn row_end(&self, y: usize, end: usize) -> usize {
+        ((y / self.tile.pixels() + 1) * self.tile.pixels()).min(end)
+    }
+
+    fn prepare(&mut self, boards: &[SceneBillboard<'_>], stats: &mut SceneStats) {
+        self.cutoffs.fill(0);
+        let tile = self.tile.pixels();
+        let columns = self.columns();
+        for (index, board) in boards.iter().enumerate().rev() {
+            let mask = match board.texture.coverage {
+                Coverage::Opaque => None,
+                Coverage::Alpha8 { opaque_blocks, .. }
+                    if board.projected.filter == TextureFilter::Nearest
+                        && opaque_blocks.bits.iter().any(|&bits| bits != 0) =>
+                {
+                    Some(opaque_blocks)
                 }
-                let map = |pixel: i32, origin: i32, source: u16, destination: i32| {
-                    ((i64::from(pixel) - i64::from(origin)) * i64::from(source)
-                        / i64::from(destination)) as usize
+                Coverage::Alpha8 { .. } => continue,
+            };
+            let r = board.projected.screen_rect;
+            let left = (r.x.clamp(0, VIEWPORT_WIDTH) as usize).div_ceil(tile);
+            let top = (r.y.clamp(0, VIEWPORT_HEIGHT) as usize).div_ceil(tile);
+            let right = r.x.saturating_add(r.width).clamp(0, VIEWPORT_WIDTH) as usize / tile;
+            let bottom = r.y.saturating_add(r.height).clamp(0, VIEWPORT_HEIGHT) as usize / tile;
+            if left >= right || top >= bottom {
+                continue;
+            }
+            let mut horizontal = [(0, 0); VIEWPORT_WIDTH as usize / 8];
+            if mask.is_some() {
+                for (x, span) in horizontal.iter_mut().enumerate().take(right).skip(left) {
+                    *span = source_span(
+                        x * tile,
+                        tile,
+                        r.x,
+                        r.width,
+                        board.region.source_x,
+                        board.region.width,
+                    );
+                }
+            }
+            for y in top..bottom {
+                let vertical = if mask.is_some() {
+                    source_span(
+                        y * tile,
+                        tile,
+                        r.y,
+                        r.height,
+                        board.region.source_y,
+                        board.region.height,
+                    )
+                } else {
+                    (0, 0)
                 };
-                let x = usize::from(self.region.source_x);
-                let y = usize::from(self.region.source_y);
-                opaque_blocks.covers(
-                    x + map(tile.x, r.x, self.region.width, r.width),
-                    y + map(tile.y, r.y, self.region.height, r.height),
-                    x + map(tile.x + tile.width - 1, r.x, self.region.width, r.width),
-                    y + map(tile.y + tile.height - 1, r.y, self.region.height, r.height),
-                )
+                for (x, &(first, last)) in horizontal.iter().enumerate().take(right).skip(left) {
+                    let cutoff = &mut self.cutoffs[y * columns + x];
+                    if *cutoff != 0 {
+                        continue;
+                    }
+                    stats.coverage_tests = stats.coverage_tests.saturating_add(1);
+                    if mask.is_none_or(|mask| mask.covers(first, vertical.0, last, vertical.1)) {
+                        *cutoff = (index + 1) as u16;
+                        stats.opaque_tiles += 1;
+                        stats.skipped_background_pixels += (tile * tile) as u32;
+                    }
+                }
             }
         }
+    }
+
+    pub(super) fn visible_span(
+        &self,
+        y: usize,
+        mut x: usize,
+        end: usize,
+        index: usize,
+    ) -> Option<(usize, usize)> {
+        let tile = self.tile.pixels();
+        let row = y / tile * self.columns();
+        while x < end && usize::from(self.cutoffs[row + x / tile]) > index + 1 {
+            x = ((x / tile + 1) * tile).min(end);
+        }
+        if x == end {
+            return None;
+        }
+        let start = x;
+        while x < end && usize::from(self.cutoffs[row + x / tile]) <= index + 1 {
+            x = ((x / tile + 1) * tile).min(end);
+        }
+        Some((start, x))
+    }
+
+    fn hides(&self, r: ScreenRect, index: usize) -> bool {
+        let tile = self.tile.pixels();
+        let left = r.x.clamp(0, VIEWPORT_WIDTH) as usize / tile;
+        let top = r.y.clamp(0, VIEWPORT_HEIGHT) as usize / tile;
+        let right = (r.x.saturating_add(r.width).clamp(0, VIEWPORT_WIDTH) as usize).div_ceil(tile);
+        let bottom =
+            (r.y.saturating_add(r.height).clamp(0, VIEWPORT_HEIGHT) as usize).div_ceil(tile);
+        (top..bottom).any(|y| {
+            (left..right).any(|x| usize::from(self.cutoffs[y * self.columns() + x]) > index + 1)
+        })
     }
 }
 
@@ -178,17 +279,20 @@ pub struct SceneStats {
     pub raster: RasterStats,
     pub skipped_background_pixels: u32,
     pub opaque_tiles: u32,
+    pub coverage_tests: u32,
+    pub scaler_preparations: u32,
 }
 
-/// `boards` must be in far-to-near order, breaking depth ties by increasing ID.
-/// `background_row` returns four repeating native RGB565 pixels for a screen row.
-/// Adjacent eligible tiles are drawn as spans; no per-entity visibility buffers.
+/// Boards must be far-to-near, with increasing ID for equal depths.
+/// Coverage is built before drawing; scaler coordinates are prepared once per
+/// visible board. Background returns four repeating native RGB565 words.
 pub fn raster_scene(
     framebuffer: &mut [u16],
     stride: usize,
     boards: &[SceneBillboard<'_>],
     mut background_row: impl FnMut(usize) -> [u16; 4],
     wire: bool,
+    occlusion: &mut Occlusion<'_>,
 ) -> Result<SceneStats, RasterError> {
     if stride < VIEWPORT_WIDTH as usize
         || stride
@@ -196,6 +300,9 @@ pub fn raster_scene(
             .is_none_or(|n| framebuffer.len() < n)
     {
         return Err(RasterError::InvalidFramebuffer);
+    }
+    if boards.len() > usize::from(u16::MAX) {
+        return Err(RasterError::InvalidOrder);
     }
     if boards.windows(2).any(|pair| {
         let a = pair[0].projected;
@@ -205,85 +312,79 @@ pub fn raster_scene(
         return Err(RasterError::InvalidOrder);
     }
     let mut stats = SceneStats::default();
-    for y in (0..VIEWPORT_HEIGHT as usize).step_by(TILE) {
-        let mut cutoffs = [None; COLUMNS];
-        for (column, cutoff) in cutoffs.iter_mut().enumerate() {
-            let tile = ScreenRect {
-                x: (column * TILE) as i32,
-                y: y as i32,
-                width: TILE as i32,
-                height: TILE as i32,
-            };
-            *cutoff = boards.iter().rposition(|board| board.covers(tile));
-            if cutoff.is_some() {
-                stats.opaque_tiles += 1;
-                stats.skipped_background_pixels += (TILE * TILE) as u32;
+    occlusion.prepare(boards, &mut stats);
+    let tile = occlusion.tile.pixels();
+    let columns = occlusion.columns();
+    for y in 0..VIEWPORT_HEIGHT as usize {
+        let colors = background_row(y).map(|c| if wire { c.to_be() } else { c });
+        if stats.opaque_tiles == 0 {
+            for chunk in
+                framebuffer[y * stride..y * stride + VIEWPORT_WIDTH as usize].chunks_exact_mut(4)
+            {
+                chunk.copy_from_slice(&colors);
             }
+            continue;
         }
-        for row in y..y + TILE {
-            let colors = background_row(row).map(|c| if wire { c.to_be() } else { c });
-            for (column, cutoff) in cutoffs.iter().enumerate() {
-                if cutoff.is_none() {
-                    for (i, pixel) in framebuffer
-                        [row * stride + column * TILE..row * stride + (column + 1) * TILE]
-                        .iter_mut()
-                        .enumerate()
-                    {
-                        *pixel = colors[i % 4];
-                    }
-                }
+        let mut x = 0;
+        while x < VIEWPORT_WIDTH as usize {
+            if occlusion.cutoffs[y / tile * columns + x / tile] != 0 {
+                x += tile;
+                continue;
             }
-        }
-        for (index, board) in boards.iter().copied().enumerate() {
-            let mut column = 0;
-            while column < COLUMNS {
-                let tile = ScreenRect {
-                    x: (column * TILE) as i32,
-                    y: y as i32,
-                    width: TILE as i32,
-                    height: TILE as i32,
-                };
-                if cutoffs[column].is_some_and(|cutoff| index < cutoff) || !board.intersects(tile) {
-                    column += 1;
-                    continue;
-                }
-                let opaque = cutoffs[column] == Some(index);
-                let first = column;
-                column += 1;
-                while column < COLUMNS
-                    && cutoffs[column].is_none_or(|cutoff| index >= cutoff)
-                    && (cutoffs[column] == Some(index)) == opaque
-                {
-                    column += 1;
-                }
-                let mut texture = board.texture;
-                if opaque {
-                    texture.coverage = Coverage::Opaque;
-                }
-                let result = raster_billboard_clipped(
-                    framebuffer,
-                    stride,
-                    board.projected,
-                    texture,
-                    board.region,
-                    wire,
-                    ScreenRect {
-                        x: (first * TILE) as i32,
-                        y: y as i32,
-                        width: ((column - first) * TILE) as i32,
-                        height: TILE as i32,
-                    },
-                )?;
-                stats.raster.nearest_samples = stats
-                    .raster
-                    .nearest_samples
-                    .saturating_add(result.nearest_samples);
-                stats.raster.bilinear_samples = stats
-                    .raster
-                    .bilinear_samples
-                    .saturating_add(result.bilinear_samples);
+            let start = x;
+            x += tile;
+            while x < VIEWPORT_WIDTH as usize
+                && occlusion.cutoffs[y / tile * columns + x / tile] == 0
+            {
+                x += tile;
+            }
+            for (i, pixel) in framebuffer[y * stride + start..y * stride + x]
+                .iter_mut()
+                .enumerate()
+            {
+                *pixel = colors[i % 4];
             }
         }
     }
+    for (index, board) in boards.iter().enumerate() {
+        let mask = (stats.opaque_tiles != 0 && occlusion.hides(board.projected.screen_rect, index))
+            .then_some((&*occlusion, index));
+        let result = raster_billboard_masked(
+            framebuffer,
+            stride,
+            board.projected,
+            board.texture,
+            board.region,
+            wire,
+            mask,
+        )?;
+        if result.nearest_samples + result.bilinear_samples > 0 {
+            stats.scaler_preparations += 1;
+        }
+        stats.raster.nearest_samples = stats
+            .raster
+            .nearest_samples
+            .saturating_add(result.nearest_samples);
+        stats.raster.bilinear_samples = stats
+            .raster
+            .bilinear_samples
+            .saturating_add(result.bilinear_samples);
+    }
     Ok(stats)
+}
+
+fn source_span(
+    pixel: usize,
+    tile: usize,
+    origin: i32,
+    destination: i32,
+    offset: u16,
+    source: u16,
+) -> (usize, usize) {
+    let map = |pixel: usize| {
+        usize::from(offset)
+            + (((pixel as i64 - i64::from(origin)) * i64::from(source)) / i64::from(destination))
+                as usize
+    };
+    (map(pixel), map(pixel + tile - 1))
 }

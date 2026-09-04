@@ -4,29 +4,37 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
-The shared renderer integrates opaque/Alpha8 coverage with packed source masks.
-It finds a single full-tile opaque occluder, omits hidden background and farther
-samples, then retains painter order for remaining spans. Source masks total
-415 bytes for the active Character atlas and decorations, allocated in PSRAM
-once. Existing exact coordinate stepping and raster kernels remain in use;
-tile-row and scene scratch use the PSRAM renderer stack without per-frame heap
-allocation. Internal-SRAM double framebuffers, DMA and scheduler are unchanged.
+The renderer keeps 8x8 source masks and screen tiles, but builds coverage once
+over board bounds and then renders in painter order. Scaler coordinates are
+prepared once per non-hidden board and reused across spans; unoccluded boards
+use continuous loops. Masks without opaque blocks bypass coverage testing,
+and frames without coverage use continuous background writes. A caller-owned
+u16 cutoff table uses 2,400 bytes allocated once in APPCPU PSRAM. Source masks
+still total 415 bytes. Internal-SRAM double framebuffers, DMA and scheduling
+are unchanged; per-frame heap allocation is not added.
 
-All 23 presentation tests and targeted simulator tests pass, including existing
-720 raster differential cases, tile/mask/clipping/byte-order cases and exact
-current-demo painter comparisons over camera motion. Strict Clippy and
-`mise run fix` pass. Host release samples for eight synthetic frames took
-1.555 ms painter / 1.729 ms tiles for sparse geometry, and 19.706 ms / 2.914 ms
-for overlapping geometry. These are not CoreS3 performance measurements;
-coverage checks can cost more than they save in sparse scenes. Final
-`mise run test` passed, including host/simulator, AMP domains and inert recovery
-(build record `8338b5c5-400d-407a-8035-6f770ca12863`). Fresh independent review
-found no required changes. APPCPU image size is 1,736,968 bytes; the raster
-kernel's generated stack frame is 2,752 bytes. This is not a whole-thread
-high-water measurement. This mask optimization has not been flashed;
-device performance and whole-thread stack high-water remain
-unverified. The previously flashed raster-kernel baseline was paired and
-advancing frames, with sampled render/transfer durations about 32 ms each.
+Targeted portable/simulator tests preserve exact painter pixels for both 8x8 and
+16x16 tiles, source atlas offsets, clipping, alpha holes, wire order and camera
+motion. Tests also check scratch reuse and one scaler preparation per drawn
+board. Host release samples (eight frames, 12 boards) took 0.568 ms painter /
+0.575 ms 8x8 for sparse non-opaque sprites, and 7.274 / 7.280 ms for overlapping
+non-opaque sprites. Opaque overlap took 20.159 ms painter / 2.900 ms 8x8 /
+3.859 ms 16x16; sparse opaque took 1.583 / 1.659 / 1.708 ms. These are host
+samples, not CoreS3 performance guarantees. The product retains 8x8 because
+16x16 saved coverage tests but lost enough occlusion to cost more in this test.
+`mise run fix`, strict Clippy and final `mise run test` passed, including all
+AMP domains and inert recovery (build record
+`ccdbe8db-5aac-46a3-8991-9b1cb73382d4`). APPCPU image size is 1,737,080 bytes.
+Generated raster and coverage-preparation stack frames are 2,816 and 528 bytes;
+these are not whole-thread high-water measurements. Independent review's
+test-isolation finding was fixed, the portable/simulator tests and strict
+Clippy passed again, and delta review found no remaining required changes.
+
+The currently flashed tile-row version is paired and advancing frames, with
+sampled render duration 46-50 ms and transfer about 33 ms, no renderer,
+allocation or transfer fault, and no stale snapshots (status run
+`70b918dd-f345-438a-83f5-71112acc6e3a`). The board-wise revision is not flashed;
+matched device performance and whole-thread stack high-water remain unverified.
 
 The paired world has a crisp, dark-green ground region below a muted sky.
 Its boundary follows the character's projected foot anchor using the same

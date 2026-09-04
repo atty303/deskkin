@@ -1,8 +1,8 @@
 use deskkin_application::{ApplicationViews, availability, synthetic_notice};
 use deskkin_presentation::{
-    BillboardId, CameraPose, Coverage, Mask8, ProjectedBillboard, RateLimitedObservedYaw,
-    SceneBillboard, SourceSize, Texture, TextureFilter, TextureId, TextureRegion, UnwrappedAngle,
-    WorldUnit, build_opaque_mask,
+    BillboardId, CameraPose, Coverage, Mask8, Occlusion, ProjectedBillboard,
+    RateLimitedObservedYaw, SceneBillboard, ScreenTile, SourceSize, Texture, TextureFilter,
+    TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
     demo_world::{self, DemoCamera, DemoMotion},
     project_billboard, raster_scene, sort_far_to_near,
 };
@@ -87,6 +87,7 @@ pub(crate) struct WorldScene {
     character_frame_elapsed_ms: u32,
     decorations: [OwnedTexture; 4],
     framebuffer: Vec<u16>,
+    cutoffs: Vec<u16>,
     metrics: WorldMetrics,
 }
 
@@ -104,6 +105,7 @@ impl WorldScene {
             character_frame_elapsed_ms: 0,
             decorations: decoration_textures(),
             framebuffer: vec![0; WIDTH * HEIGHT],
+            cutoffs: vec![0; ScreenTile::Eight.cells()],
             metrics: WorldMetrics::default(),
         }
     }
@@ -154,6 +156,9 @@ impl WorldScene {
         sort_far_to_near(&mut projected[..count]);
         self.metrics.visible = u16::try_from(count).unwrap_or(u16::MAX);
         let mut framebuffer = core::mem::take(&mut self.framebuffer);
+        let mut cutoffs = core::mem::take(&mut self.cutoffs);
+        let mut occlusion =
+            Occlusion::new(ScreenTile::Eight, &mut cutoffs).expect("screen tile storage");
         let ground = usize::try_from(demo_world::ground_line(&projected[..count]))
             .expect("ground line is clamped to the viewport");
         let draw = (|| {
@@ -179,6 +184,7 @@ impl WorldScene {
                     &[],
                     |y| demo_world::background_row(y, ground),
                     false,
+                    &mut occlusion,
                 )
                 .map_err(|error| format!("world raster: {error:?}"));
             }
@@ -192,10 +198,12 @@ impl WorldScene {
                 &scene[..count],
                 |y| demo_world::background_row(y, ground),
                 false,
+                &mut occlusion,
             )
             .map_err(|error| format!("world raster: {error:?}"))
         })();
         self.framebuffer = framebuffer;
+        self.cutoffs = cutoffs;
         let stats = draw?;
         self.metrics.nearest_samples = stats.raster.nearest_samples;
         self.metrics.bilinear_samples = stats.raster.bilinear_samples;
