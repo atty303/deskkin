@@ -6,12 +6,14 @@ use deskkin_presentation::{Blitter, ScalarBlitter};
 struct Aligned<T>(T);
 extern "C" {
     fn deskkin_blit_cycles() -> u32;
-    fn deskkin_alpha_vectors(
+    static deskkin_alpha_pie_masks: [u16; 32];
+    fn deskkin_alpha_pie(
         dst: *mut u16,
         src: *const u16,
         alpha: *const u8,
         vectors: usize,
         wire: u32,
+        masks: *const u16,
     );
     fn deskkin_copy_pie(dst: *mut u16, src: *const u16, vectors: usize, wire: u32);
 }
@@ -68,12 +70,13 @@ impl Blitter for PieBlitter {
             }
             if bulk != 0 {
                 unsafe {
-                    deskkin_alpha_vectors(
+                    deskkin_alpha_pie(
                         dst[prefix..].as_mut_ptr(),
                         source.as_ptr().add(start + prefix),
                         backing.as_ptr().add(start + prefix),
                         bulk / 8,
                         u32::from(wire),
+                        core::ptr::addr_of!(deskkin_alpha_pie_masks).cast(),
                     );
                 }
             }

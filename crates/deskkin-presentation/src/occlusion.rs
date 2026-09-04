@@ -262,6 +262,25 @@ impl<'a> Occlusion<'a> {
         Some((start, x))
     }
 
+    pub(super) fn has_visible_span(
+        &self,
+        rows: core::ops::Range<usize>,
+        columns: core::ops::Range<usize>,
+        index: usize,
+    ) -> bool {
+        let mut row = rows.start;
+        while row < rows.end {
+            if self
+                .visible_span(row, columns.start, columns.end, index)
+                .is_some()
+            {
+                return true;
+            }
+            row = self.row_end(row, rows.end);
+        }
+        false
+    }
+
     fn hides(&self, r: ScreenRect, index: usize) -> bool {
         let tile = self.tile.pixels();
         let left = r.x.clamp(0, VIEWPORT_WIDTH) as usize / tile;

@@ -387,7 +387,9 @@ The portable `Blitter` interface accepts RGB565 source/destination slices,
 optional A8 and destination wire order. `blit` accepts equal lengths;
 `blit_from` accepts the complete readable backing slices and a source offset.
 Only the destination slice is writable. Native raster passes the texture backing
-storage after computing visible clipped/occlusion spans. Scaled raster preserves
+storage after computing visible clipped/occlusion spans. Native rendering reuses
+each span across the rows of its occlusion tile band, without copying pixels or
+changing painter order. Scaled raster preserves
 its sampler and uses reusable stack rows (640 bytes of colors and 320 bytes of
 alpha, 16-byte aligned); their initialized spare capacity is readable padding.
 
@@ -427,7 +429,9 @@ invalidates that cache. Three mask loads share PIE instructions with component
 arithmetic, without changing the formula or adding memory traffic.
 Each alpha call handles the entire aligned part of the span, with q0..q7, SAR
 and SAR_BYTE caller-clobbered. It uses a 32-byte ABI frame and 64 bytes of
-immutable masks kept in internal SRAM. There are no per-call q/SAR/SAR_BYTE
+immutable masks kept in internal SRAM. Rust passes the mask address directly
+to the assembly kernel; there is no intermediate C forwarding call.
+There are no per-call q/SAR/SAR_BYTE
 saves or restores, alpha expansion scratch, or extra source-copy buffers.
 
 Startup checks 328,704 source/destination alignment, length 0–320, byte-order,

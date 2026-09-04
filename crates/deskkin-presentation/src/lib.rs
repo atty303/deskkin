@@ -498,14 +498,11 @@ fn raster_billboard_masked(
         .y
         .saturating_add(projected.screen_rect.height)
         .min(VIEWPORT_HEIGHT);
-    if left >= right || top >= bottom {
-        return Ok(RasterStats::default());
-    }
-    if let Some((map, index)) = mask
-        && (top as usize..bottom as usize).all(|y| {
-            map.visible_span(y, left as usize, right as usize, index)
-                .is_none()
-        })
+    let rows = top as usize..bottom as usize;
+    let columns = left as usize..right as usize;
+    if left >= right
+        || top >= bottom
+        || mask.is_some_and(|(map, index)| !map.has_visible_span(rows, columns, index))
     {
         return Ok(RasterStats::default());
     }
@@ -595,32 +592,37 @@ fn raster_native(
     let right = rect.x.saturating_add(rect.width).min(VIEWPORT_WIDTH) as usize;
     let top = rect.y.max(0) as usize;
     let bottom = rect.y.saturating_add(rect.height).min(VIEWPORT_HEIGHT) as usize;
+    let alpha = texture
+        .coverage
+        .is_alpha()
+        .then(|| texture.coverage.alpha());
     let mut samples = 0;
-    for y in top..bottom {
-        let source_row = (usize::from(region.source_y) + (y as i32 - rect.y) as usize)
-            * usize::from(region.stride);
+    let mut row = top;
+    while row < bottom {
+        let row_end = mask.map_or(bottom, |(map, _)| map.row_end(row, bottom));
         let mut x = left;
         while x < right {
             let span = mask.map_or(Some((x, right)), |(map, index)| {
-                map.visible_span(y, x, right, index)
+                map.visible_span(row, x, right, index)
             });
             let Some((start, end)) = span else { break };
-            let source =
-                source_row + usize::from(region.source_x) + (start as i32 - rect.x) as usize;
-            let len = end - start;
-            samples += len as u32;
-            blitter.blit_from(
-                &mut framebuffer[y * stride + start..y * stride + end],
-                texture.pixels,
-                source,
-                texture
-                    .coverage
-                    .is_alpha()
-                    .then(|| texture.coverage.alpha()),
-                big_endian,
-            );
+            let source_x = usize::from(region.source_x) + (start as i32 - rect.x) as usize;
+            for y in row..row_end {
+                let source = (usize::from(region.source_y) + (y as i32 - rect.y) as usize)
+                    * usize::from(region.stride)
+                    + source_x;
+                blitter.blit_from(
+                    &mut framebuffer[y * stride + start..y * stride + end],
+                    texture.pixels,
+                    source,
+                    alpha,
+                    big_endian,
+                );
+            }
+            samples += ((end - start) * (row_end - row)) as u32;
             x = end;
         }
+        row = row_end;
     }
     samples
 }

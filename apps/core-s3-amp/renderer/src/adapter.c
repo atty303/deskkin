@@ -759,16 +759,9 @@ uint32_t deskkin_blit_cycles(void)
     return cycles;
 }
 /* Immutable constants stay in internal SRAM rather than mapped PSRAM. */
-static uint16_t alpha_pie_masks[4][8] __attribute__((aligned(16))) = {
+uint16_t deskkin_alpha_pie_masks[4][8] __attribute__((aligned(16))) = {
     {1, 1, 1, 1, 1, 1, 1, 1},
     {31, 31, 31, 31, 31, 31, 31, 31},
     {0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0},
     {0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00},
 };
-extern void deskkin_alpha_pie(uint16_t *, const uint16_t *, const uint8_t *, size_t,
-                              uint32_t, void *);
-void deskkin_alpha_vectors(uint16_t *dst, const uint16_t *src, const uint8_t *alpha,
-                           size_t vectors, uint32_t wire)
-{
-    deskkin_alpha_pie(dst, src, alpha, vectors, wire, alpha_pie_masks);
-}
