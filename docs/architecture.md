@@ -91,6 +91,12 @@ the final 320×240 RGB565 framebuffer. Information textures use fixed-point
 bilinear sampling; Character and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor geometry, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
+The rasterizer preserves exact Q16 sampling with quotient/remainder stepping,
+reuses horizontal sample coordinates across rows, and selects filter/format/byte-order
+kernels before the pixel loop. Transparent samples skip color/background access;
+fully opaque samples skip blending and background reads. Bilinear interpolation
+retains its intermediate RGB565 rounding. Sampling counters count the clipped
+destination area, including transparent samples, independently of fast paths.
 The background separates a muted sky gradient from darker green ground with a
 crisp boundary at the character's projected billboard bottom. It follows observed
 camera pose and character motion, not animation-frame alpha; the backdrop uses

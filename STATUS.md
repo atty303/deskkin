@@ -4,6 +4,25 @@ Updated: 2026-09-04
 
 ## Current acceptance
 
+The shared rasterizer now uses exact quotient/remainder coordinate stepping,
+alpha endpoint fast paths, row/column reuse and filter/format/byte-order kernels.
+RGB565 rounding, sampling counters and clipped output are preserved. Its
+2,560-byte column scratch uses the existing PSRAM renderer stack; internal-SRAM
+framebuffers, DMA and scheduler ownership are unchanged. The generated Xtensa
+raster function has a 2,752-byte stack frame, with division confined to setup.
+This is not a measurement of whole-thread stack high-water or runtime speed.
+
+All 19 presentation tests pass, including 720 differential raster cases covering
+filters, formats, byte order, atlas regions, clipping and alpha endpoints.
+The host release differential sample took 76.03 ms for the direct reference and
+29.18 ms for the optimized kernel; this is neither an old-firmware comparison
+nor a CoreS3 performance result. `mise run fix`, strict Clippy and the final
+`mise run test` passed, including host/simulator and all AMP domains plus inert
+recovery (build record `e1fb4605-5fb9-4f84-8845-e7dc37c87a05`). Fresh independent
+review found no required changes. APPCPU image size is 1,736,656 bytes. The
+optimization is not flashed; real-device speed and stack high-water remain
+the next acceptance work.
+
 The paired world has a crisp, dark-green ground region below a muted sky.
 Its boundary follows the character's projected foot anchor using the same
 observed-camera projection as the billboards, with viewport-center fallback
@@ -25,21 +44,17 @@ cover complete overwrite, invalid-buffer non-mutation, trailing guards, repeatab
 and native/wire byte-order equivalence, plus foot tracking across depth, camera
 height, turn seams and viewport extremes. Simulator tests verify full-height
 portrait capture and scene tests verify exactly one portrait among three cards.
-`mise run fix`, lint, targeted tests and the final `mise run test` passed, including
-all AMP domains and inert recovery (build record
-`c76718a7-660e-47f6-b13d-d4ca7bc021f9`). APPCPU image size is 1,671,120 bytes;
-the linker map places the 3,840-byte background table in `.flash.rodata` at
+The linker map places the 3,840-byte background table in `.flash.rodata` at
 0x3de8f5ac. Background drawing adds no heap allocation; demo card textures use
 190,400 bytes in PSRAM. Background time is included in world-raster and total
-render timing. Fresh review found no required changes. This revision is not
-flashed or live-qualified yet; LCD dark-tone/dither appearance, portrait text
-readability, ground-motion appearance and render timing remain live acceptance items.
+render timing. The ground/portrait revision was flashed and visually accepted.
 
-The preceding static-gradient revision was flashed with all AMP domain hashes
-verified (record `a8902089-991d-4cb2-bc2b-bbcca5646c0b`). Status record
-`53375539-8c6b-4c82-b4ff-a2f9e76bfce3` showed Paired mode, 640 completed frames
-(up from 230), fresh progress, and zero renderer/allocation/transfer/stale/touch-drop
-faults. The darker tracking ground and portrait card are not in that live image.
+The ground/portrait revision was flashed with all AMP domain hashes verified
+(record `ad6678d3-b386-42f9-9be6-39ed53bb9869`). Status record
+`5b833d7f-c562-4e37-a831-371370c3169e` showed Paired mode, 296 completed frames
+(up from 156), fresh progress, and zero renderer/allocation/transfer/stale/touch-drop
+faults. Its last render/transfer sample was 67,228/33,733 us (wall time, not CPU
+occupancy). The raster optimization is not in that live image.
 
 ## Previous qualified baseline
 

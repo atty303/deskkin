@@ -411,63 +411,200 @@ fn raster_billboard_ordered(
         .y
         .saturating_add(projected.screen_rect.height)
         .min(VIEWPORT_HEIGHT);
-    let mut stats = RasterStats::default();
-    for destination_y in top..bottom {
-        for destination_x in left..right {
-            let relative_x = destination_x - projected.screen_rect.x;
-            let relative_y = destination_y - projected.screen_rect.y;
-            let source_x_q16 = i64::from(relative_x) * i64::from(region.width) * 65_536
-                / i64::from(projected.screen_rect.width);
-            let source_y_q16 = i64::from(relative_y) * i64::from(region.height) * 65_536
-                / i64::from(projected.screen_rect.height);
-            let (color, source_index) = match projected.filter {
-                TextureFilter::Nearest => {
-                    stats.nearest_samples = stats.nearest_samples.saturating_add(1);
-                    let sx = ((source_x_q16 >> 16) as usize).min(usize::from(region.width) - 1)
-                        + usize::from(region.source_x);
-                    let sy = ((source_y_q16 >> 16) as usize).min(usize::from(region.height) - 1)
-                        + usize::from(region.source_y);
-                    let index = sy * usize::from(region.stride) + sx;
-                    (texture.pixels[index], index)
-                }
-                TextureFilter::Bilinear => {
-                    stats.bilinear_samples = stats.bilinear_samples.saturating_add(1);
-                    (
-                        bilinear(texture.pixels, region, source_x_q16, source_y_q16),
-                        0,
-                    )
-                }
-            };
-            let destination_index = destination_y as usize * stride + destination_x as usize;
-            let background = if big_endian {
-                u16::from_be(framebuffer[destination_index])
-            } else {
-                framebuffer[destination_index]
-            };
-            let output = if texture.format == PixelFormat::Rgb565A8 {
-                blend_rgb565(background, color, texture.alpha[source_index])
-            } else {
-                color
-            };
-            framebuffer[destination_index] = if big_endian { output.to_be() } else { output };
-        }
+    if left >= right || top >= bottom {
+        return Ok(RasterStats::default());
     }
-    Ok(stats)
+    let mut x = AxisStepper::new(
+        region.width,
+        projected.screen_rect.width,
+        i64::from(left) - i64::from(projected.screen_rect.x),
+    );
+    let mut columns = [ColumnSample::default(); VIEWPORT_WIDTH as usize];
+    let columns = &mut columns[..(right - left) as usize];
+    for column in columns.iter_mut() {
+        let coordinate = x.take();
+        let index = (coordinate >> 16) as u16;
+        *column = ColumnSample {
+            first: region.source_x + index,
+            second: region.source_x + (index + 1).min(region.width - 1),
+            fraction: coordinate & 0xffff,
+        };
+    }
+    let y = AxisStepper::new(
+        region.height,
+        projected.screen_rect.height,
+        i64::from(top) - i64::from(projected.screen_rect.y),
+    );
+    let rows = RasterRows {
+        stride,
+        left: left as usize,
+        top: top as usize,
+        bottom: bottom as usize,
+        columns,
+        y,
+        region,
+    };
+    rows.dispatch(framebuffer, texture, projected.filter, big_endian);
+    let samples = ((right - left) * (bottom - top)) as u32;
+    Ok(match projected.filter {
+        TextureFilter::Nearest => RasterStats {
+            nearest_samples: samples,
+            bilinear_samples: 0,
+        },
+        TextureFilter::Bilinear => RasterStats {
+            nearest_samples: 0,
+            bilinear_samples: samples,
+        },
+    })
 }
 
-fn bilinear(pixels: &[u16], region: TextureRegion, x_q16: i64, y_q16: i64) -> u16 {
-    let stride = usize::from(region.stride);
-    let x0 =
-        ((x_q16 >> 16) as usize).min(usize::from(region.width) - 1) + usize::from(region.source_x);
-    let y0 =
-        ((y_q16 >> 16) as usize).min(usize::from(region.height) - 1) + usize::from(region.source_y);
-    let x1 = (x0 + 1).min(usize::from(region.source_x + region.width - 1));
-    let y1 = (y0 + 1).min(usize::from(region.source_y + region.height - 1));
-    let fx = (x_q16 & 0xffff) as u32;
-    let fy = (y_q16 & 0xffff) as u32;
-    let top = interpolate_rgb565(pixels[y0 * stride + x0], pixels[y0 * stride + x1], fx);
-    let bottom = interpolate_rgb565(pixels[y1 * stride + x0], pixels[y1 * stride + x1], fx);
-    interpolate_rgb565(top, bottom, fy)
+// Carrying the division remainder preserves floor(offset * source / destination)
+// exactly, including clipped starts and non-integral scale factors.
+struct AxisStepper {
+    coordinate: u32,
+    step: u32,
+    remainder: u32,
+    remainder_step: u32,
+    denominator: u32,
+}
+
+impl AxisStepper {
+    fn new(source: u16, destination: i32, offset: i64) -> Self {
+        let numerator = u64::from(source) << 16;
+        let denominator = destination as u64;
+        let start = offset as u64 * numerator;
+        Self {
+            coordinate: (start / denominator) as u32,
+            step: (numerator / denominator) as u32,
+            remainder: (start % denominator) as u32,
+            remainder_step: (numerator % denominator) as u32,
+            denominator: denominator as u32,
+        }
+    }
+
+    fn take(&mut self) -> u32 {
+        let coordinate = self.coordinate;
+        self.coordinate += self.step;
+        self.remainder += self.remainder_step;
+        if self.remainder >= self.denominator {
+            self.remainder -= self.denominator;
+            self.coordinate += 1;
+        }
+        coordinate
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ColumnSample {
+    first: u16,
+    second: u16,
+    fraction: u32,
+}
+
+struct RasterRows<'a> {
+    stride: usize,
+    left: usize,
+    top: usize,
+    bottom: usize,
+    columns: &'a [ColumnSample],
+    y: AxisStepper,
+    region: TextureRegion,
+}
+
+impl RasterRows<'_> {
+    fn dispatch(
+        self,
+        framebuffer: &mut [u16],
+        texture: Texture<'_>,
+        filter: TextureFilter,
+        big_endian: bool,
+    ) {
+        match (filter, texture.format, big_endian) {
+            (TextureFilter::Nearest, PixelFormat::OpaqueRgb565, false) => {
+                self.draw::<false, false, false>(framebuffer, texture);
+            }
+            (TextureFilter::Nearest, PixelFormat::OpaqueRgb565, true) => {
+                self.draw::<false, false, true>(framebuffer, texture);
+            }
+            (TextureFilter::Nearest, PixelFormat::Rgb565A8, false) => {
+                self.draw::<false, true, false>(framebuffer, texture);
+            }
+            (TextureFilter::Nearest, PixelFormat::Rgb565A8, true) => {
+                self.draw::<false, true, true>(framebuffer, texture);
+            }
+            (TextureFilter::Bilinear, PixelFormat::OpaqueRgb565, false) => {
+                self.draw::<true, false, false>(framebuffer, texture);
+            }
+            (TextureFilter::Bilinear, PixelFormat::OpaqueRgb565, true) => {
+                self.draw::<true, false, true>(framebuffer, texture);
+            }
+            (TextureFilter::Bilinear, PixelFormat::Rgb565A8, false) => {
+                self.draw::<true, true, false>(framebuffer, texture);
+            }
+            (TextureFilter::Bilinear, PixelFormat::Rgb565A8, true) => {
+                self.draw::<true, true, true>(framebuffer, texture);
+            }
+        }
+    }
+
+    fn draw<const BILINEAR: bool, const ALPHA: bool, const BIG_ENDIAN: bool>(
+        mut self,
+        framebuffer: &mut [u16],
+        texture: Texture<'_>,
+    ) {
+        for destination_y in self.top..self.bottom {
+            let coordinate = self.y.take();
+            let sy = (coordinate >> 16) as usize;
+            let first_row =
+                (usize::from(self.region.source_y) + sy) * usize::from(self.region.stride);
+            let second_row = (usize::from(self.region.source_y)
+                + (sy + 1).min(usize::from(self.region.height) - 1))
+                * usize::from(self.region.stride);
+            let fraction_y = coordinate & 0xffff;
+            let start = destination_y * self.stride + self.left;
+            for (destination, column) in framebuffer[start..start + self.columns.len()]
+                .iter_mut()
+                .zip(self.columns)
+            {
+                let source_index = first_row + usize::from(column.first);
+                // Bilinear+A8 retains the existing constant-alpha convention.
+                let alpha = if ALPHA {
+                    texture.alpha[if BILINEAR { 0 } else { source_index }]
+                } else {
+                    255
+                };
+                if alpha == 0 {
+                    continue;
+                }
+                let color = if BILINEAR {
+                    let first = interpolate_rgb565(
+                        texture.pixels[source_index],
+                        texture.pixels[first_row + usize::from(column.second)],
+                        column.fraction,
+                    );
+                    let second = interpolate_rgb565(
+                        texture.pixels[second_row + usize::from(column.first)],
+                        texture.pixels[second_row + usize::from(column.second)],
+                        column.fraction,
+                    );
+                    interpolate_rgb565(first, second, fraction_y)
+                } else {
+                    texture.pixels[source_index]
+                };
+                let color = if ALPHA && alpha != 255 {
+                    let background = if BIG_ENDIAN {
+                        u16::from_be(*destination)
+                    } else {
+                        *destination
+                    };
+                    blend_rgb565(background, color, alpha)
+                } else {
+                    color
+                };
+                *destination = if BIG_ENDIAN { color.to_be() } else { color };
+            }
+        }
+    }
 }
 
 const fn full_texture_region(size: SourceSize) -> TextureRegion {
@@ -499,6 +636,9 @@ fn blend_rgb565(background: u16, foreground: u16, alpha: u8) -> u16 {
     let fraction = u32::from(alpha) * 257;
     interpolate_rgb565(background, foreground, fraction)
 }
+
+#[cfg(test)]
+mod raster_tests;
 
 /// Presentation-only animation states supported by the embedded Pet skin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

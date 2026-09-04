@@ -152,6 +152,12 @@ heap allocation, floor geometry, or per-pixel gradient calculation is needed.
 Its time is included in world-raster and total render duration, not billboard
 sampling counters. Ground position uses the existing periodic projection, with
 no separately wrapped camera angle or animation-alpha-dependent jitter.
+The shared scaler uses exact incremental Q16 coordinates and specialized
+nearest/bilinear, opaque/A8 and byte-order kernels. Its bounded 2,560-byte
+horizontal coordinate/weight scratch lives on the existing PSRAM renderer stack;
+no persistent allocation or internal-SRAM buffer is added. Per-pixel division
+and alpha-endpoint blending are avoided without changing RGB565 rounding or
+sample-counter semantics. Renderer/display priorities and DMA ownership are unchanged.
 
 ## AMP memory and channels
 
