@@ -679,6 +679,13 @@ static void renderer_entry(void *first, void *second, void *third)
 	deskkin_shared_store(&AMP_SHARED->runtime_sram_publication, 0U);
 	deskkin_shared_copy_to(&AMP_SHARED->runtime_sram, &handoff, sizeof(handoff));
 	deskkin_shared_store(&AMP_SHARED->runtime_sram_publication, handoff.generation);
+	/* APPCPU PIE belongs to this renderer, including its startup checks.
+	 * Other threads/ISRs do not use CP3; Zephyr preserves SAR on preemption
+	 * and leaves CP3/CPENABLE untouched in this build. */
+	uint32_t cpenable;
+	__asm__ volatile("rsr.cpenable %0" : "=r"(cpenable));
+	cpenable |= 1U << 3;
+	__asm__ volatile("wsr.cpenable %0; rsync" :: "r"(cpenable) : "memory");
 	rust_main();
 }
 
@@ -745,67 +752,23 @@ int main(void)
 	return 0;
 }
 
-/* The current Zephyr context does not save CP3. Preserve q0 in the leaf and
- * exclude preemption only for this bounded span (at most 40 vector stores). */
-extern void deskkin_background_pie(uint16_t *destination, const uint16_t *pattern,
-                                  size_t vectors);
-
-void deskkin_background_vectors(uint16_t *destination, const uint16_t *pattern,
-                                size_t vectors)
-{
-    const unsigned int key = irq_lock();
-    uint32_t saved;
-    __asm__ volatile("rsr.cpenable %0" : "=r"(saved));
-    const uint32_t enabled = saved | (1U << 3);
-    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(enabled) : "memory");
-    deskkin_background_pie(destination, pattern, vectors);
-    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
-    irq_unlock(key);
-}
-
 uint32_t deskkin_blit_cycles(void)
 {
     uint32_t cycles;
     __asm__ volatile("rsr.ccount %0" : "=r"(cycles));
     return cycles;
 }
-extern void deskkin_copy_pie(uint16_t *, const uint16_t *, size_t, uint32_t);
-void deskkin_copy_vectors(uint16_t *dst, const uint16_t *src, size_t vectors, uint32_t wire)
-{
-    unsigned int key = irq_lock();
-    uint32_t saved;
-    __asm__ volatile("rsr.cpenable %0" : "=r"(saved));
-    uint32_t enabled = saved | (1U << 3);
-    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(enabled) : "memory");
-    deskkin_copy_pie(dst, src, vectors, wire);
-    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
-    irq_unlock(key);
-}
-
-/* Single renderer owner; access is serialized by the bounded IRQ lock. The
- * ordinary data section is internal SRAM, unlike the renderer's PSRAM stack. */
-static struct {
-    uint32_t saved_q[32];
-    uint16_t masks[4][8];
-} __attribute__((aligned(16))) alpha_pie_state = {
-    .masks = {
-        {1, 1, 1, 1, 1, 1, 1, 1},
-        {31, 31, 31, 31, 31, 31, 31, 31},
-        {0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0},
-        {0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00},
-    },
+/* Immutable constants stay in internal SRAM rather than mapped PSRAM. */
+static uint16_t alpha_pie_masks[4][8] __attribute__((aligned(16))) = {
+    {1, 1, 1, 1, 1, 1, 1, 1},
+    {31, 31, 31, 31, 31, 31, 31, 31},
+    {0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0},
+    {0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00},
 };
 extern void deskkin_alpha_pie(uint16_t *, const uint16_t *, const uint8_t *, size_t,
                               uint32_t, void *);
 void deskkin_alpha_vectors(uint16_t *dst, const uint16_t *src, const uint8_t *alpha,
                            size_t vectors, uint32_t wire)
 {
-    unsigned int key = irq_lock();
-    uint32_t saved;
-    __asm__ volatile("rsr.cpenable %0" : "=r"(saved));
-    uint32_t enabled = saved | (1U << 3);
-    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(enabled) : "memory");
-    deskkin_alpha_pie(dst, src, alpha, vectors, wire, &alpha_pie_state);
-    __asm__ volatile("wsr.cpenable %0; rsync" :: "r"(saved) : "memory");
-    irq_unlock(key);
+    deskkin_alpha_pie(dst, src, alpha, vectors, wire, alpha_pie_masks);
 }

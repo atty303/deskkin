@@ -13,7 +13,7 @@ extern "C" {
         vectors: usize,
         wire: u32,
     );
-    fn deskkin_copy_vectors(dst: *mut u16, src: *const u16, vectors: usize, wire: u32);
+    fn deskkin_copy_pie(dst: *mut u16, src: *const u16, vectors: usize, wire: u32);
 }
 
 #[derive(Default)]
@@ -64,14 +64,13 @@ impl Blitter for PieBlitter {
                 dst.len(),
             );
             alpha_scalar(&mut dst[..prefix], &src[..prefix], &alpha[..prefix], wire);
-            for offset in (prefix..prefix + bulk).step_by(32) {
-                let len = (prefix + bulk - offset).min(32);
+            if bulk != 0 {
                 unsafe {
                     deskkin_alpha_vectors(
-                        dst[offset..].as_mut_ptr(),
-                        source.as_ptr().add(start + offset),
-                        backing.as_ptr().add(start + offset),
-                        len / 8,
+                        dst[prefix..].as_mut_ptr(),
+                        source.as_ptr().add(start + prefix),
+                        backing.as_ptr().add(start + prefix),
+                        bulk / 8,
                         u32::from(wire),
                     );
                 }
@@ -91,13 +90,12 @@ impl Blitter for PieBlitter {
                 dst.len(),
             );
             ScalarBlitter.blit(&mut dst[..prefix], &src[..prefix], None, wire);
-            for offset in (prefix..prefix + bulk).step_by(32) {
-                let len = (prefix + bulk - offset).min(32);
+            if bulk != 0 {
                 unsafe {
-                    deskkin_copy_vectors(
-                        dst[offset..].as_mut_ptr(),
-                        source.as_ptr().add(start + offset),
-                        len / 8,
+                    deskkin_copy_pie(
+                        dst[prefix..].as_mut_ptr(),
+                        source.as_ptr().add(start + prefix),
+                        bulk / 8,
                         u32::from(wire),
                     );
                 }

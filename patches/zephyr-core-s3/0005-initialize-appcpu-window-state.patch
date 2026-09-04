@@ -13,7 +13,7 @@ index b3e2c52d3e8..6e77d386d26 100644
  static HDR_ATTR void (*_entry_point)(void) = &__appcpu_start;
  
  extern FUNC_NORETURN void z_prep_c(void);
-@@ -51,12 +52,38 @@ static void core_intr_matrix_clear(void)
+@@ -51,12 +52,39 @@ static void core_intr_matrix_clear(void)
  	}
  }
  
@@ -40,7 +40,8 @@ index b3e2c52d3e8..6e77d386d26 100644
 +        "wsr.ps a2\n\t"
 +        "rsync\n\t"
 +        "movi a0, 0\n\t"
-+        "j __appcpu_start_c\n\t"
++        "call4 __appcpu_start_c\n\t"
++        "ill\n\t"
 +        ".size __appcpu_start, .-__appcpu_start\n"
 +        ".previous\n");
 +

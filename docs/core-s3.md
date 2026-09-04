@@ -353,13 +353,23 @@ CoreS3 background spans use 128-bit PIE stores through a device-only adapter.
 The portable `Background` interface retains a scalar default and the existing
 coverage and phase hooks. RGB565 wire order and the four-pixel dither phase
 are resolved before vector stores; unaligned prefixes and suffixes stay scalar.
-Each vector call writes at most 320 pixels. It saves/restores q0 and CPENABLE
-and locks interrupts only for that bounded call because Zephyr does not preserve
-CP3 state in this configuration. Other PIE registers are untouched.
-The leaf reserves 48 stack bytes and stores q0 in the lowest 16 bytes, leaving
-the upper 32 bytes for windowed-ABI spills. Vector scratch must not overlap the
-base save area: corrupting its saved stack pointer can stop APPCPU in a double
-exception after otherwise correct initial frames.
+Each vector call writes at most 320 pixels. APPCPU PIE belongs exclusively to
+the renderer thread, which enables CP3 once before its startup checks. Other
+APPCPU threads and interrupt handlers must not use PIE. Zephyr preserves SAR
+on interrupts and context switches; it leaves CP3 and CPENABLE untouched in
+this configuration. Kernels therefore run with interrupts and scheduling enabled,
+without per-call register preservation or critical sections. This ownership
+contract must be revisited before introducing another PIE user on APPCPU.
+
+APPCPU's entry trampoline calls C startup with `call4`. This leaves a valid
+four-register outer caller for register-window spills; jumping directly into
+C leaves that outer frame without a caller stack link when an eight-register
+window overflows during deep startup calls. The pinned startup patch and its
+bootstrap migration enforce this independently of the rendering kernels.
+
+The pinned ESP32-S3 `xtensa/config/tie.h` classifies q0..q7 and SAR_BYTE as
+caller-saved. No PIE value survives a kernel call. Each leaf reserves only the
+32 bytes required for windowed-ABI register spills.
 At startup the same kernel is checked against expected pixels and guard words
 for all eight halfword alignments and lengths 0 through 320. Failure publishes
 renderer fault 18 (`BackgroundCheck`) and stops before frame presentation.
@@ -386,12 +396,11 @@ Opaque blits use eight-pixel PIE vectors with RGB565 byte swapping. Independentl
 unaligned sources are assembled with `EE.SRC.Q.QUP` in registers, with no
 per-span memory scratch copy. Both enclosing loads must fit inside the supplied
 backing slice; otherwise the affected edge remains scalar. Destination edges
-stay scalar to avoid writing outside the clipped span. Every IRQ-locked call
-processes at most 32 pixels and restores CPENABLE. The 112-byte assembly frame
-preserves q0/q1 for aligned sources, plus q2/q3 and SAR_BYTE for unaligned
-sources. Its upper 32 bytes remain reserved for windowed-ABI spills. SAR and
+stay scalar to avoid writing outside the clipped span. One call handles the
+entire aligned part of the span, with no 32-pixel splitting. Its 32-byte ABI
+frame has no vector scratch. q0..q3 and SAR_BYTE are caller-clobbered; SAR and
 other PIE state are untouched. The funnel performs one additional vector load
-per call, and register saves still perform memory stores/loads.
+per span.
 
 Generic alpha reads A8 directly and expands eight values into 16-bit lanes in
 registers. It uses `weight = a8 + (a8 >> 7)` and
@@ -405,11 +414,10 @@ generic arithmetic. There is no grass-specific binary mask kernel.
 Independent source/A8 alignment and enclosing loads are bounded by the supplied
 backing slices. Destination prefixes/tails use the same approximation in scalar
 code. Consecutive unaligned RGB565 vectors reuse the previous loaded vector.
-Each IRQ-locked alpha call handles at most 32 pixels and preserves q0..q7 in a
-192-byte internal SRAM state/mask object, with SAR and SAR_BYTE in a 64-byte
-assembly frame. The upper 32 frame bytes remain reserved for ABI spills.
-The sole renderer owns the state and IRQ exclusion serializes its use.
-Saved-register traffic remains; this is not a zero-memory-overhead SIMD call.
+Each alpha call handles the entire aligned part of the span, with q0..q7, SAR
+and SAR_BYTE caller-clobbered. It uses a 32-byte ABI frame and 64 bytes of
+immutable masks kept in internal SRAM. There are no per-call q/SAR/SAR_BYTE
+saves or restores, alpha expansion scratch, or extra source-copy buffers.
 
 Startup checks 328,704 source/destination alignment, length 0–320, byte-order,
 alpha/no-alpha and padded/unpadded backing combinations plus 12,800 RGB extreme

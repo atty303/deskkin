@@ -8,7 +8,7 @@ pub struct PieBackground;
 struct Aligned<T>(T);
 
 extern "C" {
-    fn deskkin_background_vectors(destination: *mut u16, pattern: *const u16, vectors: usize);
+    fn deskkin_background_pie(destination: *mut u16, pattern: *const u16, vectors: usize);
 }
 
 impl Background for PieBackground {
@@ -30,7 +30,7 @@ impl Background for PieBackground {
         // outside the scene renderer. Both pointers are aligned and in bounds.
         for span in rest[..bulk].chunks_mut(320) {
             unsafe {
-                deskkin_background_vectors(span.as_mut_ptr(), pattern.0.as_ptr(), span.len() / 8)
+                deskkin_background_pie(span.as_mut_ptr(), pattern.0.as_ptr(), span.len() / 8)
             };
         }
         for (index, pixel) in rest[bulk..].iter_mut().enumerate() {

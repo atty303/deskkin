@@ -4,90 +4,70 @@ Updated: 2026-09-04
 
 ## Active work
 
-Generic alpha SIMD qualification is complete; the selected implementation keeps
-source-aligned padded texture rows and opaque register funnels from `bd4d5bea`.
-A8 expands directly into 16-bit lanes; difference-form /256 interpolation keeps
-exact alpha endpoints. Entire transparent vectors skip destination access and
-entire opaque vectors copy directly. Remaining vectors use the generic blend;
-there is no grass-specific binary mixed-mask kernel. Grass assets, placement,
-density, size and LOD, application core, protocol and dependencies are unchanged.
+Renderer-exclusive PIE qualification is complete. APPCPU enables CP3 once
+before renderer startup checks. Its background, opaque and alpha kernels run
+with interrupts and scheduling enabled; no other APPCPU thread or ISR uses PIE.
+No q/SAR_BYTE value is live across kernel calls. Zephyr preserves SAR across
+interrupts/context switches and leaves CP3/CPENABLE untouched in this build.
 
-The alpha adapter uses 192 bytes of internal SRAM for q-state and masks and a
-64-byte assembly frame, preserving q0..q7, SAR, SAR_BYTE and CPENABLE with
-IRQ-locked calls of at most 32 pixels. There is no alpha expansion scratch or
-per-span source copy. Scaled sample rows and register-state traffic remain.
+The kernels no longer save/restore q or shift state, toggle CPENABLE per call,
+mask IRQs, or split blits into 32-pixel calls. One call handles each span's
+aligned portion. Kernels use 32-byte ABI frames and 64 bytes of internal SRAM
+alpha masks, releasing the previous 128-byte saved-q region. Texture alignment,
+padding, clipping, approximation arithmetic, sampling and grass composition are
+unchanged. Scaled sample rows remain; no source-copy buffer was added.
 
 ## Performance findings
 
-All completed candidate screenings passed 60 seconds with 1,200 updates and
-zero reported integrity faults, followed by 120-second normal profiles:
-
-| Candidate | FPS | Mean alpha blit | Mean pixel phase |
+| Implementation | Median FPS, 60 seconds x 3 | Mean alpha blit, 120-second profile | Mean pixel phase |
 | --- | ---: | ---: | ---: |
-| Padded-source scalar baseline (`bd4d5bea`) | 14.184 median | 22.789 ms | 53.746 ms |
-| Direct A8 SIMD, SRAM q-state | 14.297 | 21.396 ms | 53.481 ms |
-| Same arithmetic, PSRAM q-state | 14.336 | 21.562 ms | 53.754 ms |
-| SRAM with source vector reuse | 14.319 | 21.689 ms | 53.555 ms |
-| Plus all-transparent vector skip | 14.376 | 21.170 ms | 53.141 ms |
-| Plus all-opaque vector copy | 14.486 | 19.955 ms | 52.067 ms |
+| Padded-source scalar alpha | 14.184 | 22.789 ms | 53.746 ms |
+| Endpoint-aware PIE with per-call protection (`568a9ce1`) | 14.530 | 19.955 ms | 52.067 ms |
+| Renderer-exclusive PIE | **15.031** | **17.874 ms** | **50.224 ms** |
 
-Candidate ordering above is one-factor screening, not repeated-run medians.
-Final selected-version runs were 14.549 / 14.530 / 14.389 FPS (median 14.530),
-versus baseline 14.184 / 14.222 / 14.115 FPS (median 14.184): +2.44%. This exceeds
-the agreed 2% selection threshold, so the generic endpoint-aware SIMD path is
-retained. The 20 FPS guideline is not met. Source padding adds 6,369 bytes
-of scene color/A8 contents, plus at most 15 alignment bytes per plane.
+Final runs were 15.031 / 14.876 / 15.066 FPS, versus the preceding version's
+14.549 / 14.530 / 14.389. The median improves 3.45%; alpha time improves 10.43%.
+The 20 FPS guideline is not met. All final benchmarks completed 1,200 updates
+with no allocation/transfer failures or stale snapshots. The normal profile
+completed 120 seconds and 258 samples. Final status confirmed 3,870 frames,
+fresh heartbeat and renderer fault 0.
 
-A deterministic host preview at front/side/rear camera positions measured
-47–48% transparent, 46–49% opaque and only 3.1–6.3% intermediate-alpha pixels.
-For the front view, 166,458 alpha pixels form 3,571 spans; the padded alignment
-model predicts 6,046 bounded PIE calls. Thus scalar usually skips multiplication,
-source reads for zero alpha, and destination reads for opaque alpha. Assembly
-inspection confirms those skips. Unconditionally vectorizing the blend does
-more work than that baseline. Changing q-state memory alone had little effect.
+The scene's alpha values are predominantly endpoints (front view: 48% zero,
+49% opaque, 3% intermediate). Generic endpoint skips remain. Earlier per-call
+register-state traffic was an avoidable implementation cost, not an inherent
+cost of SIMD. All phase/blit timings include elapsed preemption. The sampling
+field is residual pixel time, including span/occlusion work. Renderer and display
+still share APPCPU at equal priority with 1 ms slices, and SPI busy-polls DMA
+completion; their contention has not been separately quantified.
 
-A temporary on-device counter probe captured one completed frame: 5,612 calls,
-141,720 vector pixels, 10.062 ms inside the assembly call, 11.460 ms including
-C-side IRQ/CPENABLE handling, and 18.519 ms total alpha blit. Remaining alpha
-time includes scalar edges, Rust span handling and call/preemption overhead;
-these are not separately attributed. The probe was removed from product code.
-JTAG acquisition was followed by a stop in `arch_system_halt` with reason 0;
-three reads returned the same frame. Do not treat them as independent samples
-or include the probe in performance qualification. Earlier normal profiles
-completed without JTAG. The older baseline's long-run stop remains unexplained.
+## Startup and verification
 
-The reported sampling field is pixel-phase time minus opaque/alpha blit time;
-it includes native span/occlusion and other overhead, not just sampling.
-CCOUNT durations include preemption. Renderer and display share APPCPU at equal
-priority with 1 ms time slices; the active SPI driver busy-polls DMA completion.
-The contribution of that CPU contention is not isolated by these measurements.
+The interrupt-enabled candidate initially failed twice during APPCPU startup,
+before renderer execution. JTAG found a window-overflow double exception while
+running heap initialization: `epc1=0x43e79943`, `depc=0x403d4c8f`, and invalid
+caller stack link `0x00060223`. The preceding firmware booted. The entry
+trampoline now uses `call4` into C, providing a spillable outer caller instead
+of jumping into a C entry without one. Both subsequent candidate flashes
+passed boot, startup pixel checks and continuous rendering. Earlier long-run
+or JTAG-associated stops have not been attributed to this startup defect.
 
-Evidence and diagnostic source/images are retained locally under
-`.deskkin/experiments/alpha-direct/` (runs.json, alpha-distribution.json,
-kernel-probe.json, comparison PNGs and candidate source snapshots). Component
-RGB8 error maxima across the three rendered views were 17 / 9 / 17, with
-channel means below 0.84. Visual comparison and enlarged translucent regions
-showed no clear artifact; differences are diagnostic, not acceptance thresholds.
-LCD motion has not been observed through a camera.
+The maintained startup patch and pinned digest include this fix. Recognized
+older bootstrap states restore the startup source before applying the current
+patch. An isolated historical `e7d258c56...` state migrated successfully to
+`50936b1ab6...`; bootstrap verification passed.
 
-## Verification state
+`mise run test` passed on the final source (build record
+`9a8a2731-74a5-4f07-af7b-bed3297ac5f3`). Independent full-diff review passed after
+repairing one migration finding. Host span/arithmetic property tests and all
+341,504 hardware blit startup cases passed. The final flash was
+`f13592c9-21b9-4d3b-a04c-ee5ac5f271fe`, followed by the three final benchmarks.
+Final status record: `8a8a9989-42ff-473c-b7a4-a387dda1bf66`.
 
-Host guards cover 5,259,264 opaque and 5,259,264 independent color/A8 span
-combinations, plus alpha endpoint/component arithmetic. Hardware startup covers
-328,704 alignment/length/order/backing combinations and 12,800 endpoint/color
-extremes. The full-endpoint candidate passed startup and its initial live runs.
-The final `mise run test` passed (build record
-`a2e454f1-2130-4c0d-b456-3c04fee1d156`). Fresh independent review of all six
-changed files found no actionable issues. The selected source was flashed as
-`6ae4e869-ca20-4057-b42d-23f52c603216`; all three final 60-second benchmarks
-completed 1,200 updates, with no allocation/transfer failures or stale
-snapshots. They also verified continued rendering across more than 180 seconds.
-Their run IDs and results are retained in `alpha-direct/runs.json`. A final
-status read confirmed 4,341 completed frames, fresh heartbeat and renderer
-fault 0 (`38c92438-ae26-4ba2-9ffb-42047409cd82`).
-The first benchmark after flash overlapped startup self-tests and measured only
-34.637 seconds, so it is excluded rather than counted as a performance run.
-No remote publication is authorized.
+Run IDs, profile summaries, disassembly, startup diagnostic registers and
+migration evidence are retained in `.deskkin/experiments/pie-owner/`.
+Earlier arithmetic/visual comparisons are in `.deskkin/experiments/alpha-direct/`.
+The arithmetic and assets did not change in this slice; LCD motion has not
+been observed through a camera. No remote publication is authorized.
 
 ## Current baseline
 

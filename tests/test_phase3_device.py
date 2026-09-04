@@ -667,7 +667,8 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn('STRINGIFY(CONFIG_ISR_STACK_SIZE) "\\n\\t"', patch)
         self.assertNotIn('STRINGIFY(CONFIG_ISR_STACK_SIZE) " + 16', patch)
         self.assertIn("vecbase; rsync", patch)
-        self.assertIn("j __appcpu_start_c", patch)
+        self.assertIn("call4 __appcpu_start_c", patch)
+        self.assertNotIn("j __appcpu_start_c", patch)
         self.assertNotIn("call8 __appcpu_start_c", patch)
         self.assertIn('" M soc/espressif/esp32s3/soc_appcpu.c"', bootstrap)
         prior_migration = bootstrap.split(

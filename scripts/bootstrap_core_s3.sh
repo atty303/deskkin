@@ -187,7 +187,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "69df8e02eee5caf343859f0bfad651ac1f3d0605c5b8c735bb1985cbc543bd6d":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "50936b1ab6c554f7777a57f69bf92d5c922213736195f936dfdfd4a88a7440a3":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 espressif_patch_diff = subprocess.run(
@@ -303,22 +303,28 @@ done
 module="$state_dir/west/zephyr"
 zephyr_patch_digest=$(git -C "$module" diff --binary HEAD | sha256sum | cut -d ' ' -f 1)
 case "$zephyr_patch_digest" in
-  69df8e02eee5caf343859f0bfad651ac1f3d0605c5b8c735bb1985cbc543bd6d)
+  50936b1ab6c554f7777a57f69bf92d5c922213736195f936dfdfd4a88a7440a3)
     zephyr_patches_current=1
     ;;
-  ade32e58926d12ea981d512c6d4adb92812f55fda603d98a174fd146b6e4adf8)
-    relative=drivers/spi/spi_esp32_spim.c
+  69df8e02eee5caf343859f0bfad651ac1f3d0605c5b8c735bb1985cbc543bd6d)
+    relative=soc/espressif/esp32s3/soc_appcpu.c
     git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
     mv "$module/$relative.migrating" "$module/$relative"
     ;;
+  ade32e58926d12ea981d512c6d4adb92812f55fda603d98a174fd146b6e4adf8)
+    for relative in drivers/spi/spi_esp32_spim.c soc/espressif/esp32s3/soc_appcpu.c; do
+      git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
+      mv "$module/$relative.migrating" "$module/$relative"
+    done
+    ;;
   e7d258c56fd6fb412f5ffa0cfaba51ecc37c781d16385b0d2a71623463197871|2aa1a66261802c19f97df062bcff61b9781d4d42caa5599edb2f2ab7ebdf3dab|84b30f982fb801c945c84f9bd0aec4f91879268cf887924956dbb657d2fa3aec)
-    for relative in drivers/spi/spi_esp32_spim.c drivers/display/display_ili9xxx.c drivers/mipi_dbi/mipi_dbi_esp32.c include/zephyr/drivers/mipi_dbi.h; do
+    for relative in drivers/spi/spi_esp32_spim.c drivers/display/display_ili9xxx.c drivers/mipi_dbi/mipi_dbi_esp32.c include/zephyr/drivers/mipi_dbi.h soc/espressif/esp32s3/soc_appcpu.c; do
       git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
       mv "$module/$relative.migrating" "$module/$relative"
     done
     ;;
   8737d55925bcbcdd958bcb782ba771145ca8a46f560cd8bd4ea8223dfb009369)
-    for relative in drivers/display/display_ili9xxx.c drivers/mipi_dbi/mipi_dbi_esp32.c include/zephyr/drivers/mipi_dbi.h; do
+    for relative in drivers/display/display_ili9xxx.c drivers/mipi_dbi/mipi_dbi_esp32.c include/zephyr/drivers/mipi_dbi.h soc/espressif/esp32s3/soc_appcpu.c; do
       git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
       mv "$module/$relative.migrating" "$module/$relative"
     done
@@ -329,9 +335,10 @@ case "$zephyr_patch_digest" in
     mv "$module/$relative.migrating" "$module/$relative"
     ;;
   9a2d87fff34e6017b9e25e1e1a21b3c0d29898b185eae68a20e8e2f3e8e570a7)
-    relative=arch/xtensa/core/window_vectors.S
-    git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
-    mv "$module/$relative.migrating" "$module/$relative"
+    for relative in arch/xtensa/core/window_vectors.S soc/espressif/esp32s3/soc_appcpu.c; do
+      git -C "$module" show "HEAD:$relative" > "$module/$relative.migrating"
+      mv "$module/$relative.migrating" "$module/$relative"
+    done
     ;;
 esac
 if [[ ${zephyr_patches_current:-0} != 1 ]]; then

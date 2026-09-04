@@ -3,14 +3,11 @@
 .align 4
 .global deskkin_copy_pie
 .type deskkin_copy_pie,@function
-/* 1..4 vectors, aligned destination, disjoint slices. For unaligned source,
- * the caller guarantees both enclosing vectors are readable. IRQ/CP3 owned
- * by caller. The upper 32 frame bytes belong to windowed-ABI spills. */
+/* Nonempty aligned destination, disjoint slices; CP3 enabled by renderer.
+ * Unaligned source enclosing vectors must be readable. q0..q3/SAR_BYTE are
+ * caller-clobbered; no other thread or ISR on APPCPU uses PIE. */
 deskkin_copy_pie:
-    entry a1, 112
-    mov a6, a1
-    ee.vst.128.ip q0, a6, 16
-    ee.vst.128.ip q1, a6, 16
+    entry a1, 32
     extui a7, a3, 0, 4
     bnez a7, .Lunaligned
 1:
@@ -26,15 +23,8 @@ deskkin_copy_pie:
 3:
     addi a4, a4, -1
     bnez a4, 1b
-    mov a6, a1
-    ee.vld.128.ip q0, a6, 16
-    ee.vld.128.ip q1, a6, 0
     retw.n
 .Lunaligned:
-    ee.vst.128.ip q2, a6, 16
-    ee.vst.128.ip q3, a6, 16
-    rur.sar_byte a7
-    s32i a7, a1, 64
     ee.ld.128.usar.ip q0, a3, 16
 .Lfunnel:
     ee.vld.128.ip q1, a3, 16
@@ -50,36 +40,16 @@ deskkin_copy_pie:
 .Lnext:
     addi a4, a4, -1
     bnez a4, .Lfunnel
-    l32i a7, a1, 64
-    wur.sar_byte a7
-    mov a6, a1
-    ee.vld.128.ip q0, a6, 16
-    ee.vld.128.ip q1, a6, 16
-    ee.vld.128.ip q2, a6, 16
-    ee.vld.128.ip q3, a6, 0
     retw.n
 .size deskkin_copy_pie, .-deskkin_copy_pie
 
 .align 4
 .global deskkin_alpha_pie
 .type deskkin_alpha_pie,@function
-/* 1..4 vectors; aligned destination, enclosing source/A8 vectors readable.
- * q0..q7 save area is caller-owned internal SRAM. No pixel scratch copies. */
+/* Nonempty aligned destination, enclosing source/A8 vectors readable.
+ * q0..q7, SAR and SAR_BYTE are caller-clobbered; a7 points to masks. */
 deskkin_alpha_pie:
-    entry a1, 64
-    rsr.sar a8
-    s32i a8, a1, 0
-    rur.sar_byte a8
-    s32i a8, a1, 4
-    mov a8, a7
-    ee.vst.128.ip q0, a8, 16
-    ee.vst.128.ip q1, a8, 16
-    ee.vst.128.ip q2, a8, 16
-    ee.vst.128.ip q3, a8, 16
-    ee.vst.128.ip q4, a8, 16
-    ee.vst.128.ip q5, a8, 16
-    ee.vst.128.ip q6, a8, 16
-    ee.vst.128.ip q7, a8, 16
+    entry a1, 32
     extui a11, a3, 0, 4
     beqz a11, .Lalpha
     ee.ld.128.usar.ip q7, a3, 16
@@ -114,8 +84,7 @@ deskkin_alpha_pie:
     movi a8, 7
     wsr.sar a8
     ee.vsr.32 q5, q2
-    movi a8, 128
-    add a8, a7, a8
+    mov a8, a7
     ee.vld.128.ip q6, a8, 16
     ee.andq q5, q5, q6
     ee.vadds.s16 q2, q2, q5
@@ -176,18 +145,5 @@ deskkin_alpha_pie:
 .Lalpha_advance:
     addi a5, a5, -1
     bnez a5, .Lalpha
-    mov a8, a7
-    ee.vld.128.ip q0, a8, 16
-    ee.vld.128.ip q1, a8, 16
-    ee.vld.128.ip q2, a8, 16
-    ee.vld.128.ip q3, a8, 16
-    ee.vld.128.ip q4, a8, 16
-    ee.vld.128.ip q5, a8, 16
-    ee.vld.128.ip q6, a8, 16
-    ee.vld.128.ip q7, a8, 16
-    l32i a8, a1, 0
-    wsr.sar a8
-    l32i a8, a1, 4
-    wur.sar_byte a8
     retw.n
 .size deskkin_alpha_pie, .-deskkin_alpha_pie
