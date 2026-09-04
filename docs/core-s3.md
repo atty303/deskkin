@@ -231,8 +231,12 @@ only large render buffers that require internal SRAM.
 The display and renderer threads have the same priority so rendering can run
 while a five-chunk full-frame DMA transfer is active. The renderer retains a
 one-tick per-thread slice at 1 kHz, and the display worker has the same one-tick
-slice, without changing the global scheduler. The SPI completion loop polls the
-hardware with its cycle-based timeout and does not sleep for an extra tick.
+slice, without changing the global scheduler. During DMA, the SPI completion
+loop yields to ready peers whenever the kernel permits yielding. This lets the
+renderer use the CPU while hardware transfers the previous buffer. With no
+ready peer, polling resumes immediately; no tick sleep or completion ISR is
+added. Hardware completion and the cycle-based 100 ms timeout still bound each
+batch. Non-DMA transfers and contexts that cannot yield continue polling.
 
 SPI uses GDMA without a completion callback because the SPI HAL polls transfer
 completion. The pinned GDMA patch therefore leaves RX/TX EOF interrupts disabled

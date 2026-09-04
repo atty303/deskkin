@@ -4,70 +4,61 @@ Updated: 2026-09-04
 
 ## Active work
 
-Renderer-exclusive PIE qualification is complete. APPCPU enables CP3 once
-before renderer startup checks. Its background, opaque and alpha kernels run
-with interrupts and scheduling enabled; no other APPCPU thread or ISR uses PIE.
-No q/SAR_BYTE value is live across kernel calls. Zephyr preserves SAR across
-interrupts/context switches and leaves CP3/CPENABLE untouched in this build.
-
-The kernels no longer save/restore q or shift state, toggle CPENABLE per call,
-mask IRQs, or split blits into 32-pixel calls. One call handles each span's
-aligned portion. Kernels use 32-byte ABI frames and 64 bytes of internal SRAM
-alpha masks, releasing the previous 128-byte saved-q region. Texture alignment,
-padding, clipping, approximation arithmetic, sampling and grass composition are
-unchanged. Scaled sample rows remain; no source-copy buffer was added.
+DMA-wait scheduling optimization is complete. The display thread yields to
+ready peers while SPI DMA is in flight, when the kernel allows it. The
+cycle-based 100 ms timeout, hardware completion polling, five batches,
+framebuffers and thread priorities remain unchanged. No completion ISR, tick
+sleep, pixel copy, buffer or allocation was added. Raster arithmetic, texture
+alignment, assets and grass density, size and LOD remain unchanged.
 
 ## Performance findings
 
-| Implementation | Median FPS, 60 seconds x 3 | Mean alpha blit, 120-second profile | Mean pixel phase |
+| Implementation | Median FPS, 60 seconds x 3 | Mean alpha blit | Mean pixel phase |
 | --- | ---: | ---: | ---: |
-| Padded-source scalar alpha | 14.184 | 22.789 ms | 53.746 ms |
-| Endpoint-aware PIE with per-call protection (`568a9ce1`) | 14.530 | 19.955 ms | 52.067 ms |
-| Renderer-exclusive PIE | **15.031** | **17.874 ms** | **50.224 ms** |
+| Preceding renderer-exclusive PIE (`f190d618`) | 15.031 | 17.874 ms | 50.224 ms |
+| PIE with yielding DMA waits | **19.402** | **15.913 ms** | **41.536 ms** |
 
-Final runs were 15.031 / 14.876 / 15.066 FPS, versus the preceding version's
-14.549 / 14.530 / 14.389. The median improves 3.45%; alpha time improves 10.43%.
-The 20 FPS guideline is not met. All final benchmarks completed 1,200 updates
-with no allocation/transfer failures or stale snapshots. The normal profile
-completed 120 seconds and 258 samples. Final status confirmed 3,870 frames,
-fresh heartbeat and renderer fault 0.
+The final runs were 19.588 / 19.402 / 19.141 FPS; the preceding baseline's three
+runs were 15.031 / 14.876 / 15.066 under the same 60-second benchmark procedure.
+The median improves **29.08%**. The initial candidate run measured 19.478 FPS.
+The 20 FPS guideline is not yet met. All benchmarks completed 1,200 requested
+updates without allocation/transfer failures, stale snapshots or renderer fault.
 
-The scene's alpha values are predominantly endpoints (front view: 48% zero,
-49% opaque, 3% intermediate). Generic endpoint skips remain. Earlier per-call
-register-state traffic was an avoidable implementation cost, not an inherent
-cost of SIMD. All phase/blit timings include elapsed preemption. The sampling
-field is residual pixel time, including span/occlusion work. Renderer and display
-still share APPCPU at equal priority with 1 ms slices, and SPI busy-polls DMA
-completion; their contention has not been separately quantified.
+The 120-second normal profile completed 258 samples. Mean opaque blit was
+0.311 ms and residual sampling/span work was 25.312 ms. Nearest sample counts
+were 163,862 versus 163,998 in the baseline profile; bilinear counts were 13,736
+versus 13,697. These profiles observe moving scenes rather than matched frames.
+All phase timings include elapsed preemption. Since raster code and pixel
+traffic did not change, the benchmark isolates CPU contention during DMA
+polling as a substantial throughput cost.
 
-## Startup and verification
+## Verification
 
-The interrupt-enabled candidate initially failed twice during APPCPU startup,
-before renderer execution. JTAG found a window-overflow double exception while
-running heap initialization: `epc1=0x43e79943`, `depc=0x403d4c8f`, and invalid
-caller stack link `0x00060223`. The preceding firmware booted. The entry
-trampoline now uses `call4` into C, providing a spillable outer caller instead
-of jumping into a C entry without one. Both subsequent candidate flashes
-passed boot, startup pixel checks and continuous rendering. Earlier long-run
-or JTAG-associated stops have not been attributed to this startup defect.
+`mise run test` passed on the final implementation, including clean CoreS3
+builds (build record `64ecac5e-65c0-4003-9639-9cbc7fcf84f9`). Independent
+full-diff review of `b8988cac` found no actionable issues; only this status
+summary changed afterward. Both candidate and final flashes passed hardware
+startup checks. The final flash was `46ed1d45-040b-49a6-be42-0529b1d7e290`,
+followed by the three final benchmarks. Final status confirmed 5,612 frames,
+fresh heartbeat, renderer fault 0 and zero allocation/transfer/stale failures
+(record `d432d9d0-5929-4940-acf0-cea6b6fadf7d`).
 
-The maintained startup patch and pinned digest include this fix. Recognized
-older bootstrap states restore the startup source before applying the current
-patch. An isolated historical `e7d258c56...` state migrated successfully to
-`50936b1ab6...`; bootstrap verification passed.
+Isolated migration from the preceding `50936b1ab6...` patch state and historical
+`e7d258c56...` state reached `7220921d88...`; reapplication was idempotent and
+bootstrap verification passed. Run IDs, profile summaries, disassembly and
+migration evidence are retained in `.deskkin/experiments/dma-yield/`. The change
+adds zero bytes of pixel buffers and no allocation sites. The existing typed
+benchmark/profile and renderer/display status remain the observation surface;
+no new telemetry, dependency or trust boundary was introduced.
 
-`mise run test` passed on the final source (build record
-`9a8a2731-74a5-4f07-af7b-bed3297ac5f3`). Independent full-diff review passed after
-repairing one migration finding. Host span/arithmetic property tests and all
-341,504 hardware blit startup cases passed. The final flash was
-`f13592c9-21b9-4d3b-a04c-ee5ac5f271fe`, followed by the three final benchmarks.
-Final status record: `8a8a9989-42ff-473c-b7a4-a387dda1bf66`.
-
-Run IDs, profile summaries, disassembly, startup diagnostic registers and
-migration evidence are retained in `.deskkin/experiments/pie-owner/`.
-Earlier arithmetic/visual comparisons are in `.deskkin/experiments/alpha-direct/`.
-The arithmetic and assets did not change in this slice; LCD motion has not
-been observed through a camera. No remote publication is authorized.
+The renderer-exclusive PIE ownership and spillable `call4` APPCPU startup
+trampoline remain the baseline. Other APPCPU threads and ISRs do not use PIE;
+q/SAR_BYTE state is not live across kernel calls. Zephyr preserves SAR across
+preemption and leaves CP3 enabled in this build. Earlier startup diagnosis and
+qualification evidence remain in `.deskkin/experiments/pie-owner/`; arithmetic
+and deterministic visual comparisons remain in `.deskkin/experiments/alpha-direct/`.
+LCD motion has not been observed through a camera; DMA-stall fault injection
+was not performed. No remote publication is authorized.
 
 ## Current baseline
 
@@ -114,8 +105,8 @@ joined and zeroized before service ownership begins.
 The APPCPU display and renderer threads remain at the same priority so world
 rasterization can run while the five-batch full-frame transfer is active. Both
 threads have a one-tick per-thread slice at 1 kHz. Callback-free SPI GDMA does
-not enable its unused EOF interrupt, while SPI retains timeout-aware completion
-polling.
+not enable its unused EOF interrupt. SPI yields to ready peers during DMA waits
+and retains timeout-aware hardware completion polling.
 
 AMP shared memory has schema-checked, generation-published world snapshots, a
 bounded touch ring with per-slot publication and drop count, UI command slot,

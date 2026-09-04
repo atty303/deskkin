@@ -676,7 +676,7 @@ class Phase3DeviceTests(unittest.TestCase):
             1,
         )[1].split(";;", 1)[0]
         self.assertIn("soc/espressif/esp32s3/soc_appcpu.c", prior_migration)
-        self.assertNotIn("drivers/spi/spi_esp32_spim.c", prior_migration)
+        self.assertIn("drivers/spi/spi_esp32_spim.c", prior_migration)
         self.assertNotIn("patched_appcpu_source", build)
         self.assertNotIn("appcpu_source.write_text", build)
 
