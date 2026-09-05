@@ -220,7 +220,7 @@ fn project_anchor(
     pose: CylindricalPose,
     camera: CameraPose,
 ) -> Result<(i32, i32, i32), ProjectionCull> {
-    if pose.radius < WorldUnit::ZERO || pose.radius > WorldUnit::from_int(3) {
+    if pose.radius < WorldUnit::ZERO || pose.radius > WorldUnit::ratio(32, 10) {
         return Err(ProjectionCull::InvalidRadius);
     }
     let delta = pose.azimuth.units() - camera.observed_azimuth.units();

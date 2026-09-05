@@ -96,6 +96,7 @@ pub fn background_row(y: usize, ground_y: usize) -> [u16; 4] {
 pub const GRASS_COUNT: usize = 176;
 pub const BILLBOARD_COUNT: usize = 23;
 pub const CAPACITY: usize = BILLBOARD_COUNT + 48 + GRASS_COUNT;
+const CAMERA_ORBIT_PERIOD_MS: u64 = 30_000;
 pub const DECORATION_TEXTURE_COUNT: usize = 31;
 pub const SPRITE_SIZE: SourceSize = SourceSize {
     width: 96,
@@ -107,7 +108,7 @@ pub const TERRARIUM: TextureId = TextureId(31);
 pub const LANTERN: TextureId = TextureId(32);
 pub const LIGHT: TextureId = TextureId(33);
 
-/// Unwrapped slow tour plus direct manipulation; fractional time is retained.
+/// Unwrapped tour plus direct manipulation; fractional time is retained.
 #[derive(Clone, Copy, Debug)]
 pub struct DemoCamera {
     touch: TouchYawAdapter,
@@ -132,8 +133,10 @@ impl DemoCamera {
 
     pub fn advance(&mut self, elapsed_ms: u32) {
         let numerator = u64::from(elapsed_ms) * 65_536 + u64::from(self.remainder);
-        self.orbit = self.orbit.saturating_add((numerator / 120_000) as i64);
-        self.remainder = (numerator % 120_000) as u32;
+        self.orbit = self
+            .orbit
+            .saturating_add((numerator / CAMERA_ORBIT_PERIOD_MS) as i64);
+        self.remainder = (numerator % CAMERA_ORBIT_PERIOD_MS) as u32;
     }
 
     #[must_use]
@@ -349,19 +352,27 @@ pub fn particles() -> impl Iterator<Item = crate::Particle> {
 
 fn grass_particles() -> impl Iterator<Item = crate::Particle> {
     (0..GRASS_COUNT).map(|index| {
-        let ring = index / 22;
-        let slot = index % 22;
-        let jitter = ((index * 73 + 19) % 101) as i32;
-        let variant = index % 3;
+        // One continuous radial rank replaces discrete rings. Wide clumps keep
+        // angular coverage while independent radii distribute overlap through
+        // depth instead of concentrating it on a few rings.
+        let radial_rank = (index * 73 + 41) % GRASS_COUNT;
+        let radial_span = (GRASS_COUNT - 1) as i64;
+        let inward = radial_span - radial_rank as i64;
+        let curve = radial_span.pow(2) - inward.pow(2);
+        let inner_radius = WorldUnit::ratio(6, 10).bits();
+        let outer_radius = WorldUnit::ratio(32, 10).bits();
+        let radius = WorldUnit::from_bits(
+            inner_radius
+                + (i64::from(outer_radius - inner_radius) * curve / radial_span.pow(2)) as i32,
+        );
+        let jitter = ((index * index * 17 + index * 109 + 19) % 101) as i32;
+        let variant = (radial_rank + index / 7) % 3;
         crate::Particle {
             id: BillboardId(300 + index as u16),
             pose: CylindricalPose {
-                radius: WorldUnit::ratio(
-                    [60, 130, 225, 245, 270, 280, 280, 280][ring] + jitter / 6,
-                    100,
-                ),
+                radius,
                 azimuth: UnwrappedAngle::from_units(
-                    slot as i64 * 65_536 / 22 + ring as i64 * 1_139 + i64::from(jitter) * 19,
+                    index as i64 * 25_031 + i64::from(jitter - 50) * 11,
                 ),
                 height: WorldUnit::from_int(-1),
             },
@@ -377,9 +388,22 @@ fn grass_particles() -> impl Iterator<Item = crate::Particle> {
 fn grass_lod_size(lod: usize) -> SourceSize {
     let height = [48, 24, 3][lod];
     SourceSize {
-        width: height * 2,
+        width: height * 3,
         height,
     }
+}
+
+fn grass_blade(variant: usize, blade: i32) -> (i32, i32, i32, usize) {
+    let mut bits = (blade as u32)
+        .wrapping_add((variant as u32 + 1).wrapping_mul(0x9e37_79b9))
+        .wrapping_mul(0x045d_9f3b);
+    bits ^= bits >> 16;
+    let root = (1 + blade * 2 + (bits % 3) as i32 - 1).clamp(1, 142);
+    let edge = root.min(144 - root).min(14);
+    let height = (9 + ((bits >> 8) % 35) as i32) * edge / 14;
+    let lean = ((bits >> 16) % 5) as i32 - 2;
+    let shade = 2 + ((bits >> 24) % 3) as usize;
+    (root, height, lean, shade)
 }
 
 // Dense, low-contrast tufts: multiple blade tips and a broken moss base keep
@@ -394,21 +418,18 @@ fn grass_pixel(index: usize, x: u16, y: u16) -> (u16, u8) {
             let py = i32::from(y) * block + dy;
             let foot = 46 - (px / 7 + variant as i32) % 4;
             let rise = foot - py;
-            for blade in 0..47 {
-                let root = 1 + blade * 2;
-                let edge = root.min(96 - root).min(14);
-                let height = (9 + (blade * 7 + variant as i32 * 5) % 35) * edge / 14;
-                let lean = (blade + variant as i32) % 5 - 2;
+            for blade in 0..71 {
+                let (root, height, lean, blade_shade) = grass_blade(variant, blade);
                 let stem = root + lean * rise / 12;
                 if rise > 0
                     && rise <= height
                     && (px == stem || (rise < height / 3 && px == stem + 1))
                 {
-                    shade = shade.max(2 + (blade as usize + variant) % 3);
+                    shade = shade.max(blade_shade);
                 }
             }
             let base_height = 23 + (px * 13 + variant as i32 * 7) % 7;
-            if (2..94).contains(&px) && rise > 0 && rise <= base_height {
+            if (2..142).contains(&px) && rise > 0 && rise <= base_height {
                 shade = shade.max(1 + ((px / 3 + py / 2) as usize + variant) % 2);
             }
         }
@@ -658,17 +679,17 @@ mod tests {
             split.advance(1);
         }
         assert_eq!(whole.target(), split.target());
-        assert_eq!(whole.target().units(), 3 * 65_536);
+        assert_eq!(whole.target().units(), 12 * 65_536);
         split.sample(0, true);
         split.sample(320, true);
         split.sample(320, false);
         split.advance(120_000);
         split.sample(10, true);
-        assert_eq!(split.target().units(), 5 * 65_536);
+        assert_eq!(split.target().units(), 17 * 65_536);
         split.sample(-310, true);
-        assert_eq!(split.target().units(), 4 * 65_536);
+        assert_eq!(split.target().units(), 16 * 65_536);
         whole.advance(u32::MAX);
-        assert!(whole.target().units() > 3 * 65_536);
+        assert!(whole.target().units() > 12 * 65_536);
     }
 
     #[test]
@@ -791,6 +812,57 @@ mod tests {
     }
 
     #[test]
+    fn grass_breaks_angular_spokes_radial_rings_and_five_blade_repetition() {
+        let particles: std::vec::Vec<_> = grass_particles().collect();
+        let mut azimuths: std::vec::Vec<_> = particles
+            .iter()
+            .map(|particle| particle.pose.azimuth.units().rem_euclid(65_536))
+            .collect();
+        azimuths.sort_unstable();
+        let maximum_gap = azimuths
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .chain(core::iter::once(
+                azimuths[0] + 65_536 - azimuths[azimuths.len() - 1],
+            ))
+            .max()
+            .unwrap();
+        assert_eq!(azimuths.len(), GRASS_COUNT);
+        assert!(maximum_gap <= 1_600, "grass angular gap: {maximum_gap}");
+
+        let mut radii: std::vec::Vec<_> = particles
+            .iter()
+            .map(|particle| particle.pose.radius.bits())
+            .collect();
+        radii.sort_unstable();
+        radii.dedup();
+        assert_eq!(radii.len(), GRASS_COUNT);
+        assert_eq!(radii[0], WorldUnit::ratio(6, 10).bits());
+        assert_eq!(radii[GRASS_COUNT - 1], WorldUnit::ratio(32, 10).bits());
+        for particle in particles {
+            assert!(!matches!(
+                crate::project_particle(
+                    particle,
+                    CameraPose {
+                        radius: WorldUnit::from_int(4),
+                        observed_azimuth: UnwrappedAngle::ZERO,
+                        height: WorldUnit::ZERO,
+                    },
+                ),
+                Err(crate::ProjectionCull::InvalidRadius)
+            ));
+        }
+
+        for variant in 0..3 {
+            for blade in 7..35 {
+                let current = grass_blade(variant, blade);
+                let repeated = grass_blade(variant, blade + 5);
+                assert_ne!((current.1, current.2), (repeated.1, repeated.2));
+            }
+        }
+    }
+
+    #[test]
     fn small_details_bound_full_turn_raster_work() {
         let mut max_pixels = 0;
         for degrees in 0..360 {
@@ -806,7 +878,7 @@ mod tests {
             max_pixels = max_pixels.max(pixels);
         }
         // Counts transparent texels too; clipping and occlusion can only reduce it.
-        assert!(max_pixels <= 225_000, "detail pixel budget: {max_pixels}");
+        assert!(max_pixels <= 320_000, "detail pixel budget: {max_pixels}");
         std::println!("maximum detail bounding-box pixels per frame: {max_pixels}");
     }
 

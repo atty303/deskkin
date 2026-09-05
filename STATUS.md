@@ -2,7 +2,24 @@
 
 Updated: 2026-09-05
 
+## Active work
+
+None.
+
 ## Completed work
+
+The accepted grass composition uses 176 wide clumps instead of 176 narrow
+clumps. Its 144x48, 72x24 and 9x3 native LODs provide 50% more nominal
+horizontal coverage, while all 176 clumps receive distinct, quadratic
+outer-weighted radii from 0.6 through 3.2 instead
+of occupying eight discrete rings. The larger outer radius fills the screen
+edges with maximum full-turn detail bounding-box work bounded at 310,068
+pixels. With the 12 degrees/s autonomous orbit, the 247-entity
+60-second benchmark measured 18.778 FPS with zero renderer, allocation,
+transfer, atlas, stale-snapshot or touch-drop faults. A 120-second raster
+profile completed successfully (pixel raster mean 40.260 ms, alpha blit mean
+13.280 ms, frame transfer mean 38.149 ms). Far grass remains on the 9x3 native
+LOD beyond depth 4, or 1/256 of the near LOD pixel count per clump.
 
 CoreS3 no longer runs the completed PIE background/blit qualification loops at
 product startup. The renderer enables CP3 and enters normal initialization
@@ -44,6 +61,13 @@ renderer/DMA overlap. Grass, assets, LOD, portable core, persistent state and
 dependencies are unchanged. No pixel intermediate or copy stage was added.
 
 ## Verification
+
+The final 176-clump source passed `mise run test`, including clean CoreS3 build
+`e58d7811-f0cd-47c2-875f-d38ff0dab83a`. Physical run
+`e4037eab-7f59-439b-a4a8-7f40ad147d4d` completed the 60-second benchmark at
+18.778 FPS with zero renderer, allocation, transfer, atlas, stale-snapshot or
+touch-drop faults. Profile run `8c4ee941-3dc0-41ec-8277-33a9f00281cf` then
+completed 120 seconds without a stop.
 
 `mise run test` passed, including clean CoreS3 build
 `e34e027a-2d55-42a3-b284-359797dcc191`. Fresh independent full review and a
@@ -157,12 +181,11 @@ local record is persisted.
 Replace the pinned APPCPU entry patch only when an equivalent
 upstream-compatible startup path is verified.
 
-The user accepted the preceding particle garden composition. The denser grass
-version still needs live visual acceptance for composition, parallax, continuous
-320 px turns without a seam jump, 180 degrees/s observed following, and intact
-pairing UI. Both normal and benchmark operation have 247 entities: absent
+The user accepted the widened, continuously planted grass composition and the
+camera's autonomous and touch-driven rotation. Both normal and benchmark
+operation have 247 entities: absent
 Availability/Notice slots use explicitly labelled demo cards, with a third
-exploration guide always present. Camera target drifts 3 degrees/s in addition
+exploration guide always present. Camera target drifts 12 degrees/s in addition
 to drag, through the existing observed-pose limiter.
 
 Physical servo power, neck actuation, and a neck pose sensor remain intentionally

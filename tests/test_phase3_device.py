@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -16,6 +17,20 @@ SPEC.loader.exec_module(device)
 
 
 class Phase3DeviceTests(unittest.TestCase):
+    def test_world_benchmark_entity_count_matches_demo_capacity(self):
+        source = (ROOT / "crates/deskkin-presentation/src/demo_world.rs").read_text(
+            encoding="utf-8"
+        )
+        billboard_count = int(
+            re.search(r"pub const BILLBOARD_COUNT: usize = (\d+);", source).group(1)
+        )
+        grass_count = int(
+            re.search(r"pub const GRASS_COUNT: usize = (\d+);", source).group(1)
+        )
+        self.assertEqual(
+            device.WORLD_DEMO_ENTITY_COUNT, billboard_count + 48 + grass_count
+        )
+
     def test_status_response_fits_every_ffi_completion_buffer(self):
         supervisor = (ROOT / "apps/core-s3-amp/src/main.c").read_text(encoding="utf-8")
         adapter = (ROOT / "apps/core-s3-service/src/adapter.c").read_text(encoding="utf-8")

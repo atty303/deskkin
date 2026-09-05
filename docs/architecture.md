@@ -144,10 +144,11 @@ lanterns, twelve drifting lights, and 224 static ground particles. Six hand-auth
 pixel silhouettes (mushrooms, sedge, flowers, cairns, crystals and trail markers)
 share cached 12/6/3 px LODs at depths up to 2/4/8 units, using 3,402 bytes of
 RGB565+A8 plus 18 bytes of opaque masks on the device. Another 176 grass clumps
-use three blade silhouettes with 96x48, 48x24 and 6x3 px native LODs, adding
-52,041 bytes including masks. Each source grass group contains 47 fine blades
-and dense low growth with irregular edges. Planting favors the outer ground;
-near and middle LODs overlap to cover the foreground. All share the ground anchor.
+use three wide blade silhouettes with 144x48, 72x24 and 9x3 px native LODs,
+adding 78,060 bytes including masks. Each source grass group contains 71 fine
+blades and dense low growth with irregular edges. Independent, quadratic
+outer-weighted radii avoid discrete rings; wider sources increase foreground
+coverage and reach the screen edges. All share the ground anchor.
 Generated artwork is normalized to three
 96x96 straight-alpha sprites, converted once to RGB565+A8 in the renderer's
 owned heap, and reused by repeated entities. The shared `demo_world` module
@@ -156,11 +157,11 @@ not limit the generic renderer. The character is 1.2 units tall with its foot
 anchor at ground height -1.0; the ground particles share that height. Information
 cards are raised above the planting layer. All are screen-axis
 aligned camera-facing billboards. Camera radius is 4.0, entity radius is bounded
-to 0..=3.0, the near plane is 0.25, horizontal FOV is 90 degrees, and focal
+to 0..=3.2, the near plane is 0.25, horizontal FOV is 90 degrees, and focal
 length is 160 px. Touch maps each positive 320 px horizontal drag to one
 unwrapped target turn. Only observed yaw affects projection; it follows the
 unwrapped target without overshoot at at most 0.5 turn/s. Vertical drag has no
-yaw effect. A shared fractional-time camera adapter adds a slow 3 degrees/s
+yaw effect. A shared fractional-time camera adapter adds a 12 degrees/s
 unwrapped orbit to touch, without regenerating textures. APPCPU publishes this
 target and PROCPU owns observed following. The first two card slots display
 Availability and Notice when present, otherwise explicitly labelled demo prose;

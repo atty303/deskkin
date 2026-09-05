@@ -113,10 +113,12 @@ billboards and 224 fixed-pixel ground particles, with shared scene placement and
   using 3,420 bytes including masks. Depth selects the LOD; native-size raster
   skips scaler setup (and its preparation count) and retains normal clipping,
   alpha and painter order.
-- Another 176 grass clumps use three variants with 96x48, 48x24 and 6x3 px
-  native LODs, adding 52,041 bytes including masks. Planting favors the
-  outer ground; larger near and middle LODs overlap into a dense foreground.
-  Source images contain 47 fine blades and dense low growth with irregular edges.
+- Another 176 grass clumps use three wide variants with 144x48, 72x24 and 9x3
+  px native LODs, adding 78,060 bytes including masks. Each clump has an
+  independent 0.6..=3.2 radius from a quadratic outer-weighted distribution
+  instead of sharing a discrete ring. The wider sources increase horizontal
+  coverage and extend grass to the screen edges. Source images contain 71 fine
+  blades and dense low growth with irregular edges.
 
 Particle foot anchors and the 1.2-unit character use ground height -1.0.
 
@@ -139,7 +141,7 @@ with 65,536 units per turn. Camera radius is 4.0, near plane 0.25, viewport
 device. Visible billboards are stably sorted far-to-near by actual depth, then
 by billboard ID.
 
-A continuous 3 degrees/s orbit adds one unwrapped target turn every 120 seconds.
+A continuous 12 degrees/s orbit adds one unwrapped target turn every 30 seconds.
 It runs only in paired world mode; APPCPU retains fractional milliseconds and
 publishes the combined orbit/touch target. A benchmark adds a persistent extra
 turn offset on PROCPU so subsequent live targets do not cancel it.
