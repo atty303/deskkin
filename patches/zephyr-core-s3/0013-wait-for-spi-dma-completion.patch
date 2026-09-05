@@ -1,0 +1,120 @@
+From: Deskkin contributors
+Subject: [PATCH] spi: esp32s3: sleep until DMA transaction completion
+
+diff --git a/drivers/spi/Kconfig.esp32 b/drivers/spi/Kconfig.esp32
+--- a/drivers/spi/Kconfig.esp32
++++ b/drivers/spi/Kconfig.esp32
+@@ -17,4 +17,11 @@
+ 	help
+ 	  Enables interrupt support for ESP32 SPI driver.
+ 
++config SPI_ESP32_DMA_COMPLETION
++	bool "Wait for SPI DMA transactions using completion events"
++	depends on SOC_SERIES_ESP32S3 && DMA && !SPI_ESP32_INTERRUPT
++	help
++	  Blocks the synchronous caller on TRANS_DONE for DMA payloads larger
++	  than the FIFO. Short panel commands retain bounded polling.
++
+ endif # ESP32_SPIM
+diff --git a/drivers/spi/spi_esp32_spim.h b/drivers/spi/spi_esp32_spim.h
+--- a/drivers/spi/spi_esp32_spim.h
++++ b/drivers/spi/spi_esp32_spim.h
+@@ -64,6 +64,9 @@
+ 	spi_hal_timing_conf_t timing_config;
+ 	spi_hal_dev_config_t dev_config;
+ 	spi_hal_trans_config_t trans_config;
++#ifdef CONFIG_SPI_ESP32_DMA_COMPLETION
++	struct k_sem dma_done;
++#endif
+ 	uint8_t dfs;
+ 	uint32_t clock_source_hz;
+ };
+diff --git a/drivers/spi/spi_esp32_spim.c b/drivers/spi/spi_esp32_spim.c
+--- a/drivers/spi/spi_esp32_spim.c
++++ b/drivers/spi/spi_esp32_spim.c
+@@ -46,6 +46,17 @@
+ 
+ #define SPI_DMA_RX 0
+ #define SPI_DMA_TX 1
++
++#ifdef CONFIG_SPI_ESP32_DMA_COMPLETION
++static void IRAM_ATTR spi_esp32_dma_done_isr(void *arg)
++{
++	const struct device *dev = arg;
++	const struct spi_esp32_config *cfg = dev->config;
++	struct spi_esp32_data *data = dev->data;
++	spi_ll_disable_int(cfg->spi);
++	k_sem_give(&data->dma_done);
++}
++#endif
+ 
+ static bool spi_esp32_transfer_ongoing(struct spi_esp32_data *data)
+ {
+@@ -339,20 +350,39 @@
+ 					 hal_trans->rcv_buffer != NULL);
+ 	}
+ 
++#ifdef CONFIG_SPI_ESP32_DMA_COMPLETION
++	const bool wait_event = use_dma && transfer_len_bytes > SOC_SPI_MAXIMUM_BUFFER_SIZE && k_can_yield();
++	if (wait_event) {
++		k_sem_reset(&data->dma_done);
++		spi_ll_clear_int_stat(hal->hw);
++		spi_ll_enable_int(hal->hw);
++	}
++#endif
+ 	/* send data */
+ 	transfer_start_cycles = k_cycle_get_32();
+ 	spi_hal_user_start(hal);
+ 	spi_context_update_tx(&data->ctx, data->dfs, transfer_len_frames);
+ 
+-	while (!spi_hal_usr_is_done(hal)) {
+-		if (k_cycle_get_32() - transfer_start_cycles >=
+-		    k_ms_to_cyc_ceil32(SPI_TRANSFER_TIMEOUT_MS)) {
++#ifdef CONFIG_SPI_ESP32_DMA_COMPLETION
++	if (wait_event) {
++		if (k_sem_take(&data->dma_done, K_MSEC(SPI_TRANSFER_TIMEOUT_MS)) != 0 ||
++		    !spi_hal_usr_is_done(hal)) {
+ 			err = -ETIMEDOUT;
+-			break;
+-		}
+-		/* DMA runs independently; let a ready peer use this CPU. */
+-		if (use_dma && transfer_len_bytes > SOC_SPI_MAXIMUM_BUFFER_SIZE && k_can_yield()) {
+-			k_yield();
++		}
++		spi_ll_disable_int(hal->hw);
++		spi_ll_clear_int_stat(hal->hw);
++	} else
++#endif
++	{
++		while (!spi_hal_usr_is_done(hal)) {
++			if (k_cycle_get_32() - transfer_start_cycles >=
++			    k_ms_to_cyc_ceil32(SPI_TRANSFER_TIMEOUT_MS)) {
++				err = -ETIMEDOUT;
++				break;
++			}
++			if (use_dma && transfer_len_bytes > SOC_SPI_MAXIMUM_BUFFER_SIZE && k_can_yield()) {
++				k_yield();
++			}
+ 		}
+ 	}
+ 
+@@ -491,6 +521,19 @@
+ 	if (err != 0) {
+ 		LOG_ERR("could not allocate interrupt (err %d)", err);
+ 		return err;
++	}
++#endif
++
++#ifdef CONFIG_SPI_ESP32_DMA_COMPLETION
++	k_sem_init(&data->dma_done, 0, 1);
++	spi_ll_disable_int(cfg->spi);
++	spi_ll_clear_int_stat(cfg->spi);
++	if (cfg->dma_enabled) {
++		err = esp_intr_alloc(cfg->irq_source,
++			ESP_PRIO_TO_FLAGS(cfg->irq_priority) |
++			ESP_INT_FLAGS_CHECK(cfg->irq_flags) | ESP_INTR_FLAG_IRAM,
++			spi_esp32_dma_done_isr, (void *)dev, NULL);
++		if (err != 0) { return err; }
+ 	}
+ #endif
+ 

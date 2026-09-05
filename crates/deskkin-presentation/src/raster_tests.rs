@@ -83,7 +83,38 @@ fn reference(
             } else {
                 *destination
             };
-            let output = if texture.coverage.is_alpha() {
+            let output = if texture.coverage.is_alpha() && board.filter == TextureFilter::Bilinear {
+                let x1 = (x0 + 1).min(usize::from(region.source_x + region.width - 1));
+                let y1 = (y0 + 1).min(usize::from(region.source_y + region.height - 1));
+                let indices = [
+                    index,
+                    y0 * usize::from(region.stride) + x1,
+                    y1 * usize::from(region.stride) + x0,
+                    y1 * usize::from(region.stride) + x1,
+                ];
+                let weights = indices.map(|i| u64::from(texture.coverage.at(i)));
+                let mix = |p: [u64; 4]| {
+                    let f = (sx & 0xffff) as u64;
+                    let g = (sy & 0xffff) as u64;
+                    let top = (p[0] * (65536 - f) + p[1] * f + 32768) >> 16;
+                    let bottom = (p[2] * (65536 - f) + p[3] * f + 32768) >> 16;
+                    (top * (65536 - g) + bottom * g + 32768) >> 16
+                };
+                let alpha = mix(weights);
+                let mut pixel = 0;
+                for (shift, mask) in [(11, 31u16), (5, 63), (0, 31)] {
+                    let values = core::array::from_fn(|i| {
+                        u64::from((texture.pixels[indices[i]] >> shift) & mask) * weights[i]
+                    });
+                    let channel = ((mix(values)
+                        + u64::from((background >> shift) & mask) * (255 - alpha)
+                        + 127)
+                        / 255)
+                        .min(u64::from(mask));
+                    pixel |= (channel as u16) << shift;
+                }
+                pixel
+            } else if texture.coverage.is_alpha() {
                 reference_mix(
                     background,
                     color,
@@ -217,4 +248,84 @@ fn specialized_raster_matches_reference_pixels_stats_and_guards() {
     std::println!(
         "host raster sample (not a device benchmark): reference={reference_time:?}, optimized={optimized_time:?}"
     );
+}
+
+#[test]
+fn packed_coverage_matches_a8_across_clips_scaling_and_padding() {
+    let size = SourceSize {
+        width: 48,
+        height: 17,
+    };
+    let pixels: std::vec::Vec<_> = (0..48 * 17).map(|i: u16| i.wrapping_mul(971)).collect();
+    let alpha: std::vec::Vec<_> = (0..pixels.len())
+        .map(|i| if (i * 79) % 13 < 7 { 255 } else { 0 })
+        .collect();
+    let mut blocks = std::vec![0; Mask8::bytes_for(size)];
+    build_opaque_mask(size, &alpha, &mut blocks).unwrap();
+    let mut bits = std::vec![0; alpha.len().div_ceil(8)];
+    build_cutout_mask(&alpha, &mut bits).unwrap();
+    let mask = Mask8::new(size, &blocks).unwrap();
+    for wire in [false, true] {
+        for filter in [TextureFilter::Nearest, TextureFilter::Bilinear] {
+            for x in [-37, 0, 13, 309] {
+                for (width, height) in [(37, 13), (317, 153), (11, 7)] {
+                    let board = ProjectedBillboard {
+                        id: BillboardId(1),
+                        source: TextureId(1),
+                        depth: WorldUnit::ONE,
+                        filter,
+                        screen_rect: ScreenRect {
+                            x,
+                            y: -3,
+                            width,
+                            height,
+                        },
+                    };
+                    let region = TextureRegion {
+                        source_x: 5,
+                        source_y: 2,
+                        width: 37,
+                        height: 13,
+                        stride: 48,
+                    };
+                    let mut expected = std::vec![0x965a; 327 * 240 + 19];
+                    let mut actual = expected.clone();
+                    for (buffer, coverage) in [
+                        (
+                            &mut expected,
+                            Coverage::Alpha8 {
+                                alpha: &alpha,
+                                opaque_blocks: mask,
+                            },
+                        ),
+                        (
+                            &mut actual,
+                            Coverage::Cutout {
+                                bits: &bits,
+                                opaque_blocks: mask,
+                            },
+                        ),
+                    ] {
+                        raster_billboard_ordered(
+                            buffer,
+                            327,
+                            board,
+                            Texture {
+                                size,
+                                pixels: &pixels,
+                                coverage,
+                            },
+                            region,
+                            wire,
+                        )
+                        .unwrap();
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+    let mut sentinel = [0xa5];
+    assert!(build_cutout_mask(&[0, 127, 255], &mut sentinel).is_err());
+    assert_eq!(sentinel, [0xa5]);
 }

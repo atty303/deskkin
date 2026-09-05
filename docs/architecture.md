@@ -88,22 +88,26 @@ movement never redraws those templates. A custom renderer replaces solid clear
 with a shared RGB565 night-sky/ground gradient,
 projects and sorts billboards, and writes clipped scaled pixels directly into
 the final RGB565 render target (full frame or screen band). Information textures use fixed-point
-bilinear sampling; Character and decoration sprites use nearest sampling
+bilinear sampling over cached premultiplied box-filtered mip levels; Character
+and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor geometry, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
 The rasterizer preserves exact Q16 sampling with quotient/remainder stepping,
 reuses horizontal sample coordinates across rows, and selects filter/format/byte-order
 kernels before the pixel loop. Native visible spans use a safe `Blitter` interface
 with native RGB565 source words, optional A8 and destination byte order. Scaled
-spans retain the coordinate sampler and gather into fixed 16-byte-aligned rows
-before blitting. The scalar default skips transparent destination access and
+spans pass validated coordinate mappings to the same backend, which samples
+and composes directly into the destination. No intermediate color/alpha row
+is materialized. The scalar default skips transparent destination access and
 fully opaque blending/background reads. CoreS3 accelerates opaque copies with
 PIE and directly expands A8 into eight 16-bit lanes for approximate generic
 alpha composition. Whole transparent/opaque vectors skip composition, and
-scalar edges use the same approximation. Bilinear interpolation
-retains its intermediate RGB565 rounding. Textures carry either implicit opaque
-coverage or A8 plus a packed one-bit-per-8x8-source-block mask, generated once
-from the alpha plane. Only blocks whose valid texels are all 255 have set bits;
+scalar edges use the same approximation. Nearest source gathers are inserted
+directly into PIE registers. Opaque bilinear interpolation retains RGB565
+rounding; alpha bilinear filtering interpolates premultiplied color and coverage
+together so transparent texels cannot bleed color. Textures are prepared as
+implicit opaque, exact one-bit-per-texel cutout, or A8. Cutout and A8 also carry
+a one-bit-per-8x8-source-block opaque mask generated once from the alpha plane. Only blocks whose valid texels are all 255 have set bits;
 zero means unknown, not transparent. The mask is bound to the unchanged alpha
 plane and texture dimensions, including atlas regions.
 
@@ -181,16 +185,19 @@ control, power/reset, and status supervision. APPCPU exclusively owns Slint
 texture generation, the custom world renderer, SPI2, and display transfer.
 SPI2 pixel payloads use APPCPU-owned GDMA channel pair 0. The display thread
 submits completed 320×32 RGB565 bands directly from two internal-SRAM buffers.
-Because SPI polls completion without a DMA callback, callback-free peripheral
-GDMA channels keep completion interrupts disabled; callback-backed and
-memory-to-memory DMA behavior is unchanged. Display and renderer workers each
-retain a one-tick slice at the 1 kHz system tick so either worker can run while
-the other owns its current buffer.
+SPI transaction-completion interrupts wake the display worker after a DMA
+payload, while callback-free peripheral GDMA channels keep their separate
+completion interrupts disabled. Callback-backed and memory-to-memory DMA
+behavior is unchanged. The display worker has priority 0 and the renderer
+priority 1; each retains a one-tick slice at the 1 kHz system tick. Waiting for a
+completed band or SPI transfer blocks the owning worker, allowing the other to
+use its current buffer. APPCPU serializes ISR bodies without masking interrupts
+around rendering.
 PROCPU owns the low 4 MiB Quad-PSRAM region for service allocation,
 Wi-Fi/network state, input/message queues, and non-cache-critical stacks. It
 publishes the explicitly reserved high 4 MiB as the APPCPU caller-owned heap
-for Character decode, canonical information and object textures, Slint/world
-allocation, and the long-lived renderer/display stacks. The two display band buffers are allocated in the PROCPU internal-SRAM
+for Character decode, canonical information and object textures, and large
+Slint/world allocations. The two display band buffers are allocated in the PROCPU internal-SRAM
 image and handed to APPCPU for direct GDMA transfer; other large storage
 defaults to PSRAM. The linker-derived unused PROCPU range joins the existing
 internal allocator after boot, so static growth and band-size changes resize
@@ -201,8 +208,8 @@ the other CPU's heap.
 The cache-independent SRAM2 bank contains the PROCPU service and Wi-Fi stacks
 that can run across flash cache-disable intervals. The PROCPU stack that loads
 the AP image is internal for the same cache-disable requirement. APPCPU internal
-SRAM contains boot/device initialization, drivers and kernel state; its long-lived rendering work runs on stacks allocated from the
-high PSRAM region.
+SRAM contains boot/device initialization, drivers and kernel state. Its internal
+system heap owns the renderer/display stacks and hot raster scratch.
 
 ESP32-S3 flash operations can temporarily disable the instruction cache shared
 by both CPUs. PROCPU therefore serializes APPCPU startup and every device NVS

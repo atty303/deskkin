@@ -132,7 +132,9 @@ expected_rust_status = [
 ]
 expected_zephyr_status = [
     " M drivers/dma/dma_esp32_gdma.c",
+    " M drivers/spi/Kconfig.esp32",
     " M drivers/spi/spi_esp32_spim.c",
+    " M drivers/spi/spi_esp32_spim.h",
     " M drivers/wifi/esp32/src/esp_wifi_drv.c",
     " M soc/espressif/common/esp_psram.c",
     " M soc/espressif/common/loader.c",
@@ -187,7 +189,7 @@ zephyr_patch_diff = subprocess.run(
     check=True,
     capture_output=True,
 ).stdout
-if hashlib.sha256(zephyr_patch_diff).hexdigest() != "fdc4223dd47adcd08b02aff07ea2e8a34e53db18dc1e3cf9476c14f75a43b1cc":
+if hashlib.sha256(zephyr_patch_diff).hexdigest() != "fe6bf2ba0f4e5fee04805ebb6ebe2c1616920691c1f5dafe816bc24795657ee1":
     raise SystemExit("CoreS3 Zephyr patch series mismatch")
 
 espressif_patch_diff = subprocess.run(
@@ -303,7 +305,7 @@ done
 module="$state_dir/west/zephyr"
 zephyr_patch_digest=$(git -C "$module" diff --binary HEAD | sha256sum | cut -d ' ' -f 1)
 case "$zephyr_patch_digest" in
-  fdc4223dd47adcd08b02aff07ea2e8a34e53db18dc1e3cf9476c14f75a43b1cc)
+  fe6bf2ba0f4e5fee04805ebb6ebe2c1616920691c1f5dafe816bc24795657ee1)
     zephyr_patches_current=1
     ;;
   7220921d88fd6445dad14b6c9b63351e9c4d17237bf353f19e80474e269cbedb|50936b1ab6c554f7777a57f69bf92d5c922213736195f936dfdfd4a88a7440a3)

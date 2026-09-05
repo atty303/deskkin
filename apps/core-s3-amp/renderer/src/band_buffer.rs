@@ -3,7 +3,7 @@ use super::{
     BAND_PIXELS, BAND_ROWS, BUFFER_COUNT, HEIGHT, RendererFault, RendererProgress, RendererStage,
     Rgb565BePixel, WIDTH, deskkin_display_submit, deskkin_display_take_completion,
     deskkin_framebuffer_alloc, deskkin_raster_profile, deskkin_renderer_observe,
-    deskkin_renderer_progress, deskkin_uptime_us, deskkin_yield, elapsed_us,
+    deskkin_renderer_progress, deskkin_uptime_us, elapsed_us,
 };
 use alloc::rc::Rc;
 use core::{marker::PhantomData, ptr::NonNull};
@@ -56,9 +56,9 @@ impl Framebuffer {
         unsafe { core::slice::from_raw_parts_mut(self.pixels[index].as_ptr(), BAND_PIXELS) }
     }
 
-    fn take_completion(&mut self) -> Result<bool, RendererFault> {
+    fn take_completion(&mut self, wait: bool) -> Result<bool, RendererFault> {
         let mut completion = BandCompletion::default();
-        let result = unsafe { deskkin_display_take_completion(&mut completion) };
+        let result = unsafe { deskkin_display_take_completion(&mut completion, wait) };
         if result == 0 {
             return Ok(false);
         }
@@ -86,7 +86,7 @@ impl Framebuffer {
     }
 
     pub(super) fn publish_completions(&mut self) -> Result<(), RendererFault> {
-        while self.take_completion()? {}
+        while self.take_completion(false)? {}
         Ok(())
     }
 
@@ -109,9 +109,7 @@ impl Framebuffer {
         unsafe { deskkin_renderer_progress(RendererProgress::Buffer as u8) };
         let started = unsafe { deskkin_uptime_us() };
         while self.ownership.is_inflight(self.back) {
-            if !self.take_completion()? {
-                unsafe { deskkin_yield() };
-            }
+            self.take_completion(true)?;
         }
         self.wait_us = self
             .wait_us

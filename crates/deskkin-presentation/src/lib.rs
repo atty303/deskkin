@@ -15,7 +15,8 @@ include!(concat!(env!("OUT_DIR"), "/trig_table.rs"));
 
 mod blit;
 pub mod demo_world;
-pub use blit::{Blitter, ScalarBlitter};
+pub mod mipmap;
+pub use blit::{Blitter, NearestSpan, SampledSpan, ScalarBlitter};
 
 pub const TURN_UNITS: i64 = 65_536;
 pub const VIEWPORT_WIDTH: i32 = 320;
@@ -367,7 +368,8 @@ pub use bands::{BandTarget, PreparedBoard, PreparedScene};
 mod occlusion;
 pub use occlusion::{
     Background, Coverage, Mask8, Occlusion, RasterPhase, SceneBillboard, SceneStats, ScreenTile,
-    build_opaque_mask, raster_scene, raster_scene_observed, raster_scene_with_blitter,
+    build_cutout_mask, build_opaque_mask, raster_scene, raster_scene_observed,
+    raster_scene_with_blitter,
 };
 
 #[derive(Clone, Copy)]
@@ -422,7 +424,7 @@ fn validate_texture(texture: Texture<'_>, region: TextureRegion) -> Result<(), R
         || bottom > usize::from(texture.size.height)
         || region.stride != texture.size.width
         || texture.pixels.len() < required
-        || (texture.coverage.is_alpha() && texture.coverage.alpha().len() < required)
+        || !texture.coverage.contains(required)
     {
         return Err(RasterError::InvalidTexture);
     }
@@ -541,8 +543,7 @@ fn raster_billboard_masked(
         let index = (coordinate >> 16) as u16;
         *column = ColumnSample {
             first: region.source_x + index,
-            second: region.source_x + (index + 1).min(region.width - 1),
-            fraction: coordinate & 0xffff,
+            fraction: coordinate as u16,
         };
     }
     let y = AxisStepper::new(
@@ -616,14 +617,13 @@ fn raster_native(
                 let source = (usize::from(region.source_y) + (y as i32 - rect.y) as usize)
                     * usize::from(region.stride)
                     + source_x;
-                blitter.blit_from(
-                    &mut target.pixels[(y - target.y) * target.stride + start
-                        ..(y - target.y) * target.stride + end],
-                    texture.pixels,
-                    source,
-                    alpha,
-                    big_endian,
-                );
+                let destination = &mut target.pixels
+                    [(y - target.y) * target.stride + start..(y - target.y) * target.stride + end];
+                if let Coverage::Cutout { bits, .. } = texture.coverage {
+                    blitter.cutout(destination, texture.pixels, source, bits, big_endian);
+                } else {
+                    blitter.blit_from(destination, texture.pixels, source, alpha, big_endian);
+                }
             }
             samples += ((end - start) * (row_end - row)) as u32;
             x = end;
@@ -672,14 +672,11 @@ impl AxisStepper {
 
 /// Caller-owned reusable horizontal sampler storage. Fields are prepared by the renderer.
 #[derive(Clone, Copy, Default)]
+#[repr(C, align(4))]
 pub struct ColumnSample {
     first: u16,
-    second: u16,
-    fraction: u32,
+    fraction: u16,
 }
-
-#[repr(align(16))]
-struct SampleRow<T>(T);
 
 struct RasterRows<'a> {
     origin: usize,
@@ -753,42 +750,28 @@ impl RasterRows<'_> {
         big_endian: bool,
         blitter: &mut impl Blitter,
     ) {
-        match (filter, texture.coverage.is_alpha(), big_endian) {
-            (TextureFilter::Nearest, false, false) => {
-                self.draw::<false, false, false>(framebuffer, texture, blitter);
+        match (filter, big_endian) {
+            (TextureFilter::Nearest, false) => {
+                self.draw::<false, false>(framebuffer, texture, blitter);
             }
-            (TextureFilter::Nearest, false, true) => {
-                self.draw::<false, false, true>(framebuffer, texture, blitter);
+            (TextureFilter::Nearest, true) => {
+                self.draw::<false, true>(framebuffer, texture, blitter);
             }
-            (TextureFilter::Nearest, true, false) => {
-                self.draw::<false, true, false>(framebuffer, texture, blitter);
+            (TextureFilter::Bilinear, false) => {
+                self.draw::<true, false>(framebuffer, texture, blitter);
             }
-            (TextureFilter::Nearest, true, true) => {
-                self.draw::<false, true, true>(framebuffer, texture, blitter);
-            }
-            (TextureFilter::Bilinear, false, false) => {
-                self.draw::<true, false, false>(framebuffer, texture, blitter);
-            }
-            (TextureFilter::Bilinear, false, true) => {
-                self.draw::<true, false, true>(framebuffer, texture, blitter);
-            }
-            (TextureFilter::Bilinear, true, false) => {
-                self.draw::<true, true, false>(framebuffer, texture, blitter);
-            }
-            (TextureFilter::Bilinear, true, true) => {
-                self.draw::<true, true, true>(framebuffer, texture, blitter);
+            (TextureFilter::Bilinear, true) => {
+                self.draw::<true, true>(framebuffer, texture, blitter);
             }
         }
     }
 
-    fn draw<const BILINEAR: bool, const ALPHA: bool, const BIG_ENDIAN: bool>(
+    fn draw<const BILINEAR: bool, const BIG_ENDIAN: bool>(
         mut self,
         framebuffer: &mut [u16],
         texture: Texture<'_>,
         blitter: &mut impl Blitter,
     ) {
-        let mut colors = SampleRow([0u16; VIEWPORT_WIDTH as usize]);
-        let mut alphas = SampleRow([0u8; VIEWPORT_WIDTH as usize]);
         for destination_y in self.top..self.bottom {
             let coordinate = self.y.take();
             let sy = (coordinate >> 16) as usize;
@@ -797,39 +780,17 @@ impl RasterRows<'_> {
             let second_row = (usize::from(self.region.source_y)
                 + (sy + 1).min(usize::from(self.region.height) - 1))
                 * usize::from(self.region.stride);
-            let fraction_y = coordinate & 0xffff;
             let start = (destination_y - self.origin) * self.stride + self.left;
-            for (index, column) in self.columns.iter().enumerate() {
-                let source_index = first_row + usize::from(column.first);
-                // Bilinear+A8 retains the existing constant-alpha convention.
-                let alpha = if ALPHA {
-                    texture.coverage.alpha()[if BILINEAR { 0 } else { source_index }]
-                } else {
-                    255
-                };
-                alphas.0[index] = alpha;
-                let color = if BILINEAR {
-                    let first = interpolate_rgb565(
-                        texture.pixels[source_index],
-                        texture.pixels[first_row + usize::from(column.second)],
-                        column.fraction,
-                    );
-                    let second = interpolate_rgb565(
-                        texture.pixels[second_row + usize::from(column.first)],
-                        texture.pixels[second_row + usize::from(column.second)],
-                        column.fraction,
-                    );
-                    interpolate_rgb565(first, second, fraction_y)
-                } else {
-                    texture.pixels[source_index]
-                };
-                colors.0[index] = color;
-            }
-            blitter.blit_from(
+            blitter.sample(
                 &mut framebuffer[start..start + self.columns.len()],
-                &colors.0,
-                0,
-                ALPHA.then_some(&alphas.0),
+                SampledSpan {
+                    texture,
+                    columns: self.columns,
+                    rows: [first_row, second_row],
+                    last_column: self.region.source_x + self.region.width - 1,
+                    fraction_y: coordinate as u16,
+                    bilinear: BILINEAR,
+                },
                 BIG_ENDIAN,
             );
         }

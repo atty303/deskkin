@@ -607,7 +607,10 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertNotIn("CONFIG_ESP_SPIRAM", config)
         self.assertIn("sys_heap_init(&renderer_heap", adapter)
         self.assertIn("sys_heap_alloc(&renderer_heap", adapter)
-        self.assertIn("sys_heap_aligned_alloc(&renderer_heap", adapter)
+        self.assertIn("display_stack = k_aligned_alloc", adapter)
+        self.assertIn("renderer_stack = k_aligned_alloc", adapter)
+        self.assertIn("CONFIG_SPI_ESP32_DMA_COMPLETION=y", config)
+        self.assertIn("CONFIG_XTENSA_INTERRUPT_NONPREEMPTABLE=y", config)
         self.assertIn("CONFIG_TIMESLICE_PER_THREAD=y", config)
         self.assertIn("#define RENDERER_TIME_SLICE_TICKS 1", adapter)
         self.assertIn("k_thread_create(&display_thread, display_stack, 4096", adapter)
@@ -617,7 +620,7 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("atomic_inc(&allocation_failures)", adapter)
         self.assertIn("K_MSGQ_DEFINE(display_requests", adapter)
         self.assertIn("display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT", adapter)
-        self.assertIn("renderer_entry, NULL, NULL, NULL, 0, 0, K_FOREVER", adapter)
+        self.assertIn("renderer_entry, NULL, NULL, NULL, 1, 0, K_FOREVER", adapter)
         self.assertIn(
             "k_thread_time_slice_set(display_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL)",
             adapter,
@@ -782,11 +785,17 @@ class Phase3DeviceTests(unittest.TestCase):
             subprocess.run([str(executable)], check=True)
 
     def test_amp_texture_storage_preserves_aligned_rows(self):
+        subprocess.run(
+            ["cargo", "build", "--locked", "-p", "deskkin-presentation", "--lib"],
+            cwd=ROOT, check=True,
+        )
         source = ROOT / "apps/core-s3-amp/renderer/src/texture_storage.rs"
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / "texture_storage_test"
             subprocess.run(
-                ["rustc", "--edition=2021", "--test", str(source), "-o", str(executable)],
+                ["rustc", "--edition=2021", "--test", str(source), "-o", str(executable),
+                 "--extern", f"deskkin_presentation={ROOT / 'target/debug/libdeskkin_presentation.rlib'}",
+                 "-L", f"dependency={ROOT / 'target/debug/deps'}"],
                 check=True,
             )
             subprocess.run([str(executable)], check=True)

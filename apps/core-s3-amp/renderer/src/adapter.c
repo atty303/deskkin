@@ -268,6 +268,21 @@ void free(void *block)
 	}
 }
 
+void *deskkin_scratch_alloc(size_t size, size_t alignment)
+{
+	void *block = k_aligned_alloc(MAX(alignment, sizeof(void *)), size);
+	if (block == NULL) {
+		atomic_inc(&allocation_failures);
+		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_EXHAUSTED, 0, 0);
+	}
+	return block;
+}
+
+void deskkin_scratch_free(void *block)
+{
+	k_free(block);
+}
+
 static int initialize_renderer_heap(void)
 {
 	const uint32_t address = AMP_SHARED->display.renderer_heap;
@@ -419,9 +434,10 @@ int deskkin_display_submit(uint8_t buffer_index, uint16_t y, uint16_t rows)
     return result;
 }
 
-int deskkin_display_take_completion(struct display_completion *completion)
+int deskkin_display_take_completion(struct display_completion *completion, bool wait)
 {
-    if (k_msgq_get(&display_completions, completion, K_NO_WAIT) != 0) { return 0; }
+    const int result = k_msgq_get(&display_completions, completion, wait ? K_MSEC(1000) : K_NO_WAIT);
+    if (result != 0) { return wait ? -ETIMEDOUT : 0; }
     if (completion->result != 0) {
         atomic_inc(&transfer_failures);
         return -EIO;
@@ -665,10 +681,8 @@ int main(void)
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_INIT, 0, 0);
 		return 1;
 	}
-	display_stack = sys_heap_aligned_alloc(&renderer_heap, ARCH_STACK_PTR_ALIGN,
-					       K_THREAD_STACK_LEN(4096));
-	renderer_stack = sys_heap_aligned_alloc(&renderer_heap, ARCH_STACK_PTR_ALIGN,
-					        K_THREAD_STACK_LEN(32768));
+	display_stack = k_aligned_alloc(ARCH_STACK_PTR_ALIGN, K_THREAD_STACK_LEN(4096));
+	renderer_stack = k_aligned_alloc(ARCH_STACK_PTR_ALIGN, K_THREAD_STACK_LEN(32768));
 	if (display_stack == NULL || renderer_stack == NULL) {
 		atomic_inc(&allocation_failures);
 		deskkin_renderer_observe(RENDERER_FAILED, RENDERER_FAULT_HEAP_EXHAUSTED, 0, 0);
@@ -707,7 +721,7 @@ int main(void)
 	k_tid_t display_tid = k_thread_create(&display_thread, display_stack, 4096,
 					    display_entry, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
 	k_tid_t renderer_tid = k_thread_create(&renderer_thread, renderer_stack, 32768,
-					     renderer_entry, NULL, NULL, NULL, 0, 0, K_FOREVER);
+					     renderer_entry, NULL, NULL, NULL, 1, 0, K_FOREVER);
 	k_thread_time_slice_set(display_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL);
 	k_thread_time_slice_set(renderer_tid, RENDERER_TIME_SLICE_TICKS, NULL, NULL);
 	k_thread_start(renderer_tid);
@@ -720,4 +734,23 @@ uint16_t deskkin_alpha_pie_masks[4][8] __attribute__((aligned(16))) = {
     {31, 31, 31, 31, 31, 31, 31, 31},
     {0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0},
     {0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00, 0x7c00},
+};
+
+uint16_t deskkin_cutout_pie_masks[16][4] __attribute__((aligned(16))) = {
+    {0, 0, 0, 0},
+    {0xffff, 0, 0, 0},
+    {0, 0xffff, 0, 0},
+    {0xffff, 0xffff, 0, 0},
+    {0, 0, 0xffff, 0},
+    {0xffff, 0, 0xffff, 0},
+    {0, 0xffff, 0xffff, 0},
+    {0xffff, 0xffff, 0xffff, 0},
+    {0, 0, 0, 0xffff},
+    {0xffff, 0, 0, 0xffff},
+    {0, 0xffff, 0, 0xffff},
+    {0xffff, 0xffff, 0, 0xffff},
+    {0, 0, 0xffff, 0xffff},
+    {0xffff, 0, 0xffff, 0xffff},
+    {0, 0xffff, 0xffff, 0xffff},
+    {0xffff, 0xffff, 0xffff, 0xffff},
 };

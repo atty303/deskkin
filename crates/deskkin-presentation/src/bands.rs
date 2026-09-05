@@ -120,8 +120,7 @@ impl<'a> PreparedScene<'a> {
                     let first = (coordinate >> 16) as u16;
                     *column = ColumnSample {
                         first: board.region.source_x + first,
-                        second: board.region.source_x + (first + 1).min(board.region.width - 1),
-                        fraction: coordinate & 0xffff,
+                        fraction: coordinate as u16,
                     };
                 }
                 stats.scaler_preparations += 1;

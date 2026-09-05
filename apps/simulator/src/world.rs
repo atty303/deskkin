@@ -2,7 +2,7 @@ use deskkin_application::{ApplicationViews, availability, synthetic_notice};
 use deskkin_presentation::{
     BillboardId, CameraPose, Coverage, Mask8, Occlusion, ProjectedBillboard,
     RateLimitedObservedYaw, SceneBillboard, ScreenTile, SourceSize, Texture, TextureFilter,
-    TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
+    TextureId, TextureRegion, UnwrappedAngle, WorldUnit, build_cutout_mask, build_opaque_mask,
     demo_world::{self, DemoCamera, DemoMotion},
     raster_scene, sort_far_to_near,
 };
@@ -31,10 +31,15 @@ struct OwnedTexture {
     size: SourceSize,
     pixels: Vec<u16>,
     coverage: OwnedCoverage,
+    mips: Vec<OwnedTexture>,
 }
 
 enum OwnedCoverage {
     Opaque,
+    Cutout {
+        bits: Vec<u8>,
+        opaque_blocks: Vec<u8>,
+    },
     Alpha8 {
         alpha: Vec<u8>,
         opaque_blocks: Vec<u8>,
@@ -49,11 +54,70 @@ impl OwnedTexture {
         Self {
             size,
             pixels,
-            coverage: OwnedCoverage::Alpha8 {
-                alpha,
-                opaque_blocks,
+            mips: Vec::new(),
+            coverage: if alpha.iter().all(|&a| a == 255) {
+                OwnedCoverage::Opaque
+            } else if alpha.iter().all(|&a| a == 0 || a == 255) {
+                let mut bits = vec![0; alpha.len().div_ceil(8)];
+                build_cutout_mask(&alpha, &mut bits).expect("binary coverage");
+                OwnedCoverage::Cutout {
+                    bits,
+                    opaque_blocks,
+                }
+            } else {
+                OwnedCoverage::Alpha8 {
+                    alpha,
+                    opaque_blocks,
+                }
             },
         }
+    }
+
+    fn prepare_mips(mut self) -> Self {
+        loop {
+            let source = self.mips.last().unwrap_or(&self);
+            if source.size.width <= 1 && source.size.height <= 1 {
+                break;
+            }
+            let size = SourceSize {
+                width: source.size.width.div_ceil(2),
+                height: source.size.height.div_ceil(2),
+            };
+            let mut colors = vec![0; usize::from(size.width) * usize::from(size.height)];
+            let mut alpha = vec![0; colors.len()];
+            let region = TextureRegion {
+                source_x: 0,
+                source_y: 0,
+                width: source.size.width,
+                height: source.size.height,
+                stride: source.size.width,
+            };
+            deskkin_presentation::mipmap::downsample(
+                source.borrow(),
+                region,
+                &mut colors,
+                &mut alpha,
+                size.width,
+            )
+            .expect("mip dimensions");
+            self.mips.push(Self::with_alpha(size, colors, alpha));
+        }
+        self
+    }
+
+    fn for_projection(&self, projected: ProjectedBillboard) -> &Self {
+        let mut selected = self;
+        if projected.filter == TextureFilter::Bilinear {
+            for mip in &self.mips {
+                if i32::from(mip.size.width) < projected.screen_rect.width
+                    || i32::from(mip.size.height) < projected.screen_rect.height
+                {
+                    break;
+                }
+                selected = mip;
+            }
+        }
+        selected
     }
 
     fn borrow(&self) -> Texture<'_> {
@@ -62,6 +126,14 @@ impl OwnedTexture {
             pixels: &self.pixels,
             coverage: match &self.coverage {
                 OwnedCoverage::Opaque => Coverage::Opaque,
+                OwnedCoverage::Cutout {
+                    bits,
+                    opaque_blocks,
+                } => Coverage::Cutout {
+                    bits,
+                    opaque_blocks: Mask8::new(self.size, opaque_blocks)
+                        .expect("generated coverage"),
+                },
                 OwnedCoverage::Alpha8 {
                     alpha,
                     opaque_blocks,
@@ -163,7 +235,10 @@ impl WorldScene {
         let ground = demo_world::HORIZON;
         let draw = (|| {
             let resolve = |value: ProjectedBillboard| {
-                let texture = self.texture(value.source, views)?.borrow();
+                let texture = self
+                    .texture(value.source, views)?
+                    .for_projection(value)
+                    .borrow();
                 SceneBillboard::new(
                     value,
                     texture,
@@ -343,7 +418,9 @@ fn capture_billboard(ui: &StatusWindow, notice: bool, demo: i32) -> Result<Owned
         size,
         pixels,
         coverage: OwnedCoverage::Opaque,
-    })
+        mips: Vec::new(),
+    }
+    .prepare_mips())
 }
 
 fn character_texture() -> Vec<OwnedTexture> {
@@ -456,7 +533,11 @@ mod tests {
         demo_world::paint_background(&mut expected, false).unwrap();
         let mut samples = 0;
         for value in projected {
-            let texture = scene.texture(value.source, views).unwrap().borrow();
+            let texture = scene
+                .texture(value.source, views)
+                .unwrap()
+                .for_projection(value)
+                .borrow();
             let stats =
                 deskkin_presentation::raster_billboard(&mut expected, WIDTH, value, texture)
                     .unwrap();

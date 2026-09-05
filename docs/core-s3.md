@@ -127,12 +127,13 @@ still accepts caller-owned slices; the 247-entity capacity belongs only to this
 demo, not to a global entity registry. Projected entities and decoration
 metadata use reusable PSRAM heap storage. A non-inlined raster helper keeps its
 scene array off the recursive sort call stack. The renderer uses a 32 KiB
-PSRAM stack for the expanded scene; no per-frame allocation is added.
+internal-SRAM stack for the expanded scene; no per-frame allocation is added.
 The benchmark's expected entity count
 includes decorations and three cards. Normal operation replaces absent semantic
 boards with demo copy; absence still remains explicit in ApplicationViews.
-The three additional canonical demo textures consume at most 190,400 bytes in
-APPCPU PSRAM and are generated only on first use.
+The three additional canonical demo textures consume at most 190,400 bytes of
+base-level pixels in APPCPU PSRAM and are generated only on first use. Their
+mip levels use additional PSRAM as described below.
 
 World coordinates are signed Q16.16 and azimuth is an unwrapped signed integer
 with 65,536 units per turn. Camera radius is 4.0, near plane 0.25, viewport
@@ -171,12 +172,12 @@ sampling counters. Native-size nearest sprites use direct texel addressing;
 other sizes and information boards use the shared scaler.
 The shared scaler uses exact incremental Q16 coordinates and specialized
 nearest/bilinear, opaque/A8 and byte-order kernels. CoreS3 allocates horizontal
-coordinate/weight storage once in PSRAM, bounded by 320 columns for each of the
-23 scalable billboards (58,880 bytes); native particles use no column storage.
-Per-board preparation metadata is also reused from PSRAM. Coordinates are
-prepared once per frame and shared across bands. Per-pixel division
-and alpha-endpoint blending are avoided without changing RGB565 rounding or
-sample-counter semantics within each drawn span. Renderer/display priorities and DMA ownership are unchanged.
+coordinate/weight storage once in internal SRAM, bounded by 320 columns for each
+of the 23 scalable billboards (29,440 bytes); native particles use no column
+storage. Per-board preparation metadata is also reused from internal SRAM.
+Coordinates are prepared once per frame and shared across bands. Per-pixel
+division and alpha-endpoint blending are avoided; sample counters count visited
+samples within each drawn span.
 
 Opaque texture coverage has no alpha or mask allocation. A8 textures additionally
 keep packed 8x8-source-block opaque masks in PSRAM: 360 bytes for the active
@@ -186,7 +187,7 @@ The renderer uses 8x8 screen-tile occlusion with conservative nearest-sample
 source-footprint checks; opaque RGB565 cards need only full rectangle coverage.
 Farther samples and background under a certified tile are omitted, while nearer
 A8 layers retain their painter order. A reusable 2,400-byte u16 screen cutoff
-table is allocated once in PSRAM. It is built over board bounds before drawing;
+table is allocated once in internal SRAM. It is built over board bounds before drawing;
 scaler coordinates are prepared once per non-hidden board and reused across
 spans. Background visible spans are scanned once per tile band into 80 bytes of
 stack scratch and reused across its rows, with four-pixel pattern stores.
@@ -194,8 +195,8 @@ Boards without occlusion retain continuous raster loops. Source footprint
 coordinates are reused per tile column/row, and wholly non-opaque masks bypass
 coverage testing. The portable API also supports 16x16 screen tiles with 600
 bytes of storage, independently of the unchanged 8x8 source masks. There is no
-depth buffer or per-entity screen mask. Scene/coordinate scratch uses the existing
-PSRAM stack and reusable heap storage; no per-frame heap allocation is added. The existing world-raster duration includes coverage
+depth buffer or per-entity screen mask. Hot scene/coordinate scratch uses APPCPU internal SRAM; no per-frame heap
+allocation is added. The existing world-raster duration includes coverage
 testing and span setup; nearest/bilinear counters count only visited samples
 after occlusion (still including alpha-zero samples within visited spans).
 Portable scene stats expose coverage-test and scaler-preparation counts. An
@@ -234,7 +235,7 @@ PROCPU initializes 8 MiB Quad PSRAM. Its allocator owns the low 4 MiB for the
 portable service heap, Wi-Fi/network state, input/message queues, and other
 non-cache-critical system stacks. The explicitly reserved high 4 MiB is a
 caller-owned APPCPU allocator for canonical textures, decoded assets,
-Slint/world allocations, and the display and renderer thread stacks. Two
+Slint captures and large image allocations. Two
 320x32 RGB565 buffers remain in internal SRAM so SPI2 can submit each completed
 band directly through APPCPU-owned GDMA channel pair 0. Their 40 KiB replaces
 300 KiB of full-screen buffers, releasing 260 KiB of static internal SRAM.
@@ -251,27 +252,28 @@ completion of the last band alone counts as a presented frame. Setup shells and
 world transitions use the same ownership path. There is no retained-frame dirty
 region assumption and no full-frame comparison loop.
 
-The display and renderer threads have the same priority so rendering can run
-while the previous band is transferred. The renderer retains a
-one-tick per-thread slice at 1 kHz, and the display worker has the same one-tick
-slice, without changing the global scheduler. During DMA, the SPI completion
-loop yields to ready peers for payloads larger than the hardware FIFO whenever
-the kernel permits yielding. Transfers of at most 64 bytes complete by bounded
-polling without a task handoff; this includes the 1–4 byte panel-address
-commands repeated for each band. These commands still use the existing DMA
-configuration, and no FIFO/DMA mode switch is added. This lets the
-renderer use the CPU while hardware transfers the previous buffer. With no
-ready peer, polling resumes immediately; no tick sleep or completion ISR is
-added. Hardware completion and the cycle-based 100 ms timeout still bound each
-batch. Non-DMA transfers and contexts that cannot yield continue polling.
+The display worker has preemptive priority 0 and the renderer priority 1.
+SPI DMA payloads larger than 64 bytes block the worker on a transaction-complete
+semaphore, allowing rendering to use the CPU while hardware transfers the
+preceding band. Completion wakes the worker promptly for the next band.
+Renderer buffer acquisition blocks on the existing completion queue, with a
+one-second failure bound; there is no yield loop. Both threads retain their
+one-tick per-thread slice at 1 kHz. Short panel commands and non-yielding callers
+use the driver's bounded polling path; DMA/FIFO mode is unchanged.
 
-SPI uses GDMA without a completion callback because the SPI HAL polls transfer
-completion. The pinned GDMA patch therefore leaves RX/TX EOF interrupts disabled
-for callback-free peripheral channels; callback-backed and memory-to-memory DMA
-retain their completion interrupts. This removes the otherwise unused level-1
-GDMA source implicated in the APPCPU interrupt-return failure beside the 1 kHz
-level-3 timer. Each 32-row payload fits in one DMA batch; a complete screen uses
-eight batches. Existing DMA descriptors and completion polling are reused.
+The narrow pinned SPI patch uses TRANS_DONE, disables its interrupt in the ISR,
+and leaves the completion bit set until the waking caller checks it. Each DMA
+transaction retains a 100 ms timeout and existing DMA cleanup. Callback-free
+GDMA channels still omit their unused EOF interrupts; callback-backed and
+memory-to-memory transfers keep them. Every 32-row band fits in one DMA batch,
+with eight batches per screen.
+
+APPCPU enables Zephyr's `CONFIG_XTENSA_INTERRUPT_NONPREEMPTABLE`: ISR bodies
+cannot interrupt each other. A level-3 timer preempting level-1 completion
+handling reproduced a corrupted interrupt-return/nesting state in this pinned
+Xtensa port. Thread rendering remains interruptible, and PIE still has no
+per-call register preservation or interrupt exclusion. PROCPU touch handling
+and scheduling are unchanged.
 
 PROCPU and APPCPU static DRAM meet at `0x3fcc4c00`; both linkers derive that
 physical boundary from the AMP reservation and enforce it at link time. The
@@ -299,7 +301,14 @@ allocator, so future PROCPU consumers can use `deskkin_runtime_internal_calloc/f
 without reserving another fixed array. APPCPU must not independently allocate
 from that pool. APPCPU has a separate 129 KiB system heap (the previous 1 KiB
 plus 128 KiB from the framebuffer savings), available through Zephyr
-`k_malloc/k_calloc/k_free`; its large renderer allocations continue to use PSRAM.
+`k_malloc/k_calloc/k_free`. The 4 KiB display stack and 32 KiB renderer stack
+use this pool, along with a narrow Rust `Scratch<T>` adapter for hot reusable
+working state. The current 2,400-byte cutoff table, 5,928-byte prepared-board
+table and 29,440-byte horizontal sample table bring these payloads to 74,632
+bytes including the stacks, before allocator overhead. Each column is a
+four-byte source index plus Q16 fraction; the adjacent index is derived. The
+129 KiB is heap capacity, not remaining free space. Large textures and Slint
+allocations continue to use PSRAM; both CPU pool reservations are unchanged.
 The two `CONFIG_ESP_APPCPU_DRAM_SIZE` settings in the supervisor and renderer
 reserve the APPCPU span. Their 0xc00 difference compensates for the ROM-end
 clamp and alignment used by the APPCPU linker; increase or decrease both by
@@ -317,10 +326,10 @@ when they require internal memory.
 During Wi-Fi initialization, its 1.5 KiB coordinator stack temporarily borrows
 the beginning of the not-yet-active service stack. The coordinator is joined
 and the borrowed bytes are zeroized before the service thread is created, so
-the boot and runtime owners cannot overlap. APPCPU keeps only
-cache-independent boot/device-initialization state and driver state in its
-internal window. It creates the long-lived display and Slint/world renderer
-stacks from its PSRAM allocator before starting them.
+the boot and runtime owners cannot overlap. APPCPU keeps boot/device-initialization,
+driver and kernel state in its internal window. Its internal system heap owns
+the long-lived display and Slint/world renderer stacks and hot raster scratch;
+large texture and Slint allocations use its separate PSRAM allocator.
 
 The ESP32-S3 L1 cache and MMU table are shared across the CPUs. APPCPU startup
 adds its IROM and DROM mappings to unused entries without disabling the live
@@ -425,8 +434,8 @@ window overflows during deep startup calls. The pinned startup patch and its
 bootstrap migration enforce this independently of the rendering kernels.
 
 The pinned ESP32-S3 `xtensa/config/tie.h` classifies q0..q7 and SAR_BYTE as
-caller-saved. No PIE value survives a kernel call. Each leaf reserves only the
-32 bytes required for windowed-ABI register spills.
+caller-saved. No PIE value survives a kernel call. The background leaf reserves
+32 bytes for the windowed ABI.
 ### Texture blits
 
 The portable `Blitter` interface accepts RGB565 source/destination slices,
@@ -435,9 +444,16 @@ optional A8 and destination wire order. `blit` accepts equal lengths;
 Only the destination slice is writable. Native raster passes the texture backing
 storage after computing visible clipped/occlusion spans. Native rendering reuses
 each span across the rows of its occlusion tile band, without copying pixels or
-changing painter order. Scaled raster preserves
-its sampler and uses reusable stack rows (640 bytes of colors and 320 bytes of
-alpha, 16-byte aligned); their initialized spare capacity is readable padding.
+changing painter order. Scaled raster passes a validated `SampledSpan` containing
+source rows and reusable four-byte column entries. The default backend samples
+and composes directly. CoreS3 gathers eight nearest samples into registers and
+composes there; no intermediate RGB565/A8 row is written or reread. Only
+destination edges and bilinear filtering use scalar arithmetic. Alpha bilinear
+filtering interpolates premultiplied color and alpha to avoid transparent-color
+bleed. Opaque bilinear filtering preserves its RGB565 arithmetic.
+The nearest gather leaf uses a 48-byte ABI frame; saved scalar pointers occupy
+offsets 16 through 24, outside the register-window spill area. Sampled colors
+and alpha stay in registers.
 
 CoreS3 prepares texture color/A8 planes at 16-byte-aligned offsets within
 ordinary allocations, with row strides rounded up to 16 pixels. The pinned
@@ -446,6 +462,14 @@ reserves up to 15 spare bytes and generates texels directly at the aligned
 offset; it does not copy an already-generated texture. Logical image dimensions and atlas frame
 positions remain separate from storage dimensions; padding is zero-filled at
 cache creation. No asset or grass composition changes are required.
+
+Cached bilinear card textures prepare a half-size mip chain once at capture,
+using a portable allocation-free reducer with premultiplied color/coverage
+averaging. The selected level stays at least as large as the projected rectangle
+on both axes, then uses the regular bilinear sampler. RGB565 row padding remains
+16 pixels. A 272x124 opaque card adds 25,152 bytes of mip color payload in PSRAM,
+plus small level/allocator metadata; the seven-slot cache bounds this at 176,064
+bytes. Native particles and their existing asset LODs do not build mip chains.
 
 Opaque blits use eight-pixel PIE vectors with RGB565 byte swapping. Independently
 unaligned sources are assembled with `EE.SRC.Q.QUP` in registers, with no
@@ -464,7 +488,11 @@ and opaque endpoints. This floor approximation can differ from the previous roun
 interpolation. No alpha expansion buffer or per-span color copy is used. Complete
 zero-alpha vectors skip RGB source loads, blending and destination access; fully opaque vectors
 copy source words without reading destination. Other vectors use the same
-generic arithmetic. There is no grass-specific binary mask kernel.
+generic arithmetic. At texture preparation, exactly binary coverage is packed
+to one bit per texel and the A8 allocation is released. Its generic native
+kernel consumes eight bits, skips zero, copies 255, and selects source or
+destination with a mask for mixed vectors. A 128-byte nibble expansion table
+stays in internal SRAM. This format applies to any binary texture.
 
 Independent source/A8 alignment and enclosing loads are bounded by the supplied
 backing slices. Destination prefixes/tails use the same approximation in scalar
@@ -485,6 +513,8 @@ and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle
 counter through an inlined CoreS3-only `CCOUNT` read, with compiler memory
 effects retained around measured loads/stores. Native span dispatch and the
 CoreS3 blit wrapper are inlined without changing clipping or sampling.
-Times include elapsed preemption; sampling/span time is the pixel-phase
-residual after blits. This differs from older approximate RTC-based phase times.
+Times include elapsed preemption. Opaque/alpha blit times and pixel counts
+cover native spans; sampled spans include composition in the sampling/span
+residual. This keeps timing outside sampled pixel loops. Frame transfer and
+render phases overlap and must not be added as CPU time.
 The USB status response is 236 bytes across supervisor, service and host decoder.

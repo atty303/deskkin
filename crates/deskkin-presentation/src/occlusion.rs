@@ -78,9 +78,29 @@ pub fn build_opaque_mask(
     Ok(())
 }
 
+/// Packs an exactly binary A8 plane without changing its coverage. No writes
+/// occur for non-binary input or a mismatched output size.
+pub fn build_cutout_mask(alpha: &[u8], bits: &mut [u8]) -> Result<(), RasterError> {
+    if bits.len() != alpha.len().div_ceil(8) || alpha.iter().any(|&a| a != 0 && a != 255) {
+        return Err(RasterError::InvalidMask);
+    }
+    bits.fill(0);
+    for (index, &alpha) in alpha.iter().enumerate() {
+        if alpha == 255 {
+            bits[index / 8] |= 1 << (index % 8);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Coverage<'a> {
     Opaque,
+    /// One bit per texel, row-major and least significant bit first.
+    Cutout {
+        bits: &'a [u8],
+        opaque_blocks: Mask8<'a>,
+    },
     Alpha8 {
         alpha: &'a [u8],
         opaque_blocks: Mask8<'a>,
@@ -89,16 +109,37 @@ pub enum Coverage<'a> {
 
 impl<'a> Coverage<'a> {
     pub(super) const fn is_alpha(self) -> bool {
-        matches!(self, Self::Alpha8 { .. })
+        !matches!(self, Self::Opaque)
+    }
+    pub(super) fn at(self, index: usize) -> u8 {
+        match self {
+            Self::Opaque => 255,
+            Self::Cutout { bits, .. } => {
+                if bits[index / 8] & (1 << (index % 8)) != 0 {
+                    255
+                } else {
+                    0
+                }
+            }
+            Self::Alpha8 { alpha, .. } => alpha[index],
+        }
+    }
+
+    pub(super) fn contains(self, pixels: usize) -> bool {
+        match self {
+            Self::Opaque => true,
+            Self::Cutout { bits, .. } => bits.len() >= pixels.div_ceil(8),
+            Self::Alpha8 { alpha, .. } => alpha.len() >= pixels,
+        }
     }
     pub(super) const fn alpha(self) -> &'a [u8] {
         match self {
-            Self::Opaque => &[],
+            Self::Opaque | Self::Cutout { .. } => &[],
             Self::Alpha8 { alpha, .. } => alpha,
         }
     }
     pub(super) fn validate(self, size: SourceSize) -> Result<(), RasterError> {
-        if let Self::Alpha8 { opaque_blocks, .. } = self
+        if let Self::Alpha8 { opaque_blocks, .. } | Self::Cutout { opaque_blocks, .. } = self
             && opaque_blocks.size != size
         {
             return Err(RasterError::InvalidMask);
@@ -182,13 +223,13 @@ impl<'a> Occlusion<'a> {
         for (index, board) in boards.iter().enumerate().rev() {
             let mask = match board.texture.coverage {
                 Coverage::Opaque => None,
-                Coverage::Alpha8 { opaque_blocks, .. }
+                Coverage::Alpha8 { opaque_blocks, .. } | Coverage::Cutout { opaque_blocks, .. }
                     if board.projected.filter == TextureFilter::Nearest
                         && opaque_blocks.bits.iter().any(|&bits| bits != 0) =>
                 {
                     Some(opaque_blocks)
                 }
-                Coverage::Alpha8 { .. } => continue,
+                Coverage::Alpha8 { .. } | Coverage::Cutout { .. } => continue,
             };
             let r = board.projected.screen_rect;
             let left = (r.x.clamp(0, VIEWPORT_WIDTH) as usize).div_ceil(tile);

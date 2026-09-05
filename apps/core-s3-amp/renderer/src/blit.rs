@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use deskkin_presentation::{Blitter, ScalarBlitter};
+use deskkin_presentation::{Blitter, ColumnSample, NearestSpan, SampledSpan, ScalarBlitter};
 
 extern "C" {
     static deskkin_alpha_pie_masks: [u16; 32];
+    static deskkin_cutout_pie_masks: [u16; 64];
+    fn deskkin_cutout_pie(
+        dst: *mut u16,
+        src: *const u16,
+        bits: *const u8,
+        vectors: usize,
+        options: u32,
+        masks: *const u16,
+    );
     fn deskkin_alpha_pie(
         dst: *mut u16,
         src: *const u16,
@@ -13,6 +22,14 @@ extern "C" {
         masks: *const u16,
     );
     fn deskkin_copy_pie(dst: *mut u16, src: *const u16, vectors: usize, wire: u32);
+    fn deskkin_sample_nearest_pie(
+        dst: *mut u16,
+        src: *const u16,
+        columns: *const ColumnSample,
+        alpha: *const u8,
+        vectors: usize,
+        wire: u32,
+    );
 }
 
 #[inline(always)]
@@ -46,6 +63,77 @@ impl PieBlitter {
     }
 }
 impl Blitter for PieBlitter {
+    fn cutout(&mut self, dst: &mut [u16], src: &[u16], start: usize, bits: &[u8], wire: bool) {
+        let end = start.checked_add(dst.len()).expect("cutout range");
+        assert!(end <= src.len() && end.div_ceil(8) <= bits.len());
+        let started = cycles();
+        let (prefix, bulk) = vector_span(
+            dst.as_ptr() as usize,
+            src.as_ptr() as usize,
+            src.len(),
+            start,
+            dst.len(),
+        );
+        ScalarBlitter.cutout(&mut dst[..prefix], src, start, bits, wire);
+        if bulk != 0 {
+            let bit = start + prefix;
+            unsafe {
+                deskkin_cutout_pie(
+                    dst.as_mut_ptr().add(prefix),
+                    src.as_ptr().add(bit),
+                    bits.as_ptr().add(bit / 8),
+                    bulk / 8,
+                    u32::from(wire) | (((bit % 8) as u32) << 8),
+                    core::ptr::addr_of!(deskkin_cutout_pie_masks).cast(),
+                )
+            };
+        }
+        ScalarBlitter.cutout(
+            &mut dst[prefix + bulk..],
+            src,
+            start + prefix + bulk,
+            bits,
+            wire,
+        );
+        self.cycles[1] = self.cycles[1].wrapping_add(cycles().wrapping_sub(started));
+        self.pixels[1] += dst.len() as u32;
+    }
+
+    fn sample(&mut self, dst: &mut [u16], source: SampledSpan<'_>, wire: bool) {
+        if let Some(NearestSpan {
+            colors,
+            alpha,
+            columns,
+        }) = source.nearest()
+        {
+            assert_eq!(dst.len(), columns.len());
+            let prefix = (((16 - (dst.as_ptr() as usize & 15)) & 15) / 2).min(dst.len());
+            let bulk = (dst.len() - prefix) / 8 * 8;
+            source
+                .slice(0..prefix)
+                .draw(&mut dst[..prefix], wire, alpha_pixel);
+            if bulk != 0 {
+                unsafe {
+                    deskkin_sample_nearest_pie(
+                        dst.as_mut_ptr().add(prefix),
+                        colors.as_ptr(),
+                        columns.as_ptr().add(prefix),
+                        alpha.map_or(core::ptr::null(), |a| a.as_ptr()),
+                        bulk / 8,
+                        u32::from(wire),
+                    );
+                }
+            }
+            source.slice(prefix + bulk..dst.len()).draw(
+                &mut dst[prefix + bulk..],
+                wire,
+                alpha_pixel,
+            );
+        } else {
+            source.draw(dst, wire, alpha_pixel);
+        }
+    }
+
     fn blit(&mut self, dst: &mut [u16], src: &[u16], alpha: Option<&[u8]>, wire: bool) {
         assert_eq!(dst.len(), src.len());
         assert!(alpha.is_none_or(|a| a.len() == src.len()));

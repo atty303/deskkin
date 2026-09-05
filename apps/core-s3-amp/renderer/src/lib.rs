@@ -9,10 +9,10 @@ extern crate zephyr;
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::{cell::RefCell, ffi::c_int, time::Duration};
 use deskkin_presentation::{
-    BandTarget, BillboardId, CameraPose, ColumnSample, Coverage, Mask8, Occlusion,
-    PetAnimationState, PetAnimator, PreparedBoard, PreparedScene, ProjectedBillboard, RasterPhase,
-    SceneBillboard, ScreenRect, ScreenTile, SourceSize, Texture, TextureFilter, TextureId,
-    TextureRegion, UnwrappedAngle, WorldUnit, build_opaque_mask,
+    BandTarget, BillboardId, CameraPose, ColumnSample, Coverage, Occlusion, PetAnimationState,
+    PetAnimator, PreparedBoard, PreparedScene, ProjectedBillboard, RasterPhase, SceneBillboard,
+    ScreenRect, ScreenTile, SourceSize, Texture, TextureFilter, TextureId, TextureRegion,
+    UnwrappedAngle, WorldUnit,
     demo_world::{self, DemoMotion},
     sort_far_to_near,
 };
@@ -29,10 +29,11 @@ mod background;
 mod band_buffer;
 mod blit;
 mod buffer_ownership;
+mod scratch;
 mod texture_storage;
 
 use band_buffer::{BandCompletion, Framebuffer, ShellBands};
-use texture_storage::{Alpha, Colors, row_stride};
+use texture_storage::{Alpha, Colors, MipChain, PreparedCoverage, row_stride};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 240;
@@ -100,7 +101,7 @@ unsafe extern "C" {
     fn deskkin_renderer_entry_probe();
     fn deskkin_framebuffer_alloc(index: u8) -> *mut u16;
     fn deskkin_display_submit(buffer_index: u8, y: u16, rows: u16) -> c_int;
-    fn deskkin_display_take_completion(completion: *mut BandCompletion) -> c_int;
+    fn deskkin_display_take_completion(completion: *mut BandCompletion, wait: bool) -> c_int;
     fn deskkin_display_enable() -> c_int;
     fn deskkin_renderer_observe(stage: u8, fault: u8, render_us: u32, transfer_us: u32);
     fn deskkin_renderer_progress(stage: u8);
@@ -217,8 +218,7 @@ fn elapsed_us(start: u64, end: u64) -> u32 {
 struct DecodedLoop {
     image: Image,
     pixels: Colors,
-    alpha: Alpha,
-    opaque_blocks: Vec<u8>,
+    coverage: PreparedCoverage,
     stride: u16,
 }
 
@@ -255,14 +255,13 @@ fn decode_loop(asset: LoopAsset) -> Result<DecodedLoop, RendererFault> {
     Ok(DecodedLoop {
         image: Image::from_rgba8(pixels),
         pixels: rgb565,
-        opaque_blocks: alpha_mask(
+        coverage: PreparedCoverage::new(
             SourceSize {
                 width: stride,
                 height: header.height as u16,
             },
-            &alpha,
+            alpha,
         ),
-        alpha,
         stride,
     })
 }
@@ -322,6 +321,30 @@ fn render_frame(
 struct BillboardTexture {
     size: SourceSize,
     pixels: Colors,
+    mips: MipChain,
+}
+
+impl BillboardTexture {
+    fn new(size: SourceSize, pixels: Colors) -> Self {
+        let stride = row_stride(size.width);
+        let texture = Texture {
+            size: SourceSize {
+                width: stride,
+                height: size.height,
+            },
+            pixels: &pixels,
+            coverage: Coverage::Opaque,
+        };
+        let region = TextureRegion {
+            source_x: 0,
+            source_y: 0,
+            width: size.width,
+            height: size.height,
+            stride,
+        };
+        let mips = MipChain::new(texture, region);
+        Self { size, pixels, mips }
+    }
 }
 
 fn capture_billboard(
@@ -359,9 +382,9 @@ fn capture_billboard(
     if !rendered {
         return Err(RendererFault::RenderSkipped);
     }
-    Ok(BillboardTexture {
+    Ok(BillboardTexture::new(
         size,
-        pixels: Colors::from_fn(
+        Colors::from_fn(
             usize::from(row_stride(size.width)) * usize::from(size.height),
             |i| {
                 let stride = usize::from(row_stride(size.width));
@@ -373,14 +396,13 @@ fn capture_billboard(
                 }
             },
         ),
-    })
+    ))
 }
 
 struct DecorationTexture {
     size: SourceSize,
     pixels: Colors,
-    alpha: Alpha,
-    opaque_blocks: Vec<u8>,
+    coverage: PreparedCoverage,
 }
 
 struct WorldTextures {
@@ -425,8 +447,7 @@ fn new_world_textures() -> WorldTextures {
                 DecorationTexture {
                     size,
                     pixels,
-                    opaque_blocks: alpha_mask(storage_size, &alpha),
-                    alpha,
+                    coverage: PreparedCoverage::new(storage_size, alpha),
                 }
             })
             .collect(),
@@ -514,9 +535,9 @@ fn ensure_world_textures(
 }
 
 struct WorldRasterScratch {
-    cutoffs: Vec<u16>,
-    prepared: Vec<PreparedBoard>,
-    columns: Vec<ColumnSample>,
+    cutoffs: scratch::Scratch<u16>,
+    prepared: scratch::Scratch<PreparedBoard>,
+    columns: scratch::Scratch<ColumnSample>,
 }
 
 struct WorldMotion {
@@ -532,9 +553,9 @@ impl WorldMotion {
             scene: DemoMotion::default(),
             updated_at_us: now_us,
             raster: WorldRasterScratch {
-                cutoffs: vec![0; ScreenTile::Eight.cells()],
-                prepared: vec![PreparedBoard::default(); demo_world::CAPACITY],
-                columns: vec![ColumnSample::default(); WIDTH * demo_world::BILLBOARD_COUNT],
+                cutoffs: scratch::Scratch::new(ScreenTile::Eight.cells()),
+                prepared: scratch::Scratch::new(demo_world::CAPACITY),
+                columns: scratch::Scratch::new(WIDTH * demo_world::BILLBOARD_COUNT),
             },
             projected: vec![empty_projected(); demo_world::CAPACITY],
         }
@@ -548,19 +569,13 @@ impl WorldMotion {
     }
 }
 
-fn alpha_mask(size: SourceSize, alpha: &[u8]) -> Vec<u8> {
-    let mut bits = vec![0; Mask8::bytes_for(size)];
-    build_opaque_mask(size, alpha, &mut bits).expect("validated alpha texture dimensions");
-    bits
-}
-
 fn world_billboard<'a>(
     value: ProjectedBillboard,
     decoded: &'a DecodedLoop,
     frame_index: u8,
     textures: &'a WorldTextures,
 ) -> Result<SceneBillboard<'a>, RendererFault> {
-    let (texture, source_size) = match value.source.0 {
+    let (texture, source_size, mips) = match value.source.0 {
         1 => {
             let size = SourceSize {
                 width: decoded.stride,
@@ -570,16 +585,13 @@ fn world_billboard<'a>(
                 Texture {
                     size,
                     pixels: &decoded.pixels,
-                    coverage: Coverage::Alpha8 {
-                        alpha: &decoded.alpha,
-                        opaque_blocks: Mask8::new(size, &decoded.opaque_blocks)
-                            .map_err(|_| RendererFault::RenderSkipped)?,
-                    },
+                    coverage: decoded.coverage.borrow(),
                 },
                 SourceSize {
                     width: PET_FRAME_WIDTH as u16,
                     height: PET_FRAME_HEIGHT as u16,
                 },
+                None,
             )
         }
         30..=33 | 50..=76 => {
@@ -595,19 +607,10 @@ fn world_billboard<'a>(
                         height: texture.size.height,
                     },
                     pixels: &texture.pixels,
-                    coverage: Coverage::Alpha8 {
-                        alpha: &texture.alpha,
-                        opaque_blocks: Mask8::new(
-                            SourceSize {
-                                width: row_stride(texture.size.width),
-                                height: texture.size.height,
-                            },
-                            &texture.opaque_blocks,
-                        )
-                        .map_err(|_| RendererFault::RenderSkipped)?,
-                    },
+                    coverage: texture.coverage.borrow(),
                 },
                 texture.size,
+                None,
             )
         }
         10..=12 | 20 | 40..=42 => {
@@ -628,6 +631,7 @@ fn world_billboard<'a>(
                     coverage: Coverage::Opaque,
                 },
                 texture.size,
+                Some(&texture.mips),
             )
         }
         _ => return Err(RendererFault::RenderSkipped),
@@ -648,6 +652,13 @@ fn world_billboard<'a>(
             height: source_size.height,
             stride: texture.size.width,
         }
+    };
+    let (texture, region) = if value.filter == TextureFilter::Bilinear {
+        mips.map_or((texture, region), |mips| {
+            mips.select(texture, region, value.screen_rect)
+        })
+    } else {
+        (texture, region)
     };
     SceneBillboard::new(value, texture, region).map_err(|_| RendererFault::RenderSkipped)
 }

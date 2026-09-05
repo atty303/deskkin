@@ -4,73 +4,92 @@ Updated: 2026-09-05
 
 ## Active work
 
-None. SIMD overhead reevaluation and final device verification are complete.
+The scene-independent renderer foundation is complete, verified and flashed.
+The adopted implementation measured 23.976 FPS against the 19.181 FPS baseline
+median, a 25.0% improvement. All USB inspection and live commands run outside
+the agent sandbox. No implementation or device-validation step remains open.
 
 ## Completed work
 
-Native span dispatch and the CoreS3 blit wrapper are inlined. CoreS3 reads the
-240 MHz CCOUNT directly, without a C call for every phase/span timestamp, while
-retaining compiler memory effects around measured loads/stores. Small gains
-were evaluated together rather than requiring a separate 2% improvement from
-each change. PIE kernels, arithmetic, clipping, sampling, buffer ownership and
-texture memory traffic are unchanged. No pixel buffer, source copy, heap
-allocation or static SRAM reservation was added.
+Hot renderer/display stacks and reusable scene/coordinate tables use APPCPU's
+existing internal SRAM pool. Horizontal coordinates use four-byte entries.
+Scaled spans now sample and compose directly, with nearest gathers inserted
+into PIE registers and no intermediate pixel/alpha row. Native textures prepare
+as opaque, exact bit-packed cutout or A8; binary coverage uses a generic mask
+selection kernel. Bilinear alpha filtering averages premultiplied color and
+coverage. Cached bilinear card textures prepare portable mip levels at capture.
 
-The accepted grass composition remains 176 wide clumps, with 144x48, 72x24 and
-9x3 native LODs and distinct quadratic outer-weighted radii from 0.6 through
-3.2. The autonomous camera remains 12 degrees/s. Far grass uses the 9x3 native
-LOD beyond depth 4, or 1/256 of the near LOD pixel count per clump.
+SPI DMA completion and band reuse block on events. The display worker runs at
+priority 0 and rendering at priority 1. APPCPU disables ISR-on-ISR preemption
+with Zephyr's standard Xtensa setting after cross-level interrupt return
+corruption was reproduced; rendering remains interruptible. Per-call PIE state
+preservation and IRQ exclusion remain absent. Startup runs normal rendering.
 
-Per-call PIE state preservation and IRQ exclusion remain absent under the
-exclusive renderer ownership contract. Product startup enters normal rendering
-without SIMD qualification loops. The two 320x32 DMA bands remain 40 KiB, with
-the final band containing 16 rows. Both CPUs retain their allocated SRAM pools;
-`docs/core-s3.md` owns their layout and allocator contracts.
+Scene assets, density, size, native LODs and camera behavior are unchanged. The
+accepted grass composition remains 176 wide clumps, with 144x48, 72x24 and 9x3
+native LODs, radii 0.6 through 3.2, and a 12 degrees/s autonomous camera. The two
+320x32 DMA bands remain 40 KiB; the final band contains 16 rows. Both CPUs keep
+their existing SRAM pool reservations. `docs/core-s3.md` owns allocator and
+rendering contracts.
 
 ## Verification
 
-Fresh baseline benchmarks measured 18.691, 18.692 and 18.685 FPS; the final
-version measured 19.160, 19.292 and 19.218 FPS. Each run lasted 60 seconds.
-The median improved from **18.691 to 19.218 FPS (+2.82%)**. The adopted version
-uses ordinary `#[inline]` for portable dispatch and passes the existing Clippy
-policy without suppression.
+The baseline's three 60-second benchmarks measured 19.197, 19.181 and 19.169 FPS,
+with a 19.181 FPS median. The final clean-build firmware measured 24.105, 23.976
+and 23.922 FPS, with a 23.976 FPS median. Every retained performance candidate
+completed a 60-second benchmark and 120-second normal profile:
 
-The baseline and final 120-second normal raster profiles each captured 259
-samples. They sample autonomous motion, not matched camera frames or CPU-only
-time; sampling/span time is the pixel-phase residual after blit timings.
+| Candidate | FPS |
+| --- | ---: |
+| SRAM working storage and compact coordinates | 22.066 |
+| Fused sampling/composition | 22.205 |
+| Prepared coverage | 22.912 |
+| Completion events with serialized ISR bodies | 22.970 |
+| Higher-priority transfer worker | 23.180 |
+| Cached mip levels | 23.945 |
 
-| Mean elapsed time | Baseline | Final |
+The final 120-second normal profile collected 259 samples. Mean phase times
+include preemption and timing overhead:
+
+| Phase | Baseline | Adopted |
 | --- | ---: | ---: |
-| Pixel raster | 40.308 ms | 38.621 ms |
-| Sampling and span overhead | 26.719 ms | 25.018 ms |
-| Alpha blit | 13.279 ms | 13.285 ms |
-| Opaque blit | 0.309 ms | 0.316 ms |
-| Background | 1.628 ms | 1.592 ms |
-| Frame transfer | 38.267 ms | 37.887 ms |
+| Coverage preparation | 2.354 ms | 2.153 ms |
+| Background | 1.618 ms | 0.948 ms |
+| Scaler setup | 1.253 ms | 0.674 ms |
+| Pixel raster | 38.783 ms | 29.807 ms |
+| Frame transfer | 37.845 ms | 32.473 ms |
 
-`mise run test` passed, including clean CoreS3 build
-`5b0c11e9-40c8-4cfb-8910-cd85b84a7a86`. Full independent review and a delta review
-found no remaining issues at `d651d8f747a3dbdb374bb560ece07f587040b3ab`; only this
-status summary changed afterward. Final flash
-`62ca3419-e0cb-45b3-89cd-9c97df63e8e3` uses the clean build. Its three benchmarks
-and 120-second profile `294593e3-8d43-484d-94ff-57a450cf5a0e` completed. Final
-status `832fca6a-05a5-4b63-b403-4329ace46ebe` reported 7,748 completed frames,
-fresh heartbeat and zero renderer faults, allocation/transfer failures, stale
-snapshots or touch drops. All three benchmarks also reported zero atlas failures.
+Rendering and transfer overlap; these are elapsed phase times, not additive CPU
+costs. Sampled spans now include composition in sampling time, so native blit
+subtotals are not directly comparable to the old sampling/blit split. The final
+status remained fresh at 7,741 frames, with zero faults, allocation failures and
+transfer failures after three benchmarks and the normal profile. SRAM stack and
+hot-table payload totals 74,632 bytes within the existing APPCPU pool; a cached
+272x124 opaque card adds 25,152 bytes of PSRAM mip pixels before metadata.
 
-Reevaluation also covered IRAM placement (18.672 FPS, no improvement) and
-removal of background call splitting (19.144 FPS versus its 19.398 FPS control;
-the caller already passes at most one row). Both were reverted. Generic
-endpoint-mask selection alone measured 18.798 FPS, but actual-kernel pixel
-comparison did not complete because JTAG halt/resume was unreliable. The
-combined endpoint-mask build was withdrawn before timing, and the final flash
-restored normal debugger-free operation. No new alpha kernel was adopted.
+The combined-coverage experiment reduced sampled pixels but regressed to 18.923
+FPS. Coverage preparation rose from 2.181 to 15.416 ms while pixel raster fell
+only from 29.943 to 27.398 ms. Its additional 9,600-byte table and code were
+removed. Painter order and the existing single-occluder tile scheme remain.
 
-All performance candidates received a flash, 60-second benchmark and
-120-second normal profile. Task-owned experimental source, debugger scripts,
-measurement wrapper and downloaded manual were removed. Diagnostic results,
-ELF digests and run IDs are intentionally retained in
-`.deskkin/experiments/simd-revisit/`.
+On-demand actual-PIE qualification passed 123,264 guarded native comparisons
+and 128 sampled filter/clip cases. The corrected ISR setting completed 220
+seconds of ordinary rendering, then repeated qualification successfully at
+7,098 frames with fresh heartbeat and zero faults/allocation/transfer failures.
+No qualification hook is included in the product source. Rejected candidate
+code, temporary build/measurement helpers and firmware/source copies were
+removed; diagnostic evidence remains local.
+
+Deterministic baseline and mip previews cover three camera inputs at 1,000 ms.
+Mips soften small card text while preserving the rest of the composition.
+Component differences are diagnostics, not quality thresholds. Portable tests,
+CoreS3 adapter guard tests, targeted Clippy and the full `mise run test` passed,
+including the clean MCUboot/PROCPU/APPCPU/recovery build. Independent review is
+complete; its test-reference mip selection and stale documentation findings
+were corrected and rechecked without weakening pixel equality assertions.
+
+Diagnostic logs, firmware digests and image comparisons are retained locally in
+`.deskkin/experiments/renderer-foundation/`.
 
 ## Current baseline
 
@@ -105,7 +124,8 @@ the display thread transfers each completed band directly through
 APPCPU-owned GDMA channel pair 0. The final band contains 16 rows. PROCPU owns the low 4 MiB PSRAM region for
 service/network heaps, input/message queues, and non-cache-critical stacks;
 APPCPU owns the explicitly reserved high 4 MiB for textures, decoded assets,
-Slint/world allocations, and its long-lived renderer/display stacks. The
+Slint captures and large image allocations. Renderer/display stacks and hot
+working tables use the APPCPU internal heap. The
 cache-independent 32 KiB SRAM2 bank contains the 21 KiB service, 3 KiB control,
 and 8 KiB Wi-Fi stacks. PROCPU loads APPCPU synchronously on its internal main
 stack before it starts control and service threads. After both cores leave
@@ -115,12 +135,10 @@ linker-derived unused PROCPU range. The Wi-Fi boot
 coordinator temporarily borrows 1.5 KiB from the inactive service stack and is
 joined and zeroized before service ownership begins.
 
-The APPCPU display and renderer threads remain at the same priority so world
-rasterization can run while the preceding band transfer is active. Both
-threads have a one-tick per-thread slice at 1 kHz. Callback-free SPI GDMA does
-not enable its unused EOF interrupt. SPI yields to ready peers during pixel DMA waits; short transfers of at most
-64 bytes use bounded polling to avoid a task handoff for each panel command.
-The DMA configuration and timeout-aware completion checks are shared.
+APPCPU rendering overlaps the previous band's DMA transfer. The display worker
+has priority 0 and rendering priority 1; SPI completion and buffer reuse block
+on events. Short panel commands use bounded polling. Callback-free GDMA EOF
+interrupts stay disabled, and APPCPU ISR bodies cannot preempt each other.
 
 AMP shared memory has schema-checked, generation-published world snapshots, a
 bounded touch ring with per-slot publication and drop count, UI command slot,
