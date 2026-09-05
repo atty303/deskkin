@@ -90,6 +90,18 @@ Run `mise trust --yes` and `mise install --yes` before development. The
 project-scoped Codex configuration starts hk's MCP server through mise; restart
 Codex after the first install if the server was unavailable during startup.
 
+## USB serial inspection
+
+Run USB serial enumeration, target identity checks, and authorized live serial
+commands outside the Codex sandbox from the first attempt, using
+`require_escalated`. Do not probe inside the sandbox first: its device view can
+hide `/dev/serial/by-id` and `/dev/ttyACM*`. If host-side inspection is unavailable,
+report the connection state as unverified rather than disconnected.
+
+Keep enumeration read-only without opening the device. Execution outside the
+sandbox does not authorize additional device operations; preserve the live-device
+approval boundaries in `docs/core-s3.md`.
+
 ## Change policy
 
 Keep changes focused, update documentation with public behavior, and use short
