@@ -3,7 +3,6 @@
 use deskkin_presentation::{Blitter, ScalarBlitter};
 
 extern "C" {
-    fn deskkin_blit_cycles() -> u32;
     static deskkin_alpha_pie_masks: [u16; 32];
     fn deskkin_alpha_pie(
         dst: *mut u16,
@@ -14,6 +13,21 @@ extern "C" {
         masks: *const u16,
     );
     fn deskkin_copy_pie(dst: *mut u16, src: *const u16, vectors: usize, wire: u32);
+}
+
+#[inline(always)]
+pub fn cycles() -> u32 {
+    #[cfg(target_arch = "xtensa")]
+    {
+        let cycles;
+        // Keep the default memory effects so measured loads/stores stay between reads.
+        unsafe {
+            core::arch::asm!("rsr.ccount {cycles}", cycles = out(reg) cycles, options(nostack));
+        }
+        cycles
+    }
+    #[cfg(not(target_arch = "xtensa"))]
+    unreachable!("CoreS3 cycle counter requires Xtensa")
 }
 
 #[derive(Default)]
@@ -38,6 +52,7 @@ impl Blitter for PieBlitter {
         self.blit_from(dst, src, 0, alpha, wire);
     }
 
+    #[inline(always)]
     fn blit_from(
         &mut self,
         dst: &mut [u16],
@@ -50,7 +65,7 @@ impl Blitter for PieBlitter {
         let src = &source[start..end];
         let alpha_backing = alpha;
         let alpha = alpha.map(|a| &a[start..end]);
-        let started = unsafe { deskkin_blit_cycles() };
+        let started = cycles();
         let kind = usize::from(alpha.is_some());
         if let Some(alpha) = alpha {
             let backing = alpha_backing.unwrap();
@@ -111,8 +126,7 @@ impl Blitter for PieBlitter {
                 ScalarBlitter.blit(&mut dst[prefix + bulk..], &src[prefix + bulk..], None, wire);
             }
         }
-        self.cycles[kind] =
-            self.cycles[kind].wrapping_add(unsafe { deskkin_blit_cycles() }.wrapping_sub(started));
+        self.cycles[kind] = self.cycles[kind].wrapping_add(cycles().wrapping_sub(started));
         self.pixels[kind] += dst.len() as u32;
     }
 }

@@ -581,6 +581,7 @@ fn raster_billboard_masked(
     })
 }
 
+#[inline]
 fn raster_native(
     target: &mut BandTarget<'_>,
     projected: ProjectedBillboard,

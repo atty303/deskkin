@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #![no_std]
+#![feature(asm_experimental_arch)]
 
 extern crate alloc;
 extern crate zephyr;
@@ -132,7 +133,6 @@ unsafe extern "C" {
     fn deskkin_deadline_missed();
     fn deskkin_shell_observe(shell: u8, property_matches: u8);
     fn deskkin_raster_profile(values: *const u32);
-    fn deskkin_blit_cycles() -> u32;
 }
 
 #[repr(u8)]
@@ -748,9 +748,9 @@ fn render_world(
     let mut profile = [0_u32; 16];
     let mut blitter = blit::PieBlitter::default();
     let mut phase = RasterPhase::Idle;
-    let mut phase_started = unsafe { deskkin_blit_cycles() };
+    let mut phase_started = blit::cycles();
     let mut observer = |next: RasterPhase| {
-        let now = unsafe { deskkin_blit_cycles() };
+        let now = blit::cycles();
         if phase != RasterPhase::Idle {
             let index = phase as usize;
             profile[index] = profile[index].saturating_add(now.wrapping_sub(phase_started) / 240);

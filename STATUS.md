@@ -4,96 +4,73 @@ Updated: 2026-09-05
 
 ## Active work
 
-None.
+None. SIMD overhead reevaluation and final device verification are complete.
 
 ## Completed work
 
-The accepted grass composition uses 176 wide clumps instead of 176 narrow
-clumps. Its 144x48, 72x24 and 9x3 native LODs provide 50% more nominal
-horizontal coverage, while all 176 clumps receive distinct, quadratic
-outer-weighted radii from 0.6 through 3.2 instead
-of occupying eight discrete rings. The larger outer radius fills the screen
-edges with maximum full-turn detail bounding-box work bounded at 310,068
-pixels. With the 12 degrees/s autonomous orbit, the 247-entity
-60-second benchmark measured 18.778 FPS with zero renderer, allocation,
-transfer, atlas, stale-snapshot or touch-drop faults. A 120-second raster
-profile completed successfully (pixel raster mean 40.260 ms, alpha blit mean
-13.280 ms, frame transfer mean 38.149 ms). Far grass remains on the 9x3 native
+Native span dispatch and the CoreS3 blit wrapper are inlined. CoreS3 reads the
+240 MHz CCOUNT directly, without a C call for every phase/span timestamp, while
+retaining compiler memory effects around measured loads/stores. Small gains
+were evaluated together rather than requiring a separate 2% improvement from
+each change. PIE kernels, arithmetic, clipping, sampling, buffer ownership and
+texture memory traffic are unchanged. No pixel buffer, source copy, heap
+allocation or static SRAM reservation was added.
+
+The accepted grass composition remains 176 wide clumps, with 144x48, 72x24 and
+9x3 native LODs and distinct quadratic outer-weighted radii from 0.6 through
+3.2. The autonomous camera remains 12 degrees/s. Far grass uses the 9x3 native
 LOD beyond depth 4, or 1/256 of the near LOD pixel count per clump.
 
-CoreS3 no longer runs the completed PIE background/blit qualification loops at
-product startup. The renderer enables CP3 and enters normal initialization
-directly; host arithmetic/bounds coverage remains, and a source contract test
-prevents the startup loops from returning. On device, first presentation moved
-from about 43 seconds to 2.683 seconds after boot. A 60-second benchmark measured
-19.968 FPS with zero renderer, allocation, or transfer faults; a subsequent
-120-second raster profile completed without a stop (alpha blit mean 11.781 ms,
-opaque blit mean 0.316 ms, frame transfer mean 38.449 ms).
-
-Internal SRAM released by the band buffers is now reusable on **both CPUs**.
-SRAM layout comes from the Zephyr image linkers and `amp-memory.overlay`;
-`amp-partitions.overlay` describes flash, not SRAM.
-
-| Owner / use | Reserved or registered capacity |
-| --- | ---: |
-| DMA display bands, allocated in PROCPU and handed to APPCPU | 40,960 bytes (40 KiB) |
-| PROCPU linker-derived unused range | 136,896 bytes (133.6875 KiB) |
-| PROCPU runtime allocator, including reclaimed main stacks/shared prefix | 146,112 bytes (142.6875 KiB) |
-| APPCPU independent system heap | 132,096 bytes (129 KiB), plus allocator metadata |
-
-These are pool capacities before allocator metadata and live allocations, not
-current free-byte measurements. PROCPU's aligned free range is
-`[0x3fca3540, 0x3fcc4c00)`; its end matches APPCPU's start. APPCPU ends at
-`0x3fced400`. IRAM aliases, ROM/shared memory and the separate SRAM2 worker
-stacks remain disjoint. Display bands have a named `.noinit.deskkin_display_bands`
-input section and cannot be included in the free pool.
-
-PROCPU consumers use the existing `deskkin_runtime_internal_calloc/free` path;
-APPCPU consumers use Zephyr `k_malloc/k_calloc/k_free`. Neither allocator owns
-the other CPU's memory. PROCPU static growth automatically reduces the
-linker-derived pool, with a link-time minimum-capacity guard. APPCPU's existing
-1 KiB heap gained 128 KiB, reserved by moving both CPU boundary settings by the
-same amount. The settings and their ROM/alignment offset are documented in
-`docs/core-s3.md`. Large Slint/world allocations continue to use PSRAM.
-
-The previously qualified 32-row double buffers, last band 16 rows, preserve
-renderer/DMA overlap. Grass, assets, LOD, portable core, persistent state and
-dependencies are unchanged. No pixel intermediate or copy stage was added.
+Per-call PIE state preservation and IRQ exclusion remain absent under the
+exclusive renderer ownership contract. Product startup enters normal rendering
+without SIMD qualification loops. The two 320x32 DMA bands remain 40 KiB, with
+the final band containing 16 rows. Both CPUs retain their allocated SRAM pools;
+`docs/core-s3.md` owns their layout and allocator contracts.
 
 ## Verification
 
-The final 176-clump source passed `mise run test`, including clean CoreS3 build
-`e58d7811-f0cd-47c2-875f-d38ff0dab83a`. Physical run
-`e4037eab-7f59-439b-a4a8-7f40ad147d4d` completed the 60-second benchmark at
-18.778 FPS with zero renderer, allocation, transfer, atlas, stale-snapshot or
-touch-drop faults. Profile run `8c4ee941-3dc0-41ec-8277-33a9f00281cf` then
-completed 120 seconds without a stop.
+Fresh baseline benchmarks measured 18.691, 18.692 and 18.685 FPS; the final
+version measured 19.160, 19.292 and 19.218 FPS. Each run lasted 60 seconds.
+The median improved from **18.691 to 19.218 FPS (+2.82%)**. The adopted version
+uses ordinary `#[inline]` for portable dispatch and passes the existing Clippy
+policy without suppression.
+
+The baseline and final 120-second normal raster profiles each captured 259
+samples. They sample autonomous motion, not matched camera frames or CPU-only
+time; sampling/span time is the pixel-phase residual after blit timings.
+
+| Mean elapsed time | Baseline | Final |
+| --- | ---: | ---: |
+| Pixel raster | 40.308 ms | 38.621 ms |
+| Sampling and span overhead | 26.719 ms | 25.018 ms |
+| Alpha blit | 13.279 ms | 13.285 ms |
+| Opaque blit | 0.309 ms | 0.316 ms |
+| Background | 1.628 ms | 1.592 ms |
+| Frame transfer | 38.267 ms | 37.887 ms |
 
 `mise run test` passed, including clean CoreS3 build
-`e34e027a-2d55-42a3-b284-359797dcc191`. Fresh independent full review and a
-test-only delta review found no actionable issues at
-`00514811ea4b20cf461c31d2737d0f692bcbdbfb`; only this status summary changed
-afterward. Actual ELF symbols verify the common CPU boundary, IRAM/DRAM alias
-bounds, band exclusion and heap extents.
+`5b0c11e9-40c8-4cfb-8910-cd85b84a7a86`. Full independent review and a delta review
+found no remaining issues at `d651d8f747a3dbdb374bb560ece07f587040b3ab`; only this
+status summary changed afterward. Final flash
+`62ca3419-e0cb-45b3-89cd-9c97df63e8e3` uses the clean build. Its three benchmarks
+and 120-second profile `294593e3-8d43-484d-94ff-57a450cf5a0e` completed. Final
+status `832fca6a-05a5-4b63-b403-4329ace46ebe` reported 7,748 completed frames,
+fresh heartbeat and zero renderer faults, allocation/transfer failures, stale
+snapshots or touch drops. All three benchmarks also reported zero atlas failures.
 
-Final flash `a76cdc12-1ba3-41be-bb4f-2debd970b206` booted successfully.
-The existing memory-ready diagnostic reported **146,112 registered bytes**,
-matching the linked PROCPU pool plus 9 KiB reclaimed after boot.
-A 60-second benchmark measured **20.024 FPS**; the preceding band version's
-three-run median was 19.972 FPS. This single run is a regression check, not a
-claim of improved speed. A 120-second normal profile completed 259 samples:
-mean pixel phase 37.394 ms, alpha blit 11.817 ms, transfer 38.233 ms,
-renderer buffer wait 1.616 ms and display inter-band wait 8.869 ms.
-Final status `383da205-2f97-4f38-85ad-04f1bdd33247` confirmed 5,318 frames,
-fresh heartbeat and zero renderer faults, allocation/transfer failures or
-stale snapshots. The user accepted the preceding band's physical appearance;
-this layout change was checked through device diagnostics, without new camera
-capture.
+Reevaluation also covered IRAM placement (18.672 FPS, no improvement) and
+removal of background call splitting (19.144 FPS versus its 19.398 FPS control;
+the caller already passes at most one row). Both were reverted. Generic
+endpoint-mask selection alone measured 18.798 FPS, but actual-kernel pixel
+comparison did not complete because JTAG halt/resume was unreliable. The
+combined endpoint-mask build was withdrawn before timing, and the final flash
+restored normal debugger-free operation. No new alpha kernel was adopted.
 
-Logs, layout symbols, ELF digests and diagnostic IDs are intentionally retained
-in `.deskkin/experiments/sram-layout/`. The earlier band pixel/guard/ownership
-qualification remains in `.deskkin/experiments/band-buffers/`. No unresolved
-implementation work remains in this slice.
+All performance candidates received a flash, 60-second benchmark and
+120-second normal profile. Task-owned experimental source, debugger scripts,
+measurement wrapper and downloaded manual were removed. Diagnostic results,
+ELF digests and run IDs are intentionally retained in
+`.deskkin/experiments/simd-revisit/`.
 
 ## Current baseline
 

@@ -714,12 +714,6 @@ int main(void)
 	return 0;
 }
 
-uint32_t deskkin_blit_cycles(void)
-{
-    uint32_t cycles;
-    __asm__ volatile("rsr.ccount %0" : "=r"(cycles));
-    return cycles;
-}
 /* Immutable constants stay in internal SRAM rather than mapped PSRAM. */
 uint16_t deskkin_alpha_pie_masks[4][8] __attribute__((aligned(16))) = {
     {1, 1, 1, 1, 1, 1, 1, 1},

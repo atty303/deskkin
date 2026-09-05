@@ -26,7 +26,7 @@ impl Background for PieBackground {
             colors[(prefix + i) % 4]
         }));
         let bulk = rest.len() / 8 * 8;
-        // Bound each IRQ-locked call to one screen row, including for callers
+        // Bound each call to one screen row, including for callers
         // outside the scene renderer. Both pointers are aligned and in bounds.
         for span in rest[..bulk].chunks_mut(320) {
             unsafe {

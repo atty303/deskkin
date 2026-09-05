@@ -482,6 +482,9 @@ saves or restores, alpha expansion scratch, or extra source-copy buffers.
 
 The shared raster profile adds sampling/span overhead, opaque/alpha blit time,
 and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle
-counter, including elapsed preemption; sampling/span time is the pixel-phase
+counter through an inlined CoreS3-only `CCOUNT` read, with compiler memory
+effects retained around measured loads/stores. Native span dispatch and the
+CoreS3 blit wrapper are inlined without changing clipping or sampling.
+Times include elapsed preemption; sampling/span time is the pixel-phase
 residual after blits. This differs from older approximate RTC-based phase times.
 The USB status response is 236 bytes across supervisor, service and host decoder.
