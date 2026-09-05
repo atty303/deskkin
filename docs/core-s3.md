@@ -184,6 +184,13 @@ Coordinates are prepared once per frame and shared across bands. Per-pixel
 division and alpha-endpoint blending are avoided; sample counters count visited
 samples within each drawn span.
 
+The APPCPU framebuffer owns a small debug overlay that is applied immediately
+before each band submission, after either world or Slint shell rendering. Its
+top-left 56x14 RGB565 rectangle is fully opaque and displays integer FPS with a
+fixed 3x5 bitmap font at 2x scale. The value uses frame-start intervals over a
+500 ms window; drawing needs no texture, alpha blend, heap allocation or
+additional framebuffer pass, and bands outside the overlay are skipped.
+
 Opaque texture coverage has no alpha or mask allocation. A8 textures additionally
 keep packed 8x8-source-block opaque masks in PSRAM: 360 bytes for the active
 1152x156 Character atlas and 55 bytes for the three 96x96 decorations plus 9x9 light.

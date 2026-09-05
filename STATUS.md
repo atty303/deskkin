@@ -4,12 +4,14 @@ Updated: 2026-09-05
 
 ## Active work
 
-The scene-independent renderer foundation and distance-aware card filtering are
-complete, verified and flashed. Application boards own focus; adapters request
-bilinear for a focused near board and nearest for other near boards. Every lower
-mip uses nearest. The adopted implementation measured a 26.475 FPS median against
-the 23.976 FPS bilinear baseline. All USB inspection and live commands run outside
-the agent sandbox. No implementation or device-validation step remains open.
+The scene-independent renderer foundation, distance-aware card filtering and the
+top-left FPS debug overlay are complete, verified and flashed. Application
+boards own focus; adapters request bilinear for a focused near board and nearest
+for other near boards. Every lower mip uses nearest. The adopted filtering
+implementation measured a 26.475 FPS median against the 23.976 FPS bilinear
+baseline. The overlay build measured 26.483 FPS in its 60-second device run. All
+USB inspection and live commands run outside the agent sandbox. No implementation
+or device-validation step remains open.
 
 ## Completed work
 
@@ -21,6 +23,12 @@ as opaque, exact bit-packed cutout or A8; binary coverage uses a generic mask
 selection kernel. Bilinear alpha filtering averages premultiplied color and
 coverage. Cached card textures prepare portable mip levels at capture. Mip
 selection is independent of the requested sampling filter.
+
+The APPCPU framebuffer applies a fixed 56x14 opaque debug overlay immediately
+before band submission. It draws `FPS` and a 500 ms-window integer rate with a
+2x 3x5 bitmap font using direct RGB565 stores. It performs no allocation,
+texture lookup, alpha blend or full-frame pass and skips every band outside the
+top-left overlay.
 
 SPI DMA completion and band reuse block on events. The display worker runs at
 priority 0 and rendering at priority 1. APPCPU disables ISR-on-ISR preemption
@@ -83,6 +91,13 @@ a same-firmware hard reset restored control. Final status was fresh at 8,336
 frames with zero renderer faults, stale snapshots, touch drops, allocation
 failures and transfer failures. Evidence is retained in
 `.deskkin/experiments/mip-nearest/focused-policy/`.
+
+The FPS overlay completed a separate 60-second device benchmark at 26.483 FPS,
+0.03% above the 26.475 FPS pre-overlay median and therefore within measurement
+noise. It reported one deadline miss and zero renderer faults, allocation
+failures, transfer failures, stale snapshots and touch drops. The post-flash
+status was fresh at 10,145 frames. Build, flash, status and benchmark evidence is
+retained in `.deskkin/experiments/debug-overlay/`.
 
 The combined-coverage experiment reduced sampled pixels but regressed to 18.923
 FPS. Coverage preparation rose from 2.181 to 15.416 ms while pixel raster fell

@@ -1,4 +1,5 @@
 use super::buffer_ownership::BufferOwnership;
+use super::debug_overlay::DebugOverlay;
 use super::{
     BAND_PIXELS, BAND_ROWS, BUFFER_COUNT, HEIGHT, RendererFault, RendererProgress, RendererStage,
     Rgb565BePixel, WIDTH, deskkin_display_submit, deskkin_display_take_completion,
@@ -33,6 +34,7 @@ pub(super) struct Framebuffer {
     ownership: BufferOwnership<BUFFER_COUNT>,
     started: u64,
     wait_us: u32,
+    overlay: DebugOverlay,
     _single_threaded: PhantomData<Rc<()>>,
 }
 
@@ -48,6 +50,7 @@ impl Framebuffer {
             ownership: BufferOwnership::new(),
             started: 0,
             wait_us: 0,
+            overlay: DebugOverlay::default(),
             _single_threaded: PhantomData,
         })
     }
@@ -94,6 +97,7 @@ impl Framebuffer {
         self.publish_completions()?;
         self.started = unsafe { deskkin_uptime_us() };
         self.wait_us = 0;
+        self.overlay.begin_frame(self.started);
         unsafe {
             deskkin_renderer_observe(
                 RendererStage::Rendering as u8,
@@ -129,6 +133,8 @@ impl Framebuffer {
     ) -> Result<(), RendererFault> {
         let index = self.back;
         let final_band = y + rows == HEIGHT;
+        let overlay = self.overlay;
+        overlay.draw_band(self.words_mut(index), WIDTH, y, rows);
         let render_us =
             elapsed_us(self.started, unsafe { deskkin_uptime_us() }).saturating_sub(self.wait_us);
         if let Some(values) = profile.as_mut() {

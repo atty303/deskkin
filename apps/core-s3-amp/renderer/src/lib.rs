@@ -29,6 +29,7 @@ mod background;
 mod band_buffer;
 mod blit;
 mod buffer_ownership;
+mod debug_overlay;
 mod scratch;
 mod texture_storage;
 
