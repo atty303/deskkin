@@ -641,8 +641,8 @@ static void renderer_entry(void *first, void *second, void *third)
 	deskkin_shared_store(&AMP_SHARED->runtime_sram_publication, 0U);
 	deskkin_shared_copy_to(&AMP_SHARED->runtime_sram, &handoff, sizeof(handoff));
 	deskkin_shared_store(&AMP_SHARED->runtime_sram_publication, handoff.generation);
-	/* APPCPU PIE belongs to this renderer, including its startup checks.
-	 * Other threads/ISRs do not use CP3; Zephyr preserves SAR on preemption
+	/* APPCPU PIE belongs to this renderer. Enable CP3 before entering rust_main;
+	 * other threads/ISRs do not use it. Zephyr preserves SAR on preemption
 	 * and leaves CP3/CPENABLE untouched in this build. */
 	uint32_t cpenable;
 	__asm__ volatile("rsr.cpenable %0" : "=r"(cpenable));

@@ -38,30 +38,3 @@ impl Background for PieBackground {
         }
     }
 }
-
-// Exercise the actual assembly before presenting frames. Guard words detect
-// over-stores; every halfword alignment, length and dither phase is checked.
-#[inline(never)]
-pub fn self_test() -> bool {
-    let mut buffer = Aligned([0_u16; 344]);
-    for offset in 0..8 {
-        for len in 0..=320 {
-            buffer.0.fill(0xa55a);
-            let colors =
-                core::array::from_fn(|i| [0x1234, 0xabcd, 0x55aa, 0xf00d][(offset + i) % 4]);
-            let start = 8 + offset;
-            PieBackground.fill(&mut buffer.0[start..start + len], colors);
-            for (index, &pixel) in buffer.0.iter().enumerate() {
-                let expected = if (start..start + len).contains(&index) {
-                    colors[(index - start) % 4]
-                } else {
-                    0xa55a
-                };
-                if pixel != expected {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}

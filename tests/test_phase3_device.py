@@ -746,6 +746,16 @@ class Phase3DeviceTests(unittest.TestCase):
         self.assertIn("RendererFault::QoiMetadata", renderer)
         self.assertIn("RendererFault::QoiDecode", renderer)
 
+    def test_amp_renderer_does_not_run_pie_qualification_at_startup(self):
+        renderer_root = ROOT / "apps/core-s3-amp/renderer/src"
+        renderer = (renderer_root / "lib.rs").read_text(encoding="utf-8")
+        background = (renderer_root / "background.rs").read_text(encoding="utf-8")
+        blit = (renderer_root / "blit.rs").read_text(encoding="utf-8")
+        self.assertNotIn("background::self_test", renderer)
+        self.assertNotIn("blit::self_test", renderer)
+        self.assertNotIn("pub fn self_test", background)
+        self.assertNotIn("pub fn self_test", blit)
+
     def test_amp_buffer_ownership_requires_completion_before_reuse(self):
         source = ROOT / "apps/core-s3-amp/renderer/src/buffer_ownership.rs"
         with tempfile.TemporaryDirectory() as temporary:

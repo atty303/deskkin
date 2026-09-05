@@ -198,8 +198,6 @@ enum RendererFault {
     QoiMetadata = 15,
     QoiDecode = 16,
     SharedSnapshot = 17,
-    BackgroundCheck = 18,
-    BlitCheck = 19,
 }
 
 #[repr(u8)]
@@ -842,28 +840,6 @@ fn sas_text(sas: u32) -> slint::SharedString {
 #[no_mangle]
 extern "C" fn rust_main() {
     unsafe { deskkin_renderer_entry_probe() };
-    if !background::self_test() {
-        unsafe {
-            deskkin_renderer_observe(
-                RendererStage::Failed as u8,
-                RendererFault::BackgroundCheck as u8,
-                0,
-                0,
-            )
-        };
-        return;
-    }
-    if !blit::self_test() {
-        unsafe {
-            deskkin_renderer_observe(
-                RendererStage::Failed as u8,
-                RendererFault::BlitCheck as u8,
-                0,
-                0,
-            )
-        };
-        return;
-    }
     let state = Rc::new(RefCell::new(Vec::new()));
     if slint::platform::set_platform(Box::new(DevicePlatform {
         windows: state.clone(),

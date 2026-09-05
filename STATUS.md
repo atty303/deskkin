@@ -4,6 +4,15 @@ Updated: 2026-09-05
 
 ## Completed work
 
+CoreS3 no longer runs the completed PIE background/blit qualification loops at
+product startup. The renderer enables CP3 and enters normal initialization
+directly; host arithmetic/bounds coverage remains, and a source contract test
+prevents the startup loops from returning. On device, first presentation moved
+from about 43 seconds to 2.683 seconds after boot. A 60-second benchmark measured
+19.968 FPS with zero renderer, allocation, or transfer faults; a subsequent
+120-second raster profile completed without a stop (alpha blit mean 11.781 ms,
+opaque blit mean 0.316 ms, frame transfer mean 38.449 ms).
+
 Internal SRAM released by the band buffers is now reusable on **both CPUs**.
 SRAM layout comes from the Zephyr image linkers and `amp-memory.overlay`;
 `amp-partitions.overlay` describes flash, not SRAM.

@@ -408,7 +408,8 @@ The portable `Background` interface retains a scalar default and the existing
 coverage and phase hooks. RGB565 wire order and the four-pixel dither phase
 are resolved before vector stores; unaligned prefixes and suffixes stay scalar.
 Each vector call writes at most 320 pixels. APPCPU PIE belongs exclusively to
-the renderer thread, which enables CP3 once before its startup checks. Other
+the renderer thread, which enables CP3 once before entering `rust_main` and its
+first PIE use. Other
 APPCPU threads and interrupt handlers must not use PIE. Zephyr preserves SAR
 on interrupts and context switches; it leaves CP3 and CPENABLE untouched in
 this configuration. Kernels therefore run with interrupts and scheduling enabled,
@@ -424,10 +425,6 @@ bootstrap migration enforce this independently of the rendering kernels.
 The pinned ESP32-S3 `xtensa/config/tie.h` classifies q0..q7 and SAR_BYTE as
 caller-saved. No PIE value survives a kernel call. Each leaf reserves only the
 32 bytes required for windowed-ABI register spills.
-At startup the same kernel is checked against expected pixels and guard words
-for all eight halfword alignments and lengths 0 through 320. Failure publishes
-renderer fault 18 (`BackgroundCheck`) and stops before frame presentation.
-
 ### Texture blits
 
 The portable `Blitter` interface accepts RGB565 source/destination slices,
@@ -481,12 +478,6 @@ to the assembly kernel; there is no intermediate C forwarding call.
 There are no per-call q/SAR/SAR_BYTE
 saves or restores, alpha expansion scratch, or extra source-copy buffers.
 
-Startup checks 328,704 source/destination alignment, length 0–320, byte-order,
-alpha/no-alpha and padded/unpadded backing combinations plus 12,800 RGB extreme
-and alpha cases against the candidate arithmetic and guards. Another 4,096
-cases vary A8 backing alignment independently and alternate transparent, opaque
-and mixed runs to check source-cache transitions.
-A failed blit check publishes renderer fault 19 (`BlitCheck`) before presentation.
 The shared raster profile adds sampling/span overhead, opaque/alpha blit time,
 and opaque/alpha pixel counts. All phase/blit times use the same 240 MHz cycle
 counter, including elapsed preemption; sampling/span time is the pixel-phase
