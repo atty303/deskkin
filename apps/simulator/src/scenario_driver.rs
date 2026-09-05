@@ -206,12 +206,12 @@ impl ViewSetName {
 impl From<ApplicationViews> for ViewSetName {
     fn from(value: ApplicationViews) -> Self {
         Self {
-            availability: value.availability.map(|availability| match availability {
+            availability: value.availability.map(|board| match board.content {
                 availability::Surface::Unknown => AvailabilityViewName::Unknown,
                 availability::Surface::Available => AvailabilityViewName::Available,
                 availability::Surface::Unavailable => AvailabilityViewName::Unavailable,
             }),
-            synthetic_notice: value.synthetic_notice.map(|notice| match notice {
+            synthetic_notice: value.synthetic_notice.map(|board| match board.content {
                 synthetic_notice::NoticeKind::CompositionCheck => NoticeViewName::CompositionCheck,
             }),
         }

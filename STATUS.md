@@ -4,9 +4,11 @@ Updated: 2026-09-05
 
 ## Active work
 
-The scene-independent renderer foundation is complete, verified and flashed.
-The adopted implementation measured 23.976 FPS against the 19.181 FPS baseline
-median, a 25.0% improvement. All USB inspection and live commands run outside
+The scene-independent renderer foundation and distance-aware card filtering are
+complete, verified and flashed. Application boards own focus; adapters request
+bilinear for a focused near board and nearest for other near boards. Every lower
+mip uses nearest. The adopted implementation measured a 26.475 FPS median against
+the 23.976 FPS bilinear baseline. All USB inspection and live commands run outside
 the agent sandbox. No implementation or device-validation step remains open.
 
 ## Completed work
@@ -17,7 +19,8 @@ Scaled spans now sample and compose directly, with nearest gathers inserted
 into PIE registers and no intermediate pixel/alpha row. Native textures prepare
 as opaque, exact bit-packed cutout or A8; binary coverage uses a generic mask
 selection kernel. Bilinear alpha filtering averages premultiplied color and
-coverage. Cached bilinear card textures prepare portable mip levels at capture.
+coverage. Cached card textures prepare portable mip levels at capture. Mip
+selection is independent of the requested sampling filter.
 
 SPI DMA completion and band reuse block on events. The display worker runs at
 priority 0 and rendering at priority 1. APPCPU disables ISR-on-ISR preemption
@@ -67,6 +70,20 @@ transfer failures after three benchmarks and the normal profile. SRAM stack and
 hot-table payload totals 74,632 bytes within the existing APPCPU pool; a cached
 272x124 opaque card adds 25,152 bytes of PSRAM mip pixels before metadata.
 
+The adopted focus policy measured 26.475, 26.509 and 26.448 FPS over three
+60-second runs, with a 26.475 FPS median. This is 10.4% above the bilinear
+baseline, 4.3% above the lower-mip-only nearest spike, and 1.6% below the
+all-distance nearest spike. A 120-second profile collected 259 samples: mean
+pixel raster was 20.743 ms, sampling 11.706 ms, nearest 192,855 samples/frame,
+bilinear 2,038 samples/frame, and transfer 32.520 ms. Bilinear ranged from zero
+to 11,304 samples/frame as the focused board crossed mip and visibility bounds.
+One additional benchmark was excluded after the USB control observation stopped
+halfway through; rendering remained at 26.658 FPS with zero renderer faults, and
+a same-firmware hard reset restored control. Final status was fresh at 8,336
+frames with zero renderer faults, stale snapshots, touch drops, allocation
+failures and transfer failures. Evidence is retained in
+`.deskkin/experiments/mip-nearest/focused-policy/`.
+
 The combined-coverage experiment reduced sampled pixels but regressed to 18.923
 FPS. Coverage preparation rose from 2.181 to 15.416 ms while pixel raster fell
 only from 29.943 to 27.398 ms. Its additional 9,600-byte table and code were
@@ -94,9 +111,12 @@ Diagnostic logs, firmware digests and image comparisons are retained locally in
 ## Current baseline
 
 Deskkin's portable application now publishes bounded `ApplicationViews` with
-independent optional Availability and synthetic Notice members. Both can remain
-present simultaneously; the old surface-class arbiter and compatibility view
-layer are gone. Feature registration, namespaced effect routing, exact
+independent optional Availability and synthetic Notice boards. Both can remain
+present simultaneously; a visible Notice owns focus and Availability regains it
+when Notice clears. Renderer adapters translate focus to a concrete filter, so
+presentation and raster data contain no application focus state. The old
+surface-class arbiter and compatibility view layer are gone. Feature
+registration, namespaced effect routing, exact
 completion validation, and transactional failure behavior remain intact.
 
 `deskkin-presentation` contains the allocation-free `no_std` continuous-world

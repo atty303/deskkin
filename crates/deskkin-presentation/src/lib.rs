@@ -136,6 +136,18 @@ pub struct ProjectedBillboard {
     pub filter: TextureFilter,
 }
 
+impl ProjectedBillboard {
+    /// Lower mip levels are prefiltered and only need nearest sampling.
+    #[must_use]
+    pub const fn resolved_filter(self, mip_selected: bool) -> TextureFilter {
+        if mip_selected {
+            TextureFilter::Nearest
+        } else {
+            self.filter
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectionCull {
     InvalidRadius,
@@ -937,6 +949,27 @@ impl PetAnimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lower_mips_force_nearest_while_base_level_preserves_the_requested_filter() {
+        let mut projected = ProjectedBillboard {
+            id: BillboardId(1),
+            screen_rect: ScreenRect {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            depth: WorldUnit::ONE,
+            source: TextureId(1),
+            filter: TextureFilter::Bilinear,
+        };
+        assert_eq!(projected.resolved_filter(false), TextureFilter::Bilinear);
+        assert_eq!(projected.resolved_filter(true), TextureFilter::Nearest);
+        projected.filter = TextureFilter::Nearest;
+        assert_eq!(projected.resolved_filter(false), TextureFilter::Nearest);
+        assert_eq!(projected.resolved_filter(true), TextureFilter::Nearest);
+    }
 
     const CAMERA: CameraPose = CameraPose {
         radius: WorldUnit::from_int(4),

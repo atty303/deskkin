@@ -1,4 +1,4 @@
-use deskkin_application::{ApplicationViews, availability, synthetic_notice};
+use deskkin_application::{ApplicationViews, Board, availability, synthetic_notice};
 use deskkin_presentation::{
     BillboardId, CameraPose, Coverage, Mask8, Occlusion, ProjectedBillboard,
     RateLimitedObservedYaw, SceneBillboard, ScreenTile, SourceSize, Texture, TextureFilter,
@@ -105,19 +105,17 @@ impl OwnedTexture {
         self
     }
 
-    fn for_projection(&self, projected: ProjectedBillboard) -> &Self {
+    fn for_projection(&self, projected: ProjectedBillboard) -> (&Self, bool) {
         let mut selected = self;
-        if projected.filter == TextureFilter::Bilinear {
-            for mip in &self.mips {
-                if i32::from(mip.size.width) < projected.screen_rect.width
-                    || i32::from(mip.size.height) < projected.screen_rect.height
-                {
-                    break;
-                }
-                selected = mip;
+        for mip in &self.mips {
+            if i32::from(mip.size.width) < projected.screen_rect.width
+                || i32::from(mip.size.height) < projected.screen_rect.height
+            {
+                break;
             }
+            selected = mip;
         }
-        selected
+        (selected, !core::ptr::eq(selected, self))
     }
 
     fn borrow(&self) -> Texture<'_> {
@@ -207,10 +205,14 @@ impl WorldScene {
         };
         let entities = demo_world::projected_entities(
             self.motion,
-            views.availability.map(|surface| {
-                TextureId(10 + u16::try_from(availability_index(surface)).unwrap_or(0))
+            views.availability.map(|board| {
+                TextureId(10 + u16::try_from(availability_index(board.content)).unwrap_or(0))
             }),
             views.synthetic_notice.is_some(),
+            demo_world::BoardFilters {
+                availability: board_filter(views.availability),
+                notice: board_filter(views.synthetic_notice),
+            },
             camera,
         );
 
@@ -234,11 +236,11 @@ impl WorldScene {
             Occlusion::new(ScreenTile::Eight, &mut cutoffs).expect("screen tile storage");
         let ground = demo_world::HORIZON;
         let draw = (|| {
-            let resolve = |value: ProjectedBillboard| {
-                let texture = self
-                    .texture(value.source, views)?
-                    .for_projection(value)
-                    .borrow();
+            let resolve = |mut value: ProjectedBillboard| {
+                let (texture, mip_selected) =
+                    self.texture(value.source, views)?.for_projection(value);
+                value.filter = value.resolved_filter(mip_selected);
+                let texture = texture.borrow();
                 SceneBillboard::new(
                     value,
                     texture,
@@ -305,7 +307,7 @@ impl WorldScene {
         ui: &StatusWindow,
         views: ApplicationViews,
     ) -> Result<(), String> {
-        if let Some(surface) = views.availability {
+        if let Some(surface) = views.availability.map(|board| board.content) {
             let index = availability_index(surface);
             if self.availability_cache[index].is_none() {
                 self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
@@ -318,7 +320,9 @@ impl WorldScene {
                 self.metrics.cache_hits = self.metrics.cache_hits.saturating_add(1);
             }
         }
-        if views.synthetic_notice == Some(synthetic_notice::NoticeKind::CompositionCheck) {
+        if views.synthetic_notice.map(|board| board.content)
+            == Some(synthetic_notice::NoticeKind::CompositionCheck)
+        {
             if self.notice_cache.is_none() {
                 self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
                 self.notice_cache =
@@ -377,6 +381,14 @@ impl WorldScene {
                 .ok_or_else(|| "notice texture cache missing".into()),
             _ => Err("unknown world texture".into()),
         }
+    }
+}
+
+fn board_filter<T>(board: Option<Board<T>>) -> TextureFilter {
+    if board.is_some_and(|board| board.focused) {
+        TextureFilter::Bilinear
+    } else {
+        TextureFilter::Nearest
     }
 }
 
@@ -520,10 +532,14 @@ mod tests {
         };
         let mut projected: Vec<_> = demo_world::projected_entities(
             scene.motion,
-            views
-                .availability
-                .map(|surface| TextureId(10 + u16::try_from(availability_index(surface)).unwrap())),
+            views.availability.map(|board| {
+                TextureId(10 + u16::try_from(availability_index(board.content)).unwrap())
+            }),
             views.synthetic_notice.is_some(),
+            demo_world::BoardFilters {
+                availability: board_filter(views.availability),
+                notice: board_filter(views.synthetic_notice),
+            },
             camera,
         )
         .filter_map(Result::ok)
@@ -532,12 +548,13 @@ mod tests {
         let mut expected = vec![0; WIDTH * HEIGHT];
         demo_world::paint_background(&mut expected, false).unwrap();
         let mut samples = 0;
-        for value in projected {
-            let texture = scene
+        for mut value in projected {
+            let (texture, mip_selected) = scene
                 .texture(value.source, views)
                 .unwrap()
-                .for_projection(value)
-                .borrow();
+                .for_projection(value);
+            value.filter = value.resolved_filter(mip_selected);
+            let texture = texture.borrow();
             let stats =
                 deskkin_presentation::raster_billboard(&mut expected, WIDTH, value, texture)
                     .unwrap();
@@ -577,8 +594,10 @@ mod tests {
         ui.set_notice_text("Deskkin notice".into());
         let mut scene = WorldScene::new();
         let mut views = ApplicationViews {
-            availability: Some(availability::Surface::Unknown),
-            synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
+            availability: Some(Board::unfocused(availability::Surface::Unknown)),
+            synthetic_notice: Some(Board::focused(
+                synthetic_notice::NoticeKind::CompositionCheck,
+            )),
         };
         scene.tick(&ui, views, 0).unwrap();
         assert_painter_matches(&scene, views);
@@ -596,7 +615,8 @@ mod tests {
             usize::from(scene.metrics.visible + scene.metrics.culled),
             demo_world::CAPACITY
         );
-        assert!(scene.metrics.nearest_samples > 0 && scene.metrics.bilinear_samples > 0);
+        assert!(scene.metrics.nearest_samples > 0);
+        assert!(scene.metrics.bilinear_samples > 0);
         assert!(ui.get_world_mode() && !ui.get_capture_mode());
         let initial = scene.framebuffer.clone();
         scene.touch_sample(0, true);
@@ -612,7 +632,7 @@ mod tests {
             usize::from(scene.metrics.visible + scene.metrics.culled),
             demo_world::CAPACITY
         );
-        assert!(scene.metrics.bilinear_samples > 0);
+        assert_eq!(scene.metrics.bilinear_samples, 0);
         assert_eq!(scene.metrics.cache_misses, 4);
         views.availability = None;
         scene.tick(&ui, views, 500).unwrap();

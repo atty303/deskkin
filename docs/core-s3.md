@@ -159,7 +159,10 @@ active Character QOI loop is converted once to RGB565+A8. Three canonical
 in PSRAM (82,944 bytes total), plus a 243-byte light texture. Source provenance
 and prompts are in `assets/world/night-garden/README.md`. The custom rasterizer
 writes directly into the clipped internal-SRAM band: nearest+A8 for Character
-and decoration sprites, fixed-point bilinear for opaque information boards.
+and decoration sprites, and an application-selected near-distance filter for
+opaque information boards. A focused board uses fixed-point bilinear; other
+boards use nearest. Every cached card selects its mip level independently of
+that choice, and lower mip levels always use nearest.
 The exploration guide is a 136x204 portrait card with its own Slint layout and
 captured dimensions; other information cards remain 272x124 landscape.
 Solid clear is replaced by sky and dark-ground RGB565 gradients joined through
@@ -171,7 +174,9 @@ Its time is included in world-raster and total render duration, not billboard
 sampling counters. Native-size nearest sprites use direct texel addressing;
 other sizes and information boards use the shared scaler.
 The shared scaler uses exact incremental Q16 coordinates and specialized
-nearest/bilinear, opaque/A8 and byte-order kernels. CoreS3 allocates horizontal
+nearest/bilinear, opaque/A8 and byte-order kernels. The AMP view snapshot carries
+the concrete filter in each semantic board byte; renderer data contains no focus
+state and the 24-byte shared snapshot and SRAM layout do not grow. CoreS3 allocates horizontal
 coordinate/weight storage once in internal SRAM, bounded by 320 columns for each
 of the 23 scalable billboards (29,440 bytes); native particles use no column
 storage. Per-board preparation metadata is also reused from internal SRAM.
@@ -463,11 +468,12 @@ offset; it does not copy an already-generated texture. Logical image dimensions 
 positions remain separate from storage dimensions; padding is zero-filled at
 cache creation. No asset or grass composition changes are required.
 
-Cached bilinear card textures prepare a half-size mip chain once at capture,
-using a portable allocation-free reducer with premultiplied color/coverage
-averaging. The selected level stays at least as large as the projected rectangle
-on both axes, then uses the regular bilinear sampler. RGB565 row padding remains
-16 pixels. A 272x124 opaque card adds 25,152 bytes of mip color payload in PSRAM,
+All cached card textures prepare a half-size mip chain once at capture, using a
+portable allocation-free reducer with premultiplied color/coverage averaging.
+The selected level stays at least as large as the projected rectangle on both
+axes. The base level uses the concrete filter supplied by the application
+adapter; every lower mip uses nearest sampling. RGB565 row padding remains 16
+pixels. A 272x124 opaque card adds 25,152 bytes of mip color payload in PSRAM,
 plus small level/allocator metadata; the seven-slot cache bounds this at 176,064
 bytes. Native particles and their existing asset LODs do not build mip chains.
 

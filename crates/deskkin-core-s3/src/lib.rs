@@ -11,8 +11,16 @@ pub const RESERVED_CONTROL_CAPACITY: usize = 1;
 pub const COMPLETION_QUEUE_CAPACITY: usize = 8;
 pub const HOST_PORT: u16 = 39_042;
 pub const AMP_WORLD_MAGIC: u32 = 0x4453_574c;
-pub const AMP_WORLD_SCHEMA: u8 = 1;
+pub const AMP_WORLD_SCHEMA: u8 = 2;
 pub const AMP_WORLD_SNAPSHOT_LEN: usize = 24;
+pub const AMP_WORLD_VALUE_MASK: u8 = 0x7f;
+pub const AMP_WORLD_FILTER_BILINEAR: u8 = 0x80;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AmpTextureFilter {
+    Nearest,
+    Bilinear,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AmpWorldSnapshot {
@@ -22,6 +30,8 @@ pub struct AmpWorldSnapshot {
     pub shell: u8,
     pub availability: Option<u8>,
     pub notice: Option<u8>,
+    pub availability_filter: AmpTextureFilter,
+    pub notice_filter: AmpTextureFilter,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,12 +67,12 @@ pub fn decode_amp_world_snapshot(
         return Err(AmpSnapshotError::UnknownSchema);
     }
     let shell = payload[21];
-    let availability = match payload[22] {
+    let availability = match payload[22] & AMP_WORLD_VALUE_MASK {
         0 => None,
         value @ 1..=3 => Some(value),
         _ => return Err(AmpSnapshotError::InvalidSemanticValue),
     };
-    let notice = match payload[23] {
+    let notice = match payload[23] & AMP_WORLD_VALUE_MASK {
         0 => None,
         1 => Some(1),
         _ => return Err(AmpSnapshotError::InvalidSemanticValue),
@@ -87,6 +97,16 @@ pub fn decode_amp_world_snapshot(
         shell,
         availability,
         notice,
+        availability_filter: if payload[22] & AMP_WORLD_FILTER_BILINEAR != 0 {
+            AmpTextureFilter::Bilinear
+        } else {
+            AmpTextureFilter::Nearest
+        },
+        notice_filter: if payload[23] & AMP_WORLD_FILTER_BILINEAR != 0 {
+            AmpTextureFilter::Bilinear
+        } else {
+            AmpTextureFilter::Nearest
+        },
     })
 }
 
@@ -627,7 +647,7 @@ mod tests {
         payload[20] = AMP_WORLD_SCHEMA;
         payload[21] = 4;
         payload[22] = 2;
-        payload[23] = 1;
+        payload[23] = 1 | AMP_WORLD_FILTER_BILINEAR;
         assert_eq!(
             decode_amp_world_snapshot(7, &payload, 7).unwrap(),
             AmpWorldSnapshot {
@@ -637,6 +657,8 @@ mod tests {
                 shell: 4,
                 availability: Some(2),
                 notice: Some(1),
+                availability_filter: AmpTextureFilter::Nearest,
+                notice_filter: AmpTextureFilter::Bilinear,
             }
         );
         assert_eq!(

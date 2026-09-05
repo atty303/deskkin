@@ -465,8 +465,9 @@ int deskkin_world_snapshot(struct deskkin_world_snapshot *output)
 		if (publication == after && output->generation == publication) {
 			if (output->magic != DESKKIN_WORLD_MAGIC ||
 			    output->schema != DESKKIN_WORLD_SCHEMA ||
-			    output->shell > DESKKIN_SHELL_PAIRED || output->availability > 3U ||
-			    output->notice > 1U ||
+			    output->shell > DESKKIN_SHELL_PAIRED ||
+			    (output->availability & DESKKIN_WORLD_VALUE_MASK) > 3U ||
+			    (output->notice & DESKKIN_WORLD_VALUE_MASK) > 1U ||
 			    (output->sas != UINT32_MAX && output->sas > 999999U)) {
 				return -EPROTO;
 			}

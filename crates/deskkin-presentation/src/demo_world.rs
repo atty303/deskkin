@@ -206,14 +206,43 @@ fn entity(
             },
             world_height: size,
             texture_id: texture,
-            filter: if matches!(texture.0, 10..=12 | 20 | 40..=42) {
-                TextureFilter::Bilinear
-            } else {
-                TextureFilter::Nearest
-            },
+            filter: TextureFilter::Nearest,
         },
         source,
     )
+}
+
+fn board_entity(
+    id: u16,
+    texture: TextureId,
+    azimuth: UnwrappedAngle,
+    height: WorldUnit,
+    filter: TextureFilter,
+) -> (Billboard, SourceSize) {
+    let (mut board, source) = entity(
+        id,
+        texture,
+        WorldUnit::ratio(18, 10),
+        azimuth,
+        height,
+        WorldUnit::ONE,
+        LANDSCAPE_CARD,
+    );
+    board.filter = filter;
+    (board, source)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BoardFilters {
+    pub availability: TextureFilter,
+    pub notice: TextureFilter,
+}
+
+impl BoardFilters {
+    pub const NEAREST: Self = Self {
+        availability: TextureFilter::Nearest,
+        notice: TextureFilter::Nearest,
+    };
 }
 
 /// Caller provides scratch capacity to the projector; no scene allocation,
@@ -222,8 +251,8 @@ pub fn entities(
     motion: DemoMotion,
     availability: Option<TextureId>,
     notice: bool,
+    filters: BoardFilters,
 ) -> impl Iterator<Item = (Billboard, SourceSize)> {
-    let board = LANDSCAPE_CARD;
     let principal = [
         Some(entity(
             CHARACTER_ID.0,
@@ -237,23 +266,19 @@ pub fn entities(
                 height: 156,
             },
         )),
-        Some(entity(
+        Some(board_entity(
             2,
             availability.unwrap_or(TextureId(40)),
-            WorldUnit::ratio(18, 10),
             UnwrappedAngle::from_degrees(-45),
             WorldUnit::ONE,
-            WorldUnit::ONE,
-            board,
+            filters.availability,
         )),
-        Some(entity(
+        Some(board_entity(
             3,
             if notice { TextureId(20) } else { TextureId(41) },
-            WorldUnit::ratio(18, 10),
             UnwrappedAngle::from_degrees(35),
             WorldUnit::ratio(8, 10),
-            WorldUnit::ONE,
-            board,
+            filters.notice,
         )),
         Some(entity(
             5,
@@ -447,9 +472,10 @@ pub fn projected_entities(
     motion: DemoMotion,
     availability: Option<TextureId>,
     notice: bool,
+    filters: BoardFilters,
     camera: crate::CameraPose,
 ) -> impl Iterator<Item = Result<ProjectedBillboard, crate::ProjectionCull>> {
-    entities(motion, availability, notice)
+    entities(motion, availability, notice, filters)
         .map(move |(billboard, source)| crate::project_billboard(billboard, source, camera))
         .chain(particles().map(move |particle| crate::project_particle(particle, camera)))
 }
@@ -700,11 +726,13 @@ mod tests {
         split.advance(u32::MAX - 50);
         split.advance(50);
         assert_eq!(once, split);
-        let scene: std::vec::Vec<_> = entities(once, Some(TextureId(10)), true).collect();
+        let scene: std::vec::Vec<_> =
+            entities(once, Some(TextureId(10)), true, BoardFilters::NEAREST).collect();
         once.advance(120_000);
         assert_eq!(
             scene,
-            entities(once, Some(TextureId(10)), true).collect::<std::vec::Vec<_>>()
+            entities(once, Some(TextureId(10)), true, BoardFilters::NEAREST)
+                .collect::<std::vec::Vec<_>>()
         );
         let mut boundary = DemoMotion::default();
         boundary.advance(119_999);
@@ -717,18 +745,23 @@ mod tests {
     fn scene_budget_identity_projection_and_semantic_views() {
         let mut motion = DemoMotion::default();
         for _ in 0..120 {
-            let full: std::vec::Vec<_> = entities(motion, Some(TextureId(10)), true).collect();
+            let filters = BoardFilters {
+                availability: TextureFilter::Bilinear,
+                notice: TextureFilter::Bilinear,
+            };
+            let full: std::vec::Vec<_> =
+                entities(motion, Some(TextureId(10)), true, filters).collect();
             let cards: std::vec::Vec<_> = full
                 .iter()
                 .filter(|(b, _)| b.filter == TextureFilter::Bilinear)
                 .collect();
-            assert_eq!(cards.len(), 3);
+            assert_eq!(cards.len(), 2);
             assert_eq!(
                 cards
                     .iter()
                     .filter(|(_, size)| *size == PORTRAIT_CARD)
                     .count(),
-                1
+                0
             );
             assert_eq!(
                 cards
@@ -738,7 +771,8 @@ mod tests {
                 2
             );
             assert_eq!(full.len() + particles().count(), CAPACITY);
-            let demo: std::vec::Vec<_> = entities(motion, None, false).collect();
+            let demo: std::vec::Vec<_> =
+                entities(motion, None, false, BoardFilters::NEAREST).collect();
             assert_eq!(demo.len() + particles().count(), CAPACITY);
             assert_eq!(
                 demo.iter()

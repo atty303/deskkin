@@ -85,6 +85,17 @@ struct WorldSnapshot {
     notice: u8,
 }
 
+const WORLD_VALUE_MASK: u8 = 0x7f;
+const WORLD_FILTER_BILINEAR: u8 = 0x80;
+
+const fn snapshot_filter(value: u8) -> TextureFilter {
+    if value & WORLD_FILTER_BILINEAR != 0 {
+        TextureFilter::Bilinear
+    } else {
+        TextureFilter::Nearest
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct TouchSample {
@@ -462,8 +473,10 @@ fn ensure_world_textures(
     telemetry: &mut WorldTelemetry,
 ) -> Result<(), RendererFault> {
     let started = unsafe { deskkin_uptime_us() };
-    if snapshot.availability != 0 {
-        let index = usize::from(snapshot.availability.saturating_sub(1).min(2));
+    let availability = snapshot.availability & WORLD_VALUE_MASK;
+    let notice = snapshot.notice & WORLD_VALUE_MASK;
+    if availability != 0 {
+        let index = usize::from(availability.saturating_sub(1).min(2));
         if textures.availability[index].is_none() {
             telemetry.cache_misses = telemetry.cache_misses.saturating_add(1);
             let (text, color) = match index {
@@ -482,7 +495,7 @@ fn ensure_world_textures(
             telemetry.cache_hits = telemetry.cache_hits.saturating_add(1);
         }
     }
-    if snapshot.notice != 0 {
+    if notice != 0 {
         if textures.notice.is_none() {
             telemetry.cache_misses = telemetry.cache_misses.saturating_add(1);
             match capture_billboard(
@@ -503,7 +516,7 @@ fn ensure_world_textures(
             telemetry.cache_hits = telemetry.cache_hits.saturating_add(1);
         }
     }
-    for (index, needed) in [snapshot.availability == 0, snapshot.notice == 0, true]
+    for (index, needed) in [availability == 0, notice == 0, true]
         .into_iter()
         .enumerate()
     {
@@ -570,7 +583,7 @@ impl WorldMotion {
 }
 
 fn world_billboard<'a>(
-    value: ProjectedBillboard,
+    mut value: ProjectedBillboard,
     decoded: &'a DecodedLoop,
     frame_index: u8,
     textures: &'a WorldTextures,
@@ -653,13 +666,11 @@ fn world_billboard<'a>(
             stride: texture.size.width,
         }
     };
-    let (texture, region) = if value.filter == TextureFilter::Bilinear {
-        mips.map_or((texture, region), |mips| {
-            mips.select(texture, region, value.screen_rect)
-        })
-    } else {
-        (texture, region)
-    };
+    let (texture, region) = mips.map_or((texture, region), |mips| {
+        mips.select(texture, region, value.screen_rect)
+    });
+    let mip_selected = region.width != source_size.width || region.height != source_size.height;
+    value.filter = value.resolved_filter(mip_selected);
     SceneBillboard::new(value, texture, region).map_err(|_| RendererFault::RenderSkipped)
 }
 
@@ -734,10 +745,14 @@ fn render_world(
     };
     let billboards = demo_world::projected_entities(
         motion.scene,
-        (snapshot.availability != 0).then_some(TextureId(
-            10 + u16::from(snapshot.availability.saturating_sub(1)),
+        (snapshot.availability & WORLD_VALUE_MASK != 0).then_some(TextureId(
+            10 + u16::from((snapshot.availability & WORLD_VALUE_MASK).saturating_sub(1)),
         )),
-        snapshot.notice != 0,
+        snapshot.notice & WORLD_VALUE_MASK != 0,
+        demo_world::BoardFilters {
+            availability: snapshot_filter(snapshot.availability),
+            notice: snapshot_filter(snapshot.notice),
+        },
         camera,
     );
     let projection_started = unsafe { deskkin_uptime_us() };

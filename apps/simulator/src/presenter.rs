@@ -3,7 +3,7 @@ use deskkin_application::{ApplicationViews, availability, synthetic_notice};
 use crate::StatusWindow;
 
 pub(crate) fn apply_view(ui: &StatusWindow, views: ApplicationViews) {
-    let (text, color) = match views.availability {
+    let (text, color) = match views.availability.map(|board| board.content) {
         None | Some(availability::Surface::Unknown) => {
             ("Unknown", slint::Color::from_rgb_u8(243, 179, 61))
         }
@@ -14,7 +14,7 @@ pub(crate) fn apply_view(ui: &StatusWindow, views: ApplicationViews) {
             ("Unavailable", slint::Color::from_rgb_u8(242, 95, 92))
         }
     };
-    let (notice_visible, notice_text) = match views.synthetic_notice {
+    let (notice_visible, notice_text) = match views.synthetic_notice.map(|board| board.content) {
         None => (false, ""),
         Some(synthetic_notice::NoticeKind::CompositionCheck) => (true, "Deskkin notice"),
     };

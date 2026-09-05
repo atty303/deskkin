@@ -236,6 +236,8 @@ extern uint8_t deskkin_service_shell(void);
 extern uint32_t deskkin_service_sas(void);
 extern uint8_t deskkin_service_availability(void);
 extern uint8_t deskkin_service_notice(void);
+extern uint8_t deskkin_service_availability_filter(void);
+extern uint8_t deskkin_service_notice_filter(void);
 extern uint8_t deskkin_service_valid_result(void);
 extern uint32_t deskkin_service_result_attempt(void);
 extern uint16_t deskkin_nvs_last_failure(void);
@@ -326,6 +328,11 @@ static void publish_world_snapshot(void)
 	const uint32_t result_attempt = deskkin_service_result_attempt();
 	const bool benchmark_completes =
 		benchmark && world_generation + 1U - world_benchmark_started_generation >= 1200U;
+	const uint8_t availability = benchmark ? 2U : deskkin_service_availability();
+	const uint8_t notice = benchmark ? 1U : deskkin_service_notice();
+	const uint8_t availability_filter =
+		benchmark ? 0U : deskkin_service_availability_filter();
+	const uint8_t notice_filter = benchmark ? 1U : deskkin_service_notice_filter();
 	world_generation++;
 	deskkin_shared_store(&AMP_SHARED->world_publication, 0U);
 	const struct deskkin_world_snapshot snapshot = {
@@ -335,8 +342,10 @@ static void publish_world_snapshot(void)
 		.sas = deskkin_service_sas(),
 		.schema = DESKKIN_WORLD_SCHEMA,
 		.shell = deskkin_service_shell(),
-		.availability = benchmark ? 2U : deskkin_service_availability(),
-		.notice = benchmark ? 1U : deskkin_service_notice(),
+		.availability = availability |
+				(availability_filter != 0U ? DESKKIN_WORLD_FILTER_BILINEAR : 0U),
+		.notice = notice |
+			  (notice_filter != 0U ? DESKKIN_WORLD_FILTER_BILINEAR : 0U),
 	};
 	if (snapshot.shell != last_diagnostic_shell) {
 		last_diagnostic_shell = snapshot.shell;

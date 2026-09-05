@@ -77,9 +77,33 @@ impl Default for EffectBatch {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Board<T> {
+    pub content: T,
+    pub focused: bool,
+}
+
+impl<T> Board<T> {
+    #[must_use]
+    pub const fn focused(content: T) -> Self {
+        Self {
+            content,
+            focused: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn unfocused(content: T) -> Self {
+        Self {
+            content,
+            focused: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ApplicationViews {
-    pub availability: Option<availability::Surface>,
-    pub synthetic_notice: Option<synthetic_notice::NoticeKind>,
+    pub availability: Option<Board<availability::Surface>>,
+    pub synthetic_notice: Option<Board<synthetic_notice::NoticeKind>>,
 }
 
 impl ApplicationViews {
@@ -280,9 +304,16 @@ impl Application {
     }
 
     fn current_views(&self) -> ApplicationViews {
+        let notice = self.synthetic_notice.surface().map(|surface| surface.kind);
         ApplicationViews {
-            availability: self.availability.surface(),
-            synthetic_notice: self.synthetic_notice.surface().map(|surface| surface.kind),
+            availability: self.availability.surface().map(|surface| {
+                if notice.is_some() {
+                    Board::unfocused(surface)
+                } else {
+                    Board::focused(surface)
+                }
+            }),
+            synthetic_notice: notice.map(Board::focused),
         }
     }
 }
@@ -386,7 +417,7 @@ mod tests {
         assert_eq!(
             application.view(),
             ApplicationViews {
-                availability: Some(availability::Surface::Unknown),
+                availability: Some(Board::focused(availability::Surface::Unknown)),
                 synthetic_notice: None,
             }
         );
@@ -424,8 +455,10 @@ mod tests {
         assert_eq!(
             application.view(),
             ApplicationViews {
-                availability: Some(availability::Surface::Unknown),
-                synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
+                availability: Some(Board::unfocused(availability::Surface::Unknown)),
+                synthetic_notice: Some(Board::focused(
+                    synthetic_notice::NoticeKind::CompositionCheck,
+                )),
             }
         );
 
@@ -513,8 +546,10 @@ mod tests {
         assert_eq!(
             application.view(),
             ApplicationViews {
-                availability: Some(availability::Surface::Unavailable),
-                synthetic_notice: Some(synthetic_notice::NoticeKind::CompositionCheck),
+                availability: Some(Board::unfocused(availability::Surface::Unavailable)),
+                synthetic_notice: Some(Board::focused(
+                    synthetic_notice::NoticeKind::CompositionCheck,
+                )),
             }
         );
         application
@@ -525,7 +560,7 @@ mod tests {
         assert_eq!(
             application.view(),
             ApplicationViews {
-                availability: Some(availability::Surface::Unavailable),
+                availability: Some(Board::focused(availability::Surface::Unavailable)),
                 synthetic_notice: None,
             }
         );
@@ -567,7 +602,7 @@ mod tests {
         assert_eq!(
             application.view(),
             ApplicationViews {
-                availability: Some(availability::Surface::Unknown),
+                availability: Some(Board::focused(availability::Surface::Unknown)),
                 synthetic_notice: None,
             }
         );

@@ -18,6 +18,7 @@ const STATUS_RESPONSE_SIZE: usize = 236;
 static UI_ACTION: AtomicU8 = AtomicU8::new(0);
 static UI_SAS: AtomicU32 = AtomicU32::new(u32::MAX);
 static UI_VIEW: AtomicU8 = AtomicU8::new(0);
+static UI_AVAILABILITY_FILTER: AtomicU8 = AtomicU8::new(1);
 static UI_SHELL: AtomicU8 = AtomicU8::new(0);
 static UI_FRAME_DIGEST: AtomicU32 = AtomicU32::new(0);
 static VALID_RESULT: AtomicU8 = AtomicU8::new(0);
@@ -1058,12 +1059,21 @@ fn availability_loop(
                         RESULT_ATTEMPT
                             .store(RUN_ATTEMPT.load(Ordering::Acquire), Ordering::Release);
                         UI_VIEW.store(
-                            match transition.view.availability {
+                            match transition.view.availability.map(|board| board.content) {
                                 None
                                 | Some(deskkin_application::availability::Surface::Unknown) => 0,
                                 Some(deskkin_application::availability::Surface::Available) => 1,
                                 Some(deskkin_application::availability::Surface::Unavailable) => 2,
                             },
+                            Ordering::Release,
+                        );
+                        UI_AVAILABILITY_FILTER.store(
+                            u8::from(
+                                transition
+                                    .view
+                                    .availability
+                                    .is_some_and(|board| board.focused),
+                            ),
                             Ordering::Release,
                         );
                         VALID_RESULT.store(1, Ordering::Release);
@@ -1661,7 +1671,17 @@ extern "C" fn deskkin_service_availability() -> u8 {
 }
 
 #[no_mangle]
+extern "C" fn deskkin_service_availability_filter() -> u8 {
+    UI_AVAILABILITY_FILTER.load(Ordering::Acquire).min(1)
+}
+
+#[no_mangle]
 extern "C" fn deskkin_service_notice() -> u8 {
+    0
+}
+
+#[no_mangle]
+extern "C" fn deskkin_service_notice_filter() -> u8 {
     0
 }
 

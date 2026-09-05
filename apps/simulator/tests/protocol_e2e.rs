@@ -2,8 +2,8 @@ use std::fs;
 use std::thread;
 
 use deskkin_application::{
-    Application, ApplicationEffectId, ApplicationInput, ApplicationViews, FeatureId, Lifecycle,
-    LocalEffectId,
+    Application, ApplicationEffectId, ApplicationInput, ApplicationViews, Board, FeatureId,
+    Lifecycle, LocalEffectId,
     availability::{
         self, Availability, Input as AvailabilityInput, ReadCompleted, ReadError, RefreshDue,
         TimerArmCompleted,
@@ -64,7 +64,7 @@ fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     assert_eq!(
         application.view(),
         ApplicationViews {
-            availability: Some(availability::Surface::Available),
+            availability: Some(Board::focused(availability::Surface::Available)),
             synthetic_notice: None,
         }
     );
@@ -81,7 +81,7 @@ fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     assert_eq!(
         application.view(),
         ApplicationViews {
-            availability: Some(availability::Surface::Unknown),
+            availability: Some(Board::focused(availability::Surface::Unknown)),
             synthetic_notice: None,
         }
     );
@@ -112,7 +112,7 @@ fn paired_loopback_result_reaches_core_and_disconnect_invalidates_view() {
     assert_eq!(
         application.view(),
         ApplicationViews {
-            availability: Some(availability::Surface::Available),
+            availability: Some(Board::focused(availability::Surface::Available)),
             synthetic_notice: None,
         }
     );

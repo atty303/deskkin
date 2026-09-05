@@ -60,7 +60,9 @@ connectors, or platform APIs.
 compile-time feature registry, registry-order lifecycle broadcast, namespaced
 effect identities, exact completion routing, and the bounded `ApplicationViews`
 snapshot. Availability and synthetic notice are independent optional members,
-so both can remain present without a surface arbiter. Rejected input, capacity
+so both can remain present. Each member is an application-owned board carrying
+its semantic content and focus state. Composition gives a visible notice focus
+and restores focus to Availability when the notice clears. Rejected input, capacity
 exhaustion, and identity exhaustion are transactional and publish no partial
 state or effect.
 
@@ -87,9 +89,11 @@ In paired mode, Availability and CompositionCheck are rendered from a reusable
 movement never redraws those templates. A custom renderer replaces solid clear
 with a shared RGB565 night-sky/ground gradient,
 projects and sorts billboards, and writes clipped scaled pixels directly into
-the final RGB565 render target (full frame or screen band). Information textures use fixed-point
-bilinear sampling over cached premultiplied box-filtered mip levels; Character
-and decoration sprites use nearest sampling
+the final RGB565 render target (full frame or screen band). Application adapters
+map board focus to a concrete near-distance filter before entering the renderer:
+focused boards use fixed-point bilinear and other boards use nearest. Cached
+premultiplied box-filtered mip levels use nearest at farther distances regardless
+of the near-distance choice. Character and decoration sprites use nearest sampling
 and A8 blending. The cylinder is only a coordinate model: no cylinder, ring,
 floor geometry, track, tangent-facing geometry, mesh, lighting, or z-buffer is drawn.
 The rasterizer preserves exact Q16 sampling with quotient/remainder stepping,
@@ -218,7 +222,8 @@ and resuming it before releasing the guard. APPCPU never initiates flash work.
 
 AMP exchanges generation-published bounded values: stable shell/SAS/view/pose
 snapshots, a touch ring with drop count, a UI command slot, and a latest target
-yaw mailbox. Zero publication marks a payload unstable; readers distinguish
+yaw mailbox. The view snapshot carries the concrete near-distance filter rather
+than application focus. Zero publication marks a payload unstable; readers distinguish
 unstable generations, unknown schemas, and invalid semantics. Pixel content is
 never a message payload and SPI2 has one CPU owner. The fixed 60-second world
 benchmark starts the same paired path, requests one unwrapped camera turn, keeps
